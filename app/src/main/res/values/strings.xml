@@ -9,11 +9,11 @@
     <string name="remove_app">Remove</string>
     <string name="app_subtitle">Version %1$s, needs iOS %2$s</string>
     <string name="status_starting">Starting the app…</string>
-    <string name="status_running">Running</string>
     <string name="status_stopped_missing">Stopped: the app needs something the runner does not implement yet.</string>
     <string name="status_crashed">The app crashed. The log below shows where.</string>
     <string name="status_load_failed">This app could not be loaded.</string>
-    <string name="status_exited">The app has exited.</string>
+    <string name="status_exited">The app has closed.</string>
     <string name="run_again">Run again</string>
-    <string name="stop">Stop</string>
+    <string name="close">Close</string>
+    <string name="no_browser">No app on this phone can open %1$s</string>
 </resources>

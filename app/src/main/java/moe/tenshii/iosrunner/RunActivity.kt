@@ -5,8 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.TypedValue
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -16,21 +14,12 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
+/** Launches the guest, and shows why it stopped when control comes back here. */
 class RunActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var log: TextView
-    private lateinit var logScroll: ScrollView
-    private lateinit var action: Button
     private lateinit var app: InstalledApp
-    private val handler = Handler(Looper.getMainLooper())
-    private var finished = false
-
-    private val poll = object : Runnable {
-        override fun run() {
-            render()
-            if (!finished) handler.postDelayed(this, POLL_INTERVAL_MS)
-        }
-    }
+    private var launched = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,10 +36,6 @@ class RunActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextIsSelectable(true)
         }
-        logScroll = ScrollView(this).apply {
-            addView(HorizontalScrollView(context).apply { addView(log) })
-        }
-        action = Button(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val gutter = dp(16)
@@ -63,63 +48,45 @@ class RunActivity : Activity() {
                 topMargin = dp(8)
                 bottomMargin = dp(16)
             })
-            addView(logScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-            addView(action, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(ScrollView(context).apply {
+                addView(HorizontalScrollView(context).apply { addView(log) })
+            }, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(Button(context).apply {
+                setText(R.string.run_again)
+                setOnClickListener { launch() }
+            }, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
         applySystemBarInsets(root)
         setContentView(root)
         launch()
     }
 
-    override fun onDestroy() {
-        handler.removeCallbacks(poll)
-        if (::app.isInitialized && !finished) EngineService.stop(this)
-        super.onDestroy()
+    override fun onResume() {
+        super.onResume()
+        if (launched) render()
     }
 
     private fun launch() {
-        finished = false
-        EngineService.logFile(this).delete()
-        EngineService.start(this, app)
-        handler.removeCallbacks(poll)
-        handler.post(poll)
+        launched = true
+        GuestActivity.logFile(this).delete()
+        startActivity(GuestActivity.intent(this, app))
     }
 
     private fun render() {
-        val text = EngineService.logFile(this).takeIf { it.isFile }?.readText().orEmpty()
+        val text = GuestActivity.logFile(this).takeIf { it.isFile }?.readText().orEmpty()
         log.text = text
-        val outcome = when {
-            text.contains("LOAD FAILED") -> R.string.status_load_failed
-            text.contains("\nSTOP:") -> R.string.status_stopped_missing
-            text.contains("\nCRASH:") -> R.string.status_crashed
-            text.contains("\nEXIT:") -> R.string.status_exited
-            else -> null
-        }
-        if (outcome != null) {
-            finished = true
-            status.setText(outcome)
-            action.setText(R.string.run_again)
-            action.setOnClickListener { recreateEngine() }
-        } else {
-            status.setText(if (text.isEmpty()) R.string.status_starting else R.string.status_running)
-            action.setText(R.string.stop)
-            action.setOnClickListener {
-                EngineService.stop(this)
-                finish()
-            }
-        }
-        logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
-    }
-
-    private fun recreateEngine() {
-        // The previous guest may still be exiting; the service only starts once per process.
-        handler.postDelayed({ launch() }, RESTART_DELAY_MS)
+        status.setText(
+            when {
+                text.contains("LOAD FAILED") -> R.string.status_load_failed
+                text.contains("\nSTOP:") -> R.string.status_stopped_missing
+                text.contains("\nCRASH:") -> R.string.status_crashed
+                else -> R.string.status_exited
+            },
+        )
     }
 
     companion object {
         private const val EXTRA_APP = "app"
-        private const val POLL_INTERVAL_MS = 300L
-        private const val RESTART_DELAY_MS = 500L
 
         fun intent(context: Context, app: InstalledApp): Intent =
             Intent(context, RunActivity::class.java).putExtra(EXTRA_APP, app.directory.name)

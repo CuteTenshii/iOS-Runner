@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="false"
         android:allowNativeHeapPointerTagging="false"
@@ -32,8 +35,8 @@
         <activity
             android:name=".RunActivity"
             android:exported="false" />
-        <service
-            android:name=".EngineService"
+        <activity
+            android:name=".GuestActivity"
             android:exported="false"
             android:process=":engine" />
     </application>
