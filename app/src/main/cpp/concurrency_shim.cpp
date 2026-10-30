@@ -72,21 +72,30 @@ struct ContinuationContext {
     const void* resume;
     uint64_t state;
     void* error;
-    void* result;
 };
 
 constexpr uint64_t kContinuationAwaited = 1;
 constexpr uint64_t kContinuationResumed = 2;
 
+// The guest reaches the context through the returned task, at the offset of AsyncTask::ResumeContext.
+constexpr size_t kTaskResumeContextOffset = 0x40;
+constexpr size_t kContinuationTaskBytes = kTaskResumeContextOffset + sizeof(void*);
+
 void* continuation_init(ContinuationContext* context, size_t) {
     context->state = 0;
     context->error = nullptr;
-    return context;
+    auto* task = static_cast<char*>(calloc(1, kContinuationTaskBytes));
+    memcpy(task + kTaskResumeContextOffset, &context, sizeof context);
+    return task;
 }
 
-void continuation_resume(ContinuationContext* context) {
+void continuation_resume(char* task) {
+    ContinuationContext* context;
+    memcpy(&context, task + kTaskResumeContextOffset, sizeof context);
+    free(task);
     if (context->state == kContinuationAwaited) {
-        ready_tasks().push_back({context->resume, nullptr, nullptr, context->parent, true});
+        // The resume function loads its own frame through the context's parent word.
+        ready_tasks().push_back({context->resume, nullptr, nullptr, context, true});
     } else {
         context->state = kContinuationResumed;
     }
@@ -171,7 +180,7 @@ __asm__(
     "  str x9, [x0, #16]\n"
     "  ret\n"
     "1:\n"
-    "  ldr x22, [x0]\n"
+    "  mov x22, x0\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
     ".globl rt_resume_task\n"
