@@ -706,6 +706,8 @@ std::string enum_case_name(const void* value, const void* type) {
     return name != nullptr ? name : "";
 }
 
+constexpr size_t kValueWitnessStrideOffset = 72;
+
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
     std::string text;
@@ -715,6 +717,21 @@ SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) 
     else text = enum_case_name(value, type);
     if (text.empty() && type != type_system_symbol("$sSSN")) text = "(value)";
     *stream = swift_string_from_utf8(swift_string_to_utf8(*stream) + text);
+}
+
+SWIFTCC SwiftString array_description(void* storage, void* element_type) {
+    char* elements;
+    const size_t count = array_storage_contents(storage, element_type, &elements);
+    const size_t stride = *reinterpret_cast<const size_t*>(reinterpret_cast<const char*>(witnesses_of(element_type)) + kValueWitnessStrideOffset);
+    const bool strings = element_type == type_system_symbol("$sSSN");
+    std::string text = "[";
+    for (size_t i = 0; i < count; ++i) {
+        if (i != 0) text += ", ";
+        SwiftString part = swift_string_from_utf8("");
+        print_unlocked(elements + i * stride, &part, element_type);
+        text += strings ? "\"" + swift_string_to_utf8(part) + "\"" : swift_string_to_utf8(part);
+    }
+    return swift_string_from_utf8(text + "]");
 }
 
 // Array<AnyObject> entry points the compiler specialized: elements are single retained references.
@@ -803,6 +820,7 @@ void* stdlib_symbol(std::string_view name) {
         {"$sSa37_appendElementAssumeUniqueAndCapacity_03newB0ySi_xntFyXl_Ts5", reinterpret_cast<void*>(object_array_append)},
         {"$sSQ2eeoiySbx_xtFZTj", reinterpret_cast<void*>(equatable_equal)},
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
+        {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
         {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
         {"$ss11_StringGutsV4growyySiF", reinterpret_cast<void*>(string_guts_grow)},
