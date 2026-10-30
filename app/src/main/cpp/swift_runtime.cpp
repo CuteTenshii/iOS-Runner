@@ -32,7 +32,8 @@ struct HeapObject {
     std::atomic<uint64_t> references;
 };
 
-using Destroyer = void (*)(HeapObject*);
+// Swift destructors take self in x20, this runtime's in x0, so the object goes in both.
+extern "C" void rt_call_destroyer(void* destroyer, void* object);
 
 // Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
 inline bool is_not_object(const void* raw) {
@@ -56,7 +57,7 @@ void release_object(void* raw) {
     if (object->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // Class and box metadata keep their destroyer one word before the value witnesses.
         auto** metadata = static_cast<void**>(object->metadata);
-        reinterpret_cast<Destroyer>(metadata[-2])(object);
+        rt_call_destroyer(metadata[-2], object);
     }
 }
 
@@ -408,6 +409,18 @@ __asm__(
     ".globl rt_swiftui_app_main_entry\n"
     "rt_swiftui_app_main_entry:\n"
     "  b rt_app_main\n"
+    ".globl rt_call_destroyer\n"
+    "rt_call_destroyer:\n"
+    "  stp x29, x30, [sp, #-32]!\n"
+    "  mov x29, sp\n"
+    "  str x20, [sp, #16]\n"
+    "  mov x16, x0\n"
+    "  mov x0, x1\n"
+    "  mov x20, x1\n"
+    "  blr x16\n"
+    "  ldr x20, [sp, #16]\n"
+    "  ldp x29, x30, [sp], #32\n"
+    "  ret\n"
     // Swift's self and indirect-result registers cannot be set from C++.
     ".globl rt_call_witness\n"
     "rt_call_witness:\n"

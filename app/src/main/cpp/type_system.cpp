@@ -107,7 +107,7 @@ struct HeapObject {
     std::atomic<uint64_t> references;
 };
 
-using Destroyer = void (*)(HeapObject*);
+extern "C" void rt_call_destroyer(void* destroyer, void* object);
 
 // Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
 inline bool is_not_object(const void* raw) {
@@ -126,7 +126,7 @@ void release(void* raw) {
     auto* object = static_cast<HeapObject*>(raw);
     if (object->references.load(std::memory_order_relaxed) & kImmortal) return;
     if (object->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        reinterpret_cast<Destroyer>(static_cast<void**>(object->metadata)[-2])(object);
+        rt_call_destroyer(static_cast<void**>(object->metadata)[-2], object);
     }
 }
 
