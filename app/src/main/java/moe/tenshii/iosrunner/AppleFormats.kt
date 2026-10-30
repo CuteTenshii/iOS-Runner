@@ -106,11 +106,16 @@ object PropertyList {
 /** Decodes app icons, including the CgBI PNG variant Xcode produces, which BitmapFactory rejects. */
 object AppleIcon {
     private const val SIGNATURE_LENGTH = 8
+    private const val CHUNK_TYPE_OFFSET = 12
 
     fun decode(bytes: ByteArray): Bitmap? {
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.let { return it }
-        return runCatching { decodeCgbi(bytes) }.getOrNull()
+        // BitmapFactory returns a blank bitmap for CgBI instead of failing, so it must not see these files.
+        if (isCgbi(bytes)) return runCatching { decodeCgbi(bytes) }.getOrNull()
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     }
+
+    private fun isCgbi(bytes: ByteArray): Boolean =
+        bytes.size > CHUNK_TYPE_OFFSET + 4 && String(bytes, CHUNK_TYPE_OFFSET, 4, Charsets.US_ASCII) == "CgBI"
 
     private fun decodeCgbi(bytes: ByteArray): Bitmap? {
         val buffer = ByteBuffer.wrap(bytes)

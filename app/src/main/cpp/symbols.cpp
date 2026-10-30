@@ -9,6 +9,7 @@
 
 #include "engine.h"
 #include "swift_runtime.h"
+#include "swiftui_shim.h"
 #include "type_system.h"
 
 extern "C" {
@@ -54,6 +55,7 @@ void* resolve_symbol(const char* name) {
     const auto found = table.find(name);
     if (found != table.end()) return found->second;
     if (void* symbol = swift_runtime_symbol(name)) return symbol;
+    if (void* symbol = swiftui_symbol(name)) return symbol;
     return type_system_symbol(name);
 }
 

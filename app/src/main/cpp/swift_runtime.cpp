@@ -13,6 +13,8 @@
 #include <utility>
 
 #include "engine.h"
+#include "macho.h"
+#include "swiftui_shim.h"
 
 namespace {
 
@@ -20,7 +22,8 @@ constexpr uint64_t kImmortal = 1ULL << 63;
 // Swift keeps its discriminator bits in the top nibble of bridged references.
 constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
-constexpr size_t kFallbackBodySize = 64 * 1024;
+constexpr size_t kBodyBufferSize = 64 * 1024;
+constexpr size_t kForeignWitnessTableWords = 32;
 
 struct HeapObject {
     void* metadata;
@@ -100,15 +103,6 @@ ResilientWitnesses resilient_witnesses(const char* conformance) {
     return result;
 }
 
-const void* find_witness(const char* conformance, const void* requirement) {
-    const auto witnesses = resilient_witnesses(conformance);
-    for (uint32_t i = 0; i < witnesses.count; ++i) {
-        const char* entry = witnesses.entries + i * 8;
-        if (relative_indirectable(entry) == requirement) return relative_direct(entry + 4);
-    }
-    return nullptr;
-}
-
 extern "C" {
 
 void* rt_swift_getWitnessTable(const char* conformance, void* type, void* arguments) {
@@ -117,6 +111,13 @@ void* rt_swift_getWitnessTable(const char* conformance, void* type, void* argume
     const std::lock_guard guard(lock);
     const auto key = std::make_pair(static_cast<const void*>(conformance), type);
     if (const auto found = cache.find(key); found != cache.end()) return found->second;
+
+    if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(conformance)) != nullptr) {
+        auto** table = static_cast<void**>(calloc(kForeignWitnessTableWords, sizeof(void*)));
+        table[0] = const_cast<char*>(conformance);
+        cache[key] = table;
+        return table;
+    }
 
     uint32_t flags;
     memcpy(&flags, conformance + 12, sizeof flags);
@@ -201,7 +202,6 @@ void* rt_identity(void* value) { return value; }
 
 void rt_app_main(void* metadata, void** witness_table);
 void rt_swiftui_app_main_entry();
-void* rt_call_witness(const void* function, void* out, void* self, void* type, void* table);
 void* rt_swift_retain(void* object) { return retain_object(object); }
 void rt_swift_release(void* object) { release_object(object); }
 }
@@ -372,6 +372,15 @@ DECLARE_THUNK_PAIR(x1) DECLARE_THUNK_PAIR(x2) DECLARE_THUNK_PAIR(x8) DECLARE_THU
 DECLARE_THUNK_PAIR(x19) DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
 DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
 
+const void* find_witness(const char* conformance, const void* requirement) {
+    const auto witnesses = resilient_witnesses(conformance);
+    for (uint32_t i = 0; i < witnesses.count; ++i) {
+        const char* entry = witnesses.entries + i * 8;
+        if (relative_indirectable(entry) == requirement) return relative_direct(entry + 4);
+    }
+    return nullptr;
+}
+
 extern "C" void rt_app_main(void* metadata, void** witness_table) {
     engine_log("REACHED: SwiftUI App.main()");
     const auto* conformance = static_cast<const char*>(witness_table[0]);
@@ -391,11 +400,11 @@ extern "C" void rt_app_main(void* metadata, void** witness_table) {
     rt_call_witness(init, app, metadata, metadata, witness_table);
     engine_log("GUEST: App.init() returned");
 
-    // Scene layouts belong to this runtime's SwiftUI, which does not define WindowGroup yet.
-    void* scene = calloc(1, kFallbackBodySize);
+    void* scene = calloc(1, kBodyBufferSize);
     engine_log("GUEST: calling App.body");
     rt_call_witness(body, scene, app, metadata, witness_table);
     engine_log("GUEST: App.body returned");
+    swiftui_run_scene(scene);
 }
 
 void* swift_runtime_symbol(std::string_view name) {

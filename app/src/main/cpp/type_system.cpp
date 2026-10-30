@@ -35,6 +35,9 @@ constexpr uint32_t kPointerExtraInhabitants = 0x1000;
 constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr uint64_t kImmortal = 1ULL << 63;
+constexpr uint32_t kDescriptorGeneric = 0x80;
+constexpr size_t kGenericHeaderSize = 8;
+constexpr size_t kGenericRequirementSize = 12;
 
 struct ValueWitnessTable {
     void* (*initialize_buffer_with_copy)(void*, void*, void*);
@@ -325,6 +328,7 @@ void witness_store_tag(void* value, uint32_t tag, uint32_t empty_cases, void* ty
 
 std::recursive_mutex g_types_lock;
 std::map<std::string, Metadata*> g_named_types;
+std::map<const void*, const char*> g_foreign_names;
 
 Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector<void*>& arguments, Layout* layout,
                         size_t size, size_t alignment, uint32_t extra_inhabitants) {
@@ -449,8 +453,12 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
     std::string key = symbol;
     for (const void* argument : arguments) key += pointer_key(argument);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
-    return named_type(key, kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize,
-                      kPointerExtraInhabitants, arguments);
+    // Text is frozen, so the app's compiled code passes its four words inline.
+    Metadata* metadata = symbol == "_$s7SwiftUI4TextVMn"
+        ? named_type(key, kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants)
+        : named_type(key, kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants, arguments);
+    g_foreign_names[metadata] = strdup(symbol.c_str());
+    return metadata;
 }
 
 struct NominalReference {
@@ -459,7 +467,7 @@ struct NominalReference {
 };
 
 struct Node {
-    enum class Tag { Type, Nominal, Protocol, ListMarker } tag = Tag::Type;
+    enum class Tag { Type, Nominal, Protocol, ListMarker, FirstElement } tag = Tag::Type;
     Metadata* type = nullptr;
     NominalReference nominal;
 };
@@ -483,11 +491,11 @@ Metadata* metadata_for_descriptor(const NominalReference& nominal, const std::ve
 
 class MangledName {
 public:
-    MangledName(const char* text, size_t length, void* const* generics) : cursor_(text), end_(text + length), start_(text), generics_(generics) {}
+    MangledName(const char* text, size_t length, void* const* generics) : cursor_(text), end_(text + length), generics_(generics) {}
 
     Metadata* parse() {
         while (cursor_ < end_ && failure_.empty()) step();
-        if (failure_.empty() && (stack_.size() != 1 || stack_.back().tag == Node::Tag::ListMarker)) fail("unbalanced type stack");
+        if (failure_.empty() && (stack_.size() != 1 || stack_.back().tag == Node::Tag::ListMarker || stack_.back().tag == Node::Tag::FirstElement)) fail("unbalanced type stack");
         if (!failure_.empty()) return nullptr;
         return as_type(stack_.back());
     }
@@ -597,16 +605,20 @@ private:
         fail(std::string("unknown standard type S") + code);
     }
 
-    void bound_generic() {
+    std::vector<void*> pop_generic_arguments() {
         std::vector<void*> arguments;
         while (!stack_.empty() && stack_.back().tag != Node::Tag::ListMarker) {
-            if (stack_.size() >= 2 && stack_[stack_.size() - 2].tag == Node::Tag::ListMarker) {
-                arguments.insert(arguments.begin(), as_type(pop()));
-                break;
-            }
-            arguments.insert(arguments.begin(), as_type(pop()));
+            Node top = pop();
+            if (top.tag == Node::Tag::FirstElement) continue;
+            arguments.insert(arguments.begin(), as_type(top));
         }
-        pop();
+        if (stack_.empty()) fail("generic arguments without a list start");
+        else pop();
+        return arguments;
+    }
+
+    void bound_generic() {
+        std::vector<void*> arguments = pop_generic_arguments();
         Node base = pop();
         if (base.tag != Node::Tag::Nominal) {
             fail("bound generic base is not a nominal type");
@@ -627,11 +639,60 @@ private:
 
     void tuple() {
         std::vector<Metadata*> elements;
-        while (!stack_.empty() && stack_.back().tag != Node::Tag::ListMarker) {
-            elements.insert(elements.begin(), as_type(pop()));
+        while (!stack_.empty()) {
+            Node top = pop();
+            if (top.tag == Node::Tag::FirstElement) {
+                elements.insert(elements.begin(), as_type(pop()));
+                break;
+            }
+            elements.insert(elements.begin(), as_type(top));
         }
-        pop();
         push_type(tuple_of(elements));
+    }
+
+    void opaque_type() {
+        if (cursor_ >= end_) { fail("truncated Q operator"); return; }
+        const char variety = *cursor_++;
+        // A pack is carried as its tuple, whose layout is all the runtime needs from it.
+        if (variety == 'P') return;
+        if (variety != 'o') {
+            fail(std::string("unsupported Q operator ") + variety);
+            return;
+        }
+        const uint64_t ordinal = cursor_ < end_ && *cursor_ == '_' ? 0 : read_natural() + 1;
+        if (cursor_ >= end_ || *cursor_++ != '_') { fail("bad opaque type ordinal"); return; }
+        std::vector<void*> arguments = pop_generic_arguments();
+        Node base = pop();
+        if (base.tag != Node::Tag::Nominal) { fail("opaque type without a descriptor"); return; }
+
+        Node node;
+        if (base.nominal.foreign_symbol != nullptr) {
+            node.type = foreign_nominal(base.nominal.foreign_symbol, arguments);
+        } else {
+            const auto* descriptor = static_cast<const char*>(base.nominal.descriptor);
+            uint32_t flags;
+            memcpy(&flags, descriptor, sizeof flags);
+            const char* trailing = descriptor + 2 * sizeof(int32_t);
+            if (flags & kDescriptorGeneric) {
+                uint16_t params, requirements;
+                memcpy(&params, trailing, sizeof params);
+                memcpy(&requirements, trailing + 2, sizeof requirements);
+                trailing += kGenericHeaderSize + ((params + 3u) & ~3u) + requirements * kGenericRequirementSize;
+            }
+            int32_t offset;
+            memcpy(&offset, trailing + ordinal * sizeof(int32_t), sizeof offset);
+            const char* underlying = trailing + ordinal * sizeof(int32_t) + offset;
+            size_t length = 0;
+            while (underlying[length] != 0) {
+                const auto byte = static_cast<uint8_t>(underlying[length]);
+                length += byte >= 1 && byte <= 0x17 ? 5 : 1;
+            }
+            MangledName nested(underlying, length, arguments.data());
+            node.type = nested.parse();
+            if (node.type == nullptr) { fail("opaque underlying type: " + nested.failure()); return; }
+        }
+        stack_.push_back(node);
+        substitute(node);
     }
 
     void implementation_function() {
@@ -701,14 +762,10 @@ private:
                     Node top = pop();
                     if (top.tag == Node::Tag::Nominal) top.tag = Node::Tag::Protocol;
                     push_type(as_type(top));
-                } else if (stack_.size() == 1 || stack_[stack_.size() - 2].tag != Node::Tag::ListMarker) {
-                    // Marks the first tuple element: tuples carry no opening `y`, so insert it under the element.
-                    if (stack_.empty()) { fail("list separator on empty stack"); return; }
-                    Node element = pop();
+                } else {
                     Node marker;
-                    marker.tag = Node::Tag::ListMarker;
+                    marker.tag = Node::Tag::FirstElement;
                     stack_.push_back(marker);
-                    stack_.push_back(element);
                 }
                 return;
             case 'x':
@@ -733,6 +790,9 @@ private:
                 return;
             case 'I':
                 implementation_function();
+                return;
+            case 'Q':
+                opaque_type();
                 return;
             default:
                 fail(std::string("unsupported operator '") + code + "'");
@@ -796,7 +856,6 @@ private:
 
     const char* cursor_;
     const char* end_;
-    const char* start_;
     void* const* generics_;
     std::vector<Node> stack_;
     std::vector<Node> substitutions_;
@@ -1027,4 +1086,19 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_updateClassMetadata2") return reinterpret_cast<void*>(rt_updateClassMetadata2);
     if (name.size() > 4 && name.substr(0, 2) == "$s" && name.substr(name.size() - 2) == "Ma") return make_accessor_stub(std::string(name));
     return nullptr;
+}
+
+const char* foreign_type_name(const void* metadata) {
+    const std::lock_guard guard(g_types_lock);
+    const auto found = g_foreign_names.find(metadata);
+    return found == g_foreign_names.end() ? nullptr : found->second;
+}
+
+void* resolve_mangled_type(const char* name, void* const* generics) {
+    size_t length = 0;
+    while (name[length] != 0) {
+        const auto byte = static_cast<uint8_t>(name[length]);
+        length += byte >= 1 && byte <= 0x17 ? 5 : 1;
+    }
+    return rt_getTypeByMangledNameInContext2(name, length, nullptr, generics);
 }
