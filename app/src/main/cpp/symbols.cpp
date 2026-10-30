@@ -10,6 +10,7 @@
 #include "engine.h"
 #include "concurrency_shim.h"
 #include "codable_shim.h"
+#include "combine_shim.h"
 #include "coredata_shim.h"
 #include "foundation_shim.h"
 #include "regex_shim.h"
@@ -141,6 +142,7 @@ void* resolve_symbol(const char* name) {
     if (void* symbol = foundation_symbol(name)) return symbol;
     if (void* symbol = codable_symbol(name)) return symbol;
     if (void* symbol = coredata_symbol(name)) return symbol;
+    if (void* symbol = combine_symbol(name)) return symbol;
     if (void* symbol = regex_symbol(name)) return symbol;
     if (void* symbol = stdlib_symbol(name)) return symbol;
     if (void* symbol = concurrency_symbol(name)) return symbol;
