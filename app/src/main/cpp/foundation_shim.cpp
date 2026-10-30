@@ -504,9 +504,82 @@ void* make_error(const std::string& message, int64_t code) {
     return box;
 }
 
-SWIFTCC SwiftString error_localized_description(const void* const* self_error) {
-    const auto* box = static_cast<const ErrorBox*>(*self_error);
-    return swift_string_from_utf8(*box->message);
+// Errors the app throws itself: a box with the value's type and Error witness table, then the value.
+struct GuestErrorBox {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    void* type;
+    void* witnesses;
+};
+
+constexpr size_t kGuestErrorValueOffset = sizeof(GuestErrorBox);
+constexpr size_t kWitnessDestroyOffset = sizeof(void*);
+constexpr size_t kWitnessSizeOffset = 0x40;
+constexpr size_t kWitnessFlagsOffset = 0x50;
+constexpr size_t kWitnessInitTakeOffset = 4 * sizeof(void*);
+constexpr size_t kWitnessInitCopyOffset = 2 * sizeof(void*);
+
+const char* value_witnesses(void* type) { return static_cast<const char*>(static_cast<void**>(type)[-1]); }
+
+size_t guest_error_value_offset(void* type) {
+    uint32_t flags;
+    memcpy(&flags, value_witnesses(type) + kWitnessFlagsOffset, sizeof flags);
+    const size_t mask = flags & 0xff;
+    return (kGuestErrorValueOffset + mask) & ~mask;
+}
+
+void destroy_guest_error(void* raw) {
+    auto* box = static_cast<GuestErrorBox*>(raw);
+    void (*destroy)(void*, void*);
+    memcpy(&destroy, value_witnesses(box->type) + kWitnessDestroyOffset, sizeof destroy);
+    destroy(static_cast<char*>(raw) + guest_error_value_offset(box->type), box->type);
+    free(raw);
+}
+
+const StorageMetadata kGuestErrorMetadata = {destroy_guest_error, nullptr, 0};
+
+struct AllocatedError {
+    void* box;
+    void* value;
+};
+
+SWIFTCC AllocatedError swift_alloc_error(void* type, void* witnesses, void* initial, bool is_take) {
+    size_t size;
+    memcpy(&size, value_witnesses(type) + kWitnessSizeOffset, sizeof size);
+    const size_t offset = guest_error_value_offset(type);
+    auto* box = static_cast<GuestErrorBox*>(calloc(1, offset + size + 1));
+    box->metadata = const_cast<uint64_t*>(&kGuestErrorMetadata.kind);
+    new (&box->references) std::atomic<uint64_t>(1);
+    box->type = type;
+    box->witnesses = witnesses;
+    char* value = reinterpret_cast<char*>(box) + offset;
+    if (initial != nullptr) {
+        void* (*initialize)(void*, void*, void*);
+        memcpy(&initialize, value_witnesses(type) + (is_take ? kWitnessInitTakeOffset : kWitnessInitCopyOffset), sizeof initialize);
+        initialize(value, initial, type);
+    }
+    return {box, value};
+}
+
+struct ErrorValue {
+    void* value;
+    void* type;
+    void* witnesses;
+};
+
+// Runtime errors report a null type, which localizedDescription uses to tell them apart.
+void swift_get_error_value(void* error, void**, ErrorValue* out) {
+    auto* box = static_cast<GuestErrorBox*>(error);
+    if (box->metadata == &kGuestErrorMetadata.kind) {
+        *out = {reinterpret_cast<char*>(box) + guest_error_value_offset(box->type), box->type, box->witnesses};
+    } else {
+        *out = {error, nullptr, nullptr};
+    }
+}
+
+SWIFTCC SwiftString error_localized_description(void* type, void*, __attribute__((swift_context)) void* value) {
+    if (type == nullptr) return swift_string_from_utf8(*static_cast<ErrorBox*>(value)->message);
+    return swift_string_from_utf8("The operation could not be completed.");
 }
 
 SWIFTCC DataValue data_contents_of(URLBox** url, uint64_t, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
@@ -743,6 +816,8 @@ void* foundation_symbol(std::string_view name) {
         {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
         {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
+        {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
+        {"swift_getErrorValue", reinterpret_cast<void*>(swift_get_error_value)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},
