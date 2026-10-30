@@ -121,6 +121,43 @@ SWIFTCC void lazy_state_wrapped_value_get(SWIFT_OUT void* out, __attribute__((sw
     witnesses_of(state->type)->initialize_with_copy(out, state_value(state), state->type);
 }
 
+// Framework constants are tagged immediates: the high bit makes retain and release ignore them.
+constexpr uint64_t kImmediate = 1ULL << 63;
+constexpr uint64_t kFontBold = 1ULL << 16;
+constexpr uint64_t kFontMonospaced = 1ULL << 17;
+
+enum ConstantId : uint64_t {
+    kFontBody = 1, kFontCaption, kFontCaption2, kFontFootnote,
+    kColorAccent, kColorRed, kColorGreen, kColorSecondary,
+    kStyleSecondary, kStyleQuaternary,
+    kAnimationDefault, kButtonRoleDestructive, kToolbarTopBarTrailing,
+    kAlignLeading, kAlignTrailing, kAlignCenter, kAlignBottom,
+};
+
+template <uint64_t Value>
+SWIFTCC uint64_t constant_getter() { return kImmediate | Value; }
+
+struct AlignmentPair {
+    uint64_t horizontal;
+    uint64_t vertical;
+};
+
+template <uint64_t Horizontal, uint64_t Vertical>
+SWIFTCC AlignmentPair alignment_getter() { return {kImmediate | Horizontal, kImmediate | Vertical}; }
+
+template <uint8_t Mask>
+SWIFTCC uint8_t edge_set_getter() { return Mask; }
+
+struct UnitPointValue {
+    double x;
+    double y;
+};
+
+SWIFTCC UnitPointValue unit_point_center() { return {0.5, 0.5}; }
+
+SWIFTCC uint64_t font_bold(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontBold; }
+SWIFTCC uint64_t font_monospaced(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontMonospaced; }
+
 void walk_view(void* value, void* type, void** witnesses, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
@@ -161,6 +198,29 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI12SceneBuilderV10buildBlockyxxAA0C0RzlFZ", reinterpret_cast<void*>(scene_build_block)},
         {"$s7SwiftUI9LazyStateV12wrappedValueACyxGxyXA_tcfC", reinterpret_cast<void*>(lazy_state_init)},
         {"$s7SwiftUI9LazyStateV12wrappedValuexvg", reinterpret_cast<void*>(lazy_state_wrapped_value_get)},
+        {"$s7SwiftUI4FontV4bodyACvgZ", reinterpret_cast<void*>(constant_getter<kFontBody>)},
+        {"$s7SwiftUI4FontV7captionACvgZ", reinterpret_cast<void*>(constant_getter<kFontCaption>)},
+        {"$s7SwiftUI4FontV8caption2ACvgZ", reinterpret_cast<void*>(constant_getter<kFontCaption2>)},
+        {"$s7SwiftUI4FontV8footnoteACvgZ", reinterpret_cast<void*>(constant_getter<kFontFootnote>)},
+        {"$s7SwiftUI4FontV4boldACyF", reinterpret_cast<void*>(font_bold)},
+        {"$s7SwiftUI4FontV10monospacedACyF", reinterpret_cast<void*>(font_monospaced)},
+        {"$s7SwiftUI5ColorV06accentC0ACvgZ", reinterpret_cast<void*>(constant_getter<kColorAccent>)},
+        {"$s7SwiftUI5ColorV3redACvgZ", reinterpret_cast<void*>(constant_getter<kColorRed>)},
+        {"$s7SwiftUI5ColorV5greenACvgZ", reinterpret_cast<void*>(constant_getter<kColorGreen>)},
+        {"$s7SwiftUI5ColorV9secondaryACvgZ", reinterpret_cast<void*>(constant_getter<kColorSecondary>)},
+        {"$s7SwiftUI22HierarchicalShapeStyleV9secondaryACvgZ", reinterpret_cast<void*>(constant_getter<kStyleSecondary>)},
+        {"$s7SwiftUI22HierarchicalShapeStyleV10quaternaryACvgZ", reinterpret_cast<void*>(constant_getter<kStyleQuaternary>)},
+        {"$s7SwiftUI9AnimationV7defaultACvgZ", reinterpret_cast<void*>(constant_getter<kAnimationDefault>)},
+        {"$s7SwiftUI10ButtonRoleV11destructiveACvgZ", reinterpret_cast<void*>(constant_getter<kButtonRoleDestructive>)},
+        {"$s7SwiftUI20ToolbarItemPlacementV14topBarTrailingACvgZ", reinterpret_cast<void*>(constant_getter<kToolbarTopBarTrailing>)},
+        {"$s7SwiftUI19HorizontalAlignmentV7leadingACvgZ", reinterpret_cast<void*>(constant_getter<kAlignLeading>)},
+        {"$s7SwiftUI17VerticalAlignmentV6centerACvgZ", reinterpret_cast<void*>(constant_getter<kAlignCenter>)},
+        {"$s7SwiftUI9AlignmentV6centerACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignCenter, kAlignCenter>)},
+        {"$s7SwiftUI9AlignmentV14bottomTrailingACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignTrailing, kAlignBottom>)},
+        {"$s7SwiftUI4EdgeO3SetV3allAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x0f>)},
+        {"$s7SwiftUI4EdgeO3SetV6bottomAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x04>)},
+        {"$s7SwiftUI4EdgeO3SetV8trailingAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x08>)},
+        {"$s7SwiftUI9UnitPointV6centerACvgZ", reinterpret_cast<void*>(unit_point_center)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

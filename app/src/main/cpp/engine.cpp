@@ -26,6 +26,7 @@ constexpr size_t kGuestStackSize = 64 * 1024 * 1024;
 constexpr size_t kSignalStackSize = 256 * 1024;
 
 int g_log_fd = -1;
+std::string g_bundle_dir;
 MachImage g_image;
 
 void write_log_line(const char* text, size_t length) {
@@ -162,7 +163,10 @@ void engine_log(const char* format, ...) {
     if (length > 0) write_log_line(buffer, strnlen(buffer, sizeof buffer));
 }
 
+const std::string& engine_bundle_dir() { return g_bundle_dir; }
+
 int run_app_bundle(const std::string& bundle_dir, const std::string& executable, const std::string& log_path) {
+    g_bundle_dir = bundle_dir;
     if (!log_path.empty()) g_log_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0600);
 
     GuestArguments arguments{bundle_dir, executable};
