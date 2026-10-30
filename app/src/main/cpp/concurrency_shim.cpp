@@ -1,5 +1,7 @@
 #include "concurrency_shim.h"
 
+#include "dispatch_shim.h"
+
 #include <time.h>
 
 #include <atomic>
@@ -398,7 +400,12 @@ extern "C" void rt_continuation_await();
 extern "C" void rt_async_let_wait();
 extern "C" void rt_clock_sleep();
 
-int64_t concurrency_next_deadline() { return sleepers().empty() ? 0 : sleepers().begin()->first; }
+int64_t concurrency_next_deadline() {
+    const int64_t sleeper = sleepers().empty() ? 0 : sleepers().begin()->first;
+    const int64_t work = dispatch_next_deadline();
+    if (sleeper == 0 || work == 0) return sleeper + work;
+    return sleeper < work ? sleeper : work;
+}
 
 void concurrency_fire_timers() {
     auto& timers = sleepers();
@@ -424,18 +431,21 @@ void concurrency_resume_call(void* context, void* error) {
 
 void concurrency_drain() {
     auto& queue = ready_tasks();
-    while (!queue.empty()) {
-        const ReadyTask task = queue.front();
-        queue.pop_front();
-        g_current_task = task.owner;
-        if (task.is_resume) rt_resume_task(task.function, task.async_context, task.closure_context);
-        else rt_start_task(task.function, task.result, task.closure_context, task.async_context);
-    }
+    do {
+        while (!queue.empty()) {
+            const ReadyTask task = queue.front();
+            queue.pop_front();
+            g_current_task = task.owner;
+            if (task.is_resume) rt_resume_task(task.function, task.async_context, task.closure_context);
+            else rt_start_task(task.function, task.result, task.closure_context, task.async_context);
+        }
+    } while (dispatch_run_ready() && !queue.empty());
 }
 
 void* concurrency_symbol(std::string_view name) {
     static const bool registered = [] {
         register_foreign_witness("_$sScMScAsWP", "_$sScA15unownedExecutorScevgTq", reinterpret_cast<const void*>(main_actor_executor));
+        register_foreign_witness("_$sScMScAsMc", "_$sScA15unownedExecutorScevgTq", reinterpret_cast<const void*>(main_actor_executor));
         g_clock_sleep_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_clock_sleep) - reinterpret_cast<const char*>(&g_clock_sleep_record.function));
         g_clock_sleep_record.context_size = sizeof(AsyncContextHeader);
         return true;
