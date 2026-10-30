@@ -733,6 +733,7 @@ std::string g_session_headers;
 
 AsyncDataResult perform_request(const std::string& url, const std::string& method, const std::string& headers, const std::string& body) {
     const HttpResult result = engine_http(url, method, g_session_headers + headers, body);
+    engine_log("HTTP: %s %s -> %d, %zu bytes", method.c_str(), url.c_str(), result.status, result.body.size());
     if (result.status < 0) return {{0, kDataEmptyTag}, nullptr, make_error("The network request could not be completed.", 1)};
     auto* response = static_cast<HTTPResponseObject*>(calloc(1, sizeof(HTTPResponseObject)));
     response->header.isa = g_http_response_class;
