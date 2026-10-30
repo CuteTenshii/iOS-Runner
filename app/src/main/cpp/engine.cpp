@@ -1,5 +1,6 @@
 #include "engine.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
@@ -58,7 +59,17 @@ void describe_address(char* out, size_t size, uintptr_t address) {
     if (address >= g_image.base && address < g_image.base + g_image.size) {
         snprintf(out, size, "app+0x%zx", static_cast<size_t>(address - g_image.base));
     } else {
+#ifdef IOSRUNNER_HOST
         snprintf(out, size, "0x%zx", static_cast<size_t>(address));
+#else
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void*>(address), &info) != 0 && info.dli_fbase != nullptr) {
+            const char* slash = info.dli_fname != nullptr ? strrchr(info.dli_fname, '/') : nullptr;
+            snprintf(out, size, "%s+0x%zx", slash != nullptr ? slash + 1 : "lib", static_cast<size_t>(address - reinterpret_cast<uintptr_t>(info.dli_fbase)));
+        } else {
+            snprintf(out, size, "0x%zx", static_cast<size_t>(address));
+        }
+#endif
     }
 }
 
@@ -69,7 +80,7 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
     const uintptr_t pc = machine.pc;
     const uintptr_t lr = machine.regs[30];
 
-    char pc_text[48], lr_text[48];
+    char pc_text[96], lr_text[96];
     describe_address(pc_text, sizeof pc_text, pc);
     describe_address(lr_text, sizeof lr_text, lr);
 
@@ -86,7 +97,7 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
         if (frame < 0x1000) break;
         memcpy(&next, reinterpret_cast<void*>(frame), sizeof next);
         memcpy(&ret, reinterpret_cast<void*>(frame + 8), sizeof ret);
-        char ret_text[48];
+        char ret_text[96];
         describe_address(ret_text, sizeof ret_text, ret);
         engine_log("  #%d %s", depth, ret_text);
         if (next <= frame) break;

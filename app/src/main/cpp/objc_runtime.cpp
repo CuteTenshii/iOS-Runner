@@ -195,8 +195,11 @@ void objc_register_method(const char* description, const void* implementation) {
     framework_methods()[description] = implementation;
 }
 
-void* objc_native_class(const char* name) {
-    auto* cls = calloc(1, sizeof(void*));
+void* objc_native_class(const char* name, void (*destroyer)(void*)) {
+    // Release finds the destroyer two words before the class, as it does in Swift metadata.
+    auto** block = static_cast<void**>(calloc(3, sizeof(void*)));
+    block[0] = reinterpret_cast<void*>(destroyer);
+    void* cls = block + 2;
     native_classes()[cls] = name;
     return cls;
 }

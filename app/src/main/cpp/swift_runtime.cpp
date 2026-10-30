@@ -304,6 +304,13 @@ const ValueWitnessTable kInt64Witnesses = pod_witnesses<8>();
 const ValueWitnessTable kNativeObjectWitnesses = reference_witnesses<retain_object, release_object>();
 const ValueWitnessTable kBridgeObjectWitnesses = reference_witnesses<bridge_retain, bridge_release>();
 
+constexpr size_t kEmptyCollectionWords = 16;
+
+// Shared empty collections: count 0, immortal, with the all-ones bitmap word Dictionary and Set expect.
+uint64_t g_empty_array[kEmptyCollectionWords] = {0, kImmortal};
+uint64_t g_empty_dictionary[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 0, 0, ~0ULL};
+uint64_t g_empty_set[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 0, ~0ULL};
+
 // Marker addresses: the guest and rt_app_main compare them, and nothing reads through them.
 char g_app_init_requirement;
 char g_app_body_requirement;
@@ -448,7 +455,10 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_getObjCClassFromMetadata", rt_identity),
         SYM("swift_beginAccess", +[](void*, void*, uintptr_t, void*) {}),
         SYM("swift_endAccess", +[](void*) {}),
-        SYM("__swiftImmortalRefCount", kImmortal),
+        SYM("_swiftImmortalRefCount", kImmortal),
+        SYM("_swiftEmptyArrayStorage", g_empty_array),
+        SYM("_swiftEmptyDictionarySingleton", g_empty_dictionary),
+        SYM("_swiftEmptySetSingleton", g_empty_set),
         {"$sytWV", const_cast<ValueWitnessTable*>(&kEmptyWitnesses)},
         {"$sBi32_WV", const_cast<ValueWitnessTable*>(&kInt32Witnesses)},
         {"$sBi64_WV", const_cast<ValueWitnessTable*>(&kInt64Witnesses)},

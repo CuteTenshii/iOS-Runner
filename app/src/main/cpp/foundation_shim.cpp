@@ -41,6 +41,12 @@ struct NSStringObject {
 void* g_nsstring_class = nullptr;
 void* g_defaults_class = nullptr;
 
+void destroy_nsstring(void* raw) {
+    auto* object = static_cast<NSStringObject*>(raw);
+    delete object->text;
+    free(object);
+}
+
 void* new_nsstring(const std::string& text) {
     auto* object = static_cast<NSStringObject*>(calloc(1, sizeof(NSStringObject)));
     object->header.isa = g_nsstring_class;
@@ -192,8 +198,8 @@ SwiftString swift_string_from_utf8(const std::string& text) {
 }
 
 void foundation_register_classes() {
-    g_nsstring_class = objc_native_class("NSString");
-    g_defaults_class = objc_native_class("NSUserDefaults");
+    g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
+    g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("+[NSUserDefaults standardUserDefaults]", reinterpret_cast<const void*>(defaults_standard));
     objc_register_method("-[NSUserDefaults stringForKey:]", reinterpret_cast<const void*>(defaults_string_for_key));
     objc_register_method("-[NSUserDefaults objectForKey:]", reinterpret_cast<const void*>(defaults_object_for_key));
