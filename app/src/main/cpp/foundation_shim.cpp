@@ -18,8 +18,11 @@
 #include "engine.h"
 #include "localization.h"
 #include "objc_runtime.h"
+#include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
+
+uint64_t* empty_array_singleton();
 
 namespace {
 
@@ -222,6 +225,56 @@ void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
     user_scripts().push_back(nsstring_text(source));
     engine_log("WEBKIT: registered user script, %zu bytes", nsstring_text(source).size());
     return self;
+}
+
+// NSArray keeps retained references; the app only receives arrays from this runtime.
+struct NSArrayObject {
+    NativeObject header;
+    std::vector<void*>* items;
+};
+
+void* g_nsarray_class = nullptr;
+
+void destroy_nsarray(void* raw) {
+    auto* array = static_cast<NSArrayObject*>(raw);
+    delete array->items;
+    free(array);
+}
+
+void* new_nsarray() {
+    auto* array = static_cast<NSArrayObject*>(calloc(1, sizeof(NSArrayObject)));
+    array->header.isa = g_nsarray_class;
+    array->header.references = 1;
+    array->items = new std::vector<void*>();
+    return array;
+}
+
+struct BlockHeader {
+    void* isa;
+    int32_t flags;
+    int32_t reserved;
+    void (*invoke)(void*, void*);
+};
+
+void cookie_store_get_all(void*, const char*, BlockHeader* completion) { completion->invoke(completion, new_nsarray()); }
+
+constexpr size_t kArrayHeaderBytes = 32;
+constexpr size_t kArrayCountOffset = 16;
+constexpr size_t kArrayCapacityOffset = 24;
+
+SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
+    auto* array = static_cast<NSArrayObject*>(object);
+    if (array == nullptr || array->items->empty()) return empty_array_singleton();
+    const size_t count = array->items->size();
+    auto* storage = static_cast<char*>(calloc(1, kArrayHeaderBytes + count * sizeof(void*)));
+    auto* header = reinterpret_cast<NativeObject*>(storage);
+    header->isa = storage_class_metadata("_$ss23_ContiguousArrayStorageCMn", &element_type, 1);
+    header->references = 1;
+    const uint64_t words[] = {count, count * 2};
+    memcpy(storage + kArrayCountOffset, words, sizeof words);
+    static_assert(kArrayCapacityOffset == kArrayCountOffset + sizeof(uint64_t));
+    memcpy(storage + kArrayHeaderBytes, array->items->data(), count * sizeof(void*));
+    return storage;
 }
 
 void* web_view_configuration(void*, const char*) { return framework_singleton("WKWebViewConfiguration"); }
@@ -440,6 +493,8 @@ void foundation_register_classes() {
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
     objc_register_method("-[WKWebView initWithFrame:configuration:]", reinterpret_cast<const void*>(web_view_init));
     objc_register_method("-[WKWebsiteDataStore httpCookieStore]", reinterpret_cast<const void*>(cookie_store));
+    g_nsarray_class = objc_native_class("NSArray", destroy_nsarray);
+    objc_register_method("-[WKHTTPCookieStore getAllCookies:]", reinterpret_cast<const void*>(cookie_store_get_all));
     objc_register_method("-[WKHTTPCookieStore addObserver:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView configuration]", reinterpret_cast<const void*>(web_view_configuration));
     objc_register_method("-[WKWebView layer]", reinterpret_cast<const void*>(web_view_layer));
@@ -519,6 +574,7 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation6LocaleV7currentACvgZ", reinterpret_cast<void*>(locale_current)},
         {"$s10Foundation6LocaleV19autoupdatingCurrentACvgZ", reinterpret_cast<void*>(locale_current)},
         {"$s10Foundation23LocalizedStringResourceV17BundleDescriptionO8forClassyAEyXlXpcAEmFWC", const_cast<int32_t*>(&kBundleDescriptionForClass)},
+        {"$sSa10FoundationE36_unconditionallyBridgeFromObjectiveCySayxGSo7NSArrayCSgFZ", reinterpret_cast<void*>(array_bridge_from_objc)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

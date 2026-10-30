@@ -45,6 +45,7 @@ struct ReadyTask {
     void* closure_context;
     void* result;
     void* async_context;
+    bool is_resume;
 };
 
 std::deque<ReadyTask>& ready_tasks() {
@@ -63,6 +64,33 @@ struct TaskCreation {
 
 extern "C" void rt_task_finished();
 extern "C" void rt_start_task(const void* function, void* result, void* closure_context, void* async_context);
+extern "C" void rt_resume_task(const void* function, void* async_context);
+
+// The ABI's ContinuationAsyncContext; its first two words are the usual parent and resume function.
+struct ContinuationContext {
+    void* parent;
+    const void* resume;
+    uint64_t state;
+    void* error;
+    void* result;
+};
+
+constexpr uint64_t kContinuationAwaited = 1;
+constexpr uint64_t kContinuationResumed = 2;
+
+void* continuation_init(ContinuationContext* context, size_t) {
+    context->state = 0;
+    context->error = nullptr;
+    return context;
+}
+
+void continuation_resume(ContinuationContext* context) {
+    if (context->state == kContinuationAwaited) {
+        ready_tasks().push_back({context->resume, nullptr, nullptr, context->parent, true});
+    } else {
+        context->state = kContinuationResumed;
+    }
+}
 
 constexpr size_t kMinimumResultBytes = 16;
 constexpr size_t kValueWitnessSizeOffset = 0x40;
@@ -81,7 +109,7 @@ TaskCreation task_create(size_t, void*, void* result_type, const AsyncFunctionPo
         if (result_size < kMinimumResultBytes) result_size = kMinimumResultBytes;
     }
     const char* base = reinterpret_cast<const char*>(&entry->function);
-    ready_tasks().push_back({base + entry->function, closure_context, calloc(1, result_size), context});
+    ready_tasks().push_back({base + entry->function, closure_context, calloc(1, result_size), context, false});
     return {task, context};
 }
 
@@ -133,6 +161,37 @@ __asm__(
     ".globl rt_task_finished\n"
     "rt_task_finished:\n"
     "  ret\n"
+    // Awaiting a continuation not resumed yet returns to whoever is running this task.
+    ".globl rt_continuation_await\n"
+    "rt_continuation_await:\n"
+    "  ldr x9, [x0, #16]\n"
+    "  cmp x9, #2\n"
+    "  b.eq 1f\n"
+    "  mov x9, #1\n"
+    "  str x9, [x0, #16]\n"
+    "  ret\n"
+    "1:\n"
+    "  ldr x22, [x0]\n"
+    "  ldr x1, [x0, #8]\n"
+    "  br x1\n"
+    ".globl rt_resume_task\n"
+    "rt_resume_task:\n"
+    "  stp x29, x30, [sp, #-112]!\n"
+    "  mov x29, sp\n"
+    "  stp x19, x20, [sp, #16]\n"
+    "  stp x21, x22, [sp, #32]\n"
+    "  stp x23, x24, [sp, #48]\n"
+    "  stp x25, x26, [sp, #64]\n"
+    "  stp x27, x28, [sp, #80]\n"
+    "  mov x22, x1\n"
+    "  blr x0\n"
+    "  ldp x19, x20, [sp, #16]\n"
+    "  ldp x21, x22, [sp, #32]\n"
+    "  ldp x23, x24, [sp, #48]\n"
+    "  ldp x25, x26, [sp, #64]\n"
+    "  ldp x27, x28, [sp, #80]\n"
+    "  ldp x29, x30, [sp], #112\n"
+    "  ret\n"
     ".globl rt_start_task\n"
     "rt_start_task:\n"
     "  stp x29, x30, [sp, #-112]!\n"
@@ -156,13 +215,14 @@ __asm__(
     "  ret\n");
 
 extern "C" void rt_task_switch();
+extern "C" void rt_continuation_await();
 
 void concurrency_start(const void* async_function, void* context) {
     const auto* entry = static_cast<const AsyncFunctionPointer*>(async_function);
     auto* async_context = static_cast<AsyncContextHeader*>(calloc(1, entry->context_size));
     async_context->resume_parent = reinterpret_cast<void*>(rt_task_finished);
     const char* base = reinterpret_cast<const char*>(&entry->function);
-    ready_tasks().push_back({base + entry->function, context, calloc(1, kMinimumResultBytes), async_context});
+    ready_tasks().push_back({base + entry->function, context, calloc(1, kMinimumResultBytes), async_context, false});
 }
 
 void concurrency_drain() {
@@ -170,7 +230,8 @@ void concurrency_drain() {
     while (!queue.empty()) {
         const ReadyTask task = queue.front();
         queue.pop_front();
-        rt_start_task(task.function, task.result, task.closure_context, task.async_context);
+        if (task.is_resume) rt_resume_task(task.function, task.async_context);
+        else rt_start_task(task.function, task.result, task.closure_context, task.async_context);
     }
 }
 
@@ -184,6 +245,9 @@ void* concurrency_symbol(std::string_view name) {
         {"$sScM6sharedScMvgZ", reinterpret_cast<void*>(main_actor_shared)},
         {"$sScP13userInitiatedScPvgZ", reinterpret_cast<void*>(task_priority_user_initiated)},
         {"$sScP8rawValues5UInt8Vvg", reinterpret_cast<void*>(task_priority_raw_value)},
+        {"swift_continuation_init", reinterpret_cast<void*>(continuation_init)},
+        {"swift_continuation_await", reinterpret_cast<void*>(rt_continuation_await)},
+        {"swift_continuation_resume", reinterpret_cast<void*>(continuation_resume)},
         {"swift_task_create", reinterpret_cast<void*>(task_create)},
         {"swift_task_switch", reinterpret_cast<void*>(rt_task_switch)},
         {"swift_task_alloc", reinterpret_cast<void*>(task_alloc)},

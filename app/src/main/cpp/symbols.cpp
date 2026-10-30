@@ -24,6 +24,53 @@ uintptr_t darwin_stack_guard = 0x5bd1e9955bd1e995ULL;
     engine_log("STOP: guest stack protector failure");
     abort();
 }
+// Blocks, per the Clang block ABI.
+struct BlockDescriptor {
+    uintptr_t reserved;
+    uintptr_t size;
+    void (*copy)(void*, const void*);
+    void (*dispose)(const void*);
+};
+
+struct BlockLayout {
+    void* isa;
+    int32_t flags;
+    int32_t references;
+    void* invoke;
+    BlockDescriptor* descriptor;
+};
+
+constexpr int32_t kBlockHasCopyDispose = 1 << 25;
+constexpr int32_t kBlockIsGlobal = 1 << 28;
+constexpr int32_t kBlockIsHeap = 1 << 24;
+void* darwin_stack_block_class[32];
+void* darwin_malloc_block_class[32];
+
+void* darwin_block_copy(const void* raw) {
+    if (raw == nullptr) return nullptr;
+    auto* block = static_cast<BlockLayout*>(const_cast<void*>(raw));
+    if (block->flags & kBlockIsGlobal) return block;
+    if (block->flags & kBlockIsHeap) {
+        ++block->references;
+        return block;
+    }
+    auto* copy = static_cast<BlockLayout*>(malloc(block->descriptor->size));
+    memcpy(copy, block, block->descriptor->size);
+    copy->isa = darwin_malloc_block_class;
+    copy->flags |= kBlockIsHeap;
+    copy->references = 1;
+    if (block->flags & kBlockHasCopyDispose) block->descriptor->copy(copy, block);
+    return copy;
+}
+
+void darwin_block_release(const void* raw) {
+    if (raw == nullptr) return;
+    auto* block = static_cast<BlockLayout*>(const_cast<void*>(raw));
+    if (!(block->flags & kBlockIsHeap) || --block->references > 0) return;
+    if (block->flags & kBlockHasCopyDispose) block->descriptor->dispose(block);
+    free(block);
+}
+
 // The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
 bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
@@ -47,6 +94,9 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"__chkstk_darwin", reinterpret_cast<void*>(darwin_chkstk)},
         {"__stack_chk_guard", &darwin_stack_guard},
         {"__stack_chk_fail", reinterpret_cast<void*>(darwin_stack_chk_fail)},
+        {"_Block_copy", reinterpret_cast<void*>(darwin_block_copy)},
+        {"_Block_release", reinterpret_cast<void*>(darwin_block_release)},
+        {"_NSConcreteStackBlock", darwin_stack_block_class},
         {"_availability_version_check", reinterpret_cast<void*>(darwin_availability_version_check)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
         {"fopen", reinterpret_cast<void*>(fopen)},

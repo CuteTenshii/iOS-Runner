@@ -424,6 +424,7 @@ extern "C" void rt_app_main(void* metadata, void** witness_table) {
 }
 
 uint64_t* empty_set_singleton() { return g_empty_set; }
+uint64_t* empty_array_singleton() { return g_empty_array; }
 
 void* swift_runtime_witness_table(const char* conformance, void* type, void* arguments) { return rt_swift_getWitnessTable(conformance, type, arguments); }
 

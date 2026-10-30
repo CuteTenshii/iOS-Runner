@@ -795,6 +795,20 @@ private:
                 substitute(node);
                 return;
             }
+            case 'o': {
+                // An imported Objective-C class named inline: only its reference layout matters here.
+                const uint64_t length = read_natural();
+                if (static_cast<uint64_t>(end_ - cursor_) < length + 1 || cursor_[length] != 'C') {
+                    fail("unsupported imported type");
+                    return;
+                }
+                cursor_ += length + 1;
+                Node node;
+                node.type = native_type();
+                stack_.push_back(node);
+                substitute(node);
+                return;
+            }
             case 'a': case 'D': case 'h': {
                 Node node;
                 node.tag = Node::Tag::Nominal;
@@ -809,6 +823,13 @@ private:
                     Node node;
                     node.tag = Node::Tag::Protocol;
                     node.nominal.foreign_symbol = "_$sScAMp";
+                    stack_.push_back(node);
+                    return;
+                }
+                if (concurrency == 'c') {
+                    Node node;
+                    node.tag = Node::Tag::Nominal;
+                    node.nominal.foreign_symbol = "$CheckedContinuation";
                     stack_.push_back(node);
                     return;
                 }
