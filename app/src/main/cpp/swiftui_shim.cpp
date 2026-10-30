@@ -9,6 +9,7 @@
 #include <new>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "concurrency_shim.h"
 #include "engine.h"
@@ -183,8 +184,15 @@ struct ViewNode {
     BindingNode* binding;
 };
 
+// Framework values can hold plain numbers in the same word as a node, so nodes are identified by registry.
+std::unordered_set<const void*>& live_nodes() {
+    static std::unordered_set<const void*> nodes;
+    return nodes;
+}
+
 void destroy_node(HeapHeader* object) {
     auto* node = reinterpret_cast<ViewNode*>(object);
+    live_nodes().erase(node);
     delete node->title;
     delete node->system_image;
     for (const auto& child : *node->children) {
@@ -207,6 +215,7 @@ ViewNode* new_node(NodeKind kind) {
     node->title = new std::string();
     node->system_image = new std::string();
     node->children = new std::vector<ChildValue>();
+    live_nodes().insert(node);
     return node;
 }
 
@@ -325,14 +334,14 @@ void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row,
     }
 }
 
-// ID is not passed here: it follows from Element.
+// ID is not passed: it follows from Element or from the key path.
 SWIFTCC void for_each_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void* row_type) {
     auto* node = new_node(NodeKind::ForEach);
     evaluate_rows(node, data, data_type, row, row_context, row_type);
     *out = node;
 }
 
-SWIFTCC void for_each_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void*, void* row_type) {
+SWIFTCC void for_each_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void* row_type) {
     auto* node = new_node(NodeKind::ForEach);
     evaluate_rows(node, data, data_type, row, row_context, row_type);
     *out = node;
@@ -865,6 +874,7 @@ constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
 constexpr uint32_t kTypeReferenceIndirect = 0x1u << 3;
 constexpr size_t kMetadataDescriptorWord = 1;
 constexpr size_t kMetadataArgumentsWord = 2;
+constexpr size_t kDescriptorNameOffset = 8;
 
 const void* relative_pointer(const char* field) {
     int32_t offset;
@@ -947,7 +957,7 @@ void walk_view(void* value, void* type, int depth) {
         const bool reference_node = witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0;
         if (reference_node) {
             auto* node = *static_cast<ViewNode**>(value);
-            if (node != nullptr && reinterpret_cast<uintptr_t>(node) >> 63 == 0 && node->header.metadata == &kNodeMetadata.kind) {
+            if (live_nodes().count(node) != 0) {
                 if (node->kind == NodeKind::Task) {
                     if (started_tasks().insert(node->action).second) {
                         concurrency_start(node->action, node->action_context);
@@ -985,7 +995,13 @@ void walk_view(void* value, void* type, int depth) {
     }
     const char* conformance = find_view_conformance(type);
     if (conformance == nullptr) {
-        engine_log("VIEW: %*s(type %p has no View conformance, kind %llx, size %zu, fields %zu)", depth * 2, "", type, static_cast<unsigned long long>(*static_cast<uint64_t*>(type)), witnesses_of(type)->size, type_fields(type).size());
+        const void* descriptor = static_cast<void**>(type)[kMetadataDescriptorWord];
+        const char* type_name = "?";
+        if (descriptor != nullptr && (reinterpret_cast<uintptr_t>(descriptor) & 3) == 0) {
+            const auto* parsed = static_cast<const char*>(relative_pointer(static_cast<const char*>(descriptor) + kDescriptorNameOffset));
+            if (parsed != nullptr) type_name = parsed;
+        }
+        engine_log("VIEW: %*s(%s has no View conformance, size %zu)", depth * 2, "", type_name, witnesses_of(type)->size);
         return;
     }
     const void* body = find_witness(conformance, &g_view_body_requirement);

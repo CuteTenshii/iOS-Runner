@@ -638,6 +638,7 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI30_EnvironmentKeyWritingModifierVMn", {kReference, kFirstArgument}},
         {"_$s7SwiftUI32_EnvironmentKeyTransformModifierVMn", {kReference, kClosure}},
         {"_$s7SwiftUI21_TraitWritingModifierVMn", {kFirstArgument}},
+        {"_$s7SwiftUI24_TagTraitWritingModifierVMn", {kFirstArgument}},
         {"_$s7SwiftUI6HStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6VStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6ZStackVMn", {kAlignment, kFirstArgument}},
@@ -663,6 +664,7 @@ size_t witness_word_count(const std::string& symbol) {
         {"_$s7SwiftUI24_BackgroundStyleModifierVMn", 1}, {"_$s7SwiftUI16_OverlayModifierVMn", 1},
         {"_$s7SwiftUI11_ClipEffectVMn", 1}, {"_$s7SwiftUI21_ContentShapeModifierVMn", 1},
         {"_$s7SwiftUI18_AnimationModifierVMn", 1}, {"_$s7SwiftUI21_TraitWritingModifierVMn", 1},
+        {"_$s7SwiftUI24_TagTraitWritingModifierVMn", 1},
     };
     const auto found = counts.find(symbol);
     return found == counts.end() ? 0 : found->second;
@@ -673,6 +675,7 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     if ((symbol == "_$s7SwiftUI19_ConditionalContentVMn" || symbol == "_$s7SwiftUI19_ConditionalContentV7StorageOMn") && arguments.size() >= 2) {
         return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
     }
+    if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
     if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
     if (symbol == "_$ss5UInt8VMn") return pod_type("UInt8", 1);
     if (symbol == "_$ss5NeverOMn") return pod_type("Never", 0);
@@ -1427,6 +1430,7 @@ extern "C" MetadataResponse rt_foreign_access(size_t, void* first, void* second,
     const std::lock_guard guard(g_types_lock);
     const std::string_view name(symbol);
     if (name == "$sSqMa") return {optional_of(static_cast<Metadata*>(first)), 0};
+    if (name == "$s10Foundation4DateVMa") return {pod_type("Date", 8), 0};
     const size_t arity = accessor_generic_arity(name);
     std::vector<void*> arguments;
     if (arity > 0) arguments.push_back(first);
@@ -1472,6 +1476,7 @@ void* type_system_symbol(std::string_view name) {
         if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
         if (name == "$ss5NeverON") return pod_type("Never", 0);
         if (name == "$s7SwiftUI22HierarchicalShapeStyleVN") return pod_type(std::string(name), 4);
+        if (name == "$s10Foundation4DateVN") return pod_type("Date", 8);
         if (name == "$s10Foundation4DataVN" || name == "$s10Foundation4DataV15_RepresentationON") return two_word_type("Data", word_type(), bridge_word_type());
         std::string descriptor = "_" + std::string(name);
         descriptor.back() = 'M';

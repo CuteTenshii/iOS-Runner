@@ -18,7 +18,6 @@ constexpr uint32_t kBufferSizeMask = 0x00ffffff;
 constexpr uint32_t kComponentKindMask = 0x7f000000;
 constexpr unsigned kComponentKindShift = 24;
 constexpr uint32_t kPayloadMask = 0x00ffffff;
-constexpr uint32_t kKindExternal = 0;
 constexpr uint32_t kKindStruct = 1;
 constexpr uint32_t kKindComputed = 2;
 constexpr uint32_t kKindClass = 3;

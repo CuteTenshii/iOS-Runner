@@ -1,11 +1,13 @@
 #include "foundation_shim.h"
 
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cerrno>
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -316,7 +318,6 @@ URLBox* new_url(const std::string& text) {
 }
 
 constexpr const char* kFileScheme = "file://";
-constexpr size_t kFileSchemeLength = 7;
 
 bool make_directories(const std::string& path) {
     for (size_t i = 1; i <= path.size(); ++i) {
@@ -646,6 +647,68 @@ SWIFTCC void* collection_bridge_to_objc(void* value) {
     return wrapper;
 }
 
+#define SWIFT_CTX __attribute__((swift_context))
+
+// Format styles are one tagged word here; the only option this app sets is compact notation.
+constexpr uint64_t kStyleWord = kLocaleImmediate;
+constexpr uint64_t kCompactNotationFlag = 1;
+
+SWIFTCC void integer_style_init(SWIFT_OUT uint64_t* out, const void*, void*) { *out = kStyleWord; }
+SWIFTCC void notation_compact_name(SWIFT_OUT uint64_t* out) { *out = kStyleWord | kCompactNotationFlag; }
+SWIFTCC void integer_style_notation(SWIFT_OUT uint64_t* out, const uint64_t* notation, void*, SWIFT_CTX const uint64_t* self) { *out = *self | (*notation & kCompactNotationFlag); }
+
+std::string group_thousands(int64_t value) {
+    std::string digits = std::to_string(value < 0 ? -value : value);
+    std::string out;
+    for (size_t i = 0; i < digits.size(); ++i) {
+        if (i != 0 && (digits.size() - i) % 3 == 0) out += ',';
+        out += digits[i];
+    }
+    return value < 0 ? "-" + out : out;
+}
+
+std::string compact_number(int64_t value) {
+    const double magnitude = static_cast<double>(value < 0 ? -value : value);
+    static constexpr struct { double scale; const char* suffix; } kUnits[] = {{1e9, "B"}, {1e6, "M"}, {1e3, "K"}};
+    for (const auto& unit : kUnits) {
+        if (magnitude >= unit.scale) {
+            char text[32];
+            snprintf(text, sizeof text, "%s%.1f", value < 0 ? "-" : "", magnitude / unit.scale);
+            std::string number = text;
+            if (number.size() > 2 && number.compare(number.size() - 2, 2, ".0") == 0) number.resize(number.size() - 2);
+            return number + unit.suffix;
+        }
+    }
+    return std::to_string(value);
+}
+
+// FormatOutput is String for every style this app uses, written through the indirect result.
+SWIFTCC void integer_formatted_style(SWIFT_OUT SwiftString* out, const uint64_t* style, void*, void*, SWIFT_CTX const int64_t* self) {
+    const int64_t value = *self;
+    *out = swift_string_from_utf8((*style & kCompactNotationFlag) ? compact_number(value) : group_thousands(value));
+}
+
+SWIFTCC SwiftString integer_formatted(void*, void*, SWIFT_CTX const int64_t* self) { return swift_string_from_utf8(group_thousands(*self)); }
+
+SWIFTCC void date_now(SWIFT_OUT double* out) {
+    struct timespec now {};
+    clock_gettime(CLOCK_REALTIME, &now);
+    constexpr double kSecondsFrom1970To2001 = 978307200.0;
+    *out = static_cast<double>(now.tv_sec) - kSecondsFrom1970To2001 + static_cast<double>(now.tv_nsec) * 1e-9;
+}
+
+SWIFTCC void date_style_word(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
+
+SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CTX const double* self) {
+    constexpr double kSecondsFrom1970To2001 = 978307200.0;
+    const auto seconds = static_cast<time_t>(*self + kSecondsFrom1970To2001);
+    struct tm local {};
+    localtime_r(&seconds, &local);
+    char text[64];
+    strftime(text, sizeof text, "%b %e, %Y at %H:%M", &local);
+    return swift_string_from_utf8(text);
+}
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -818,6 +881,15 @@ void* foundation_symbol(std::string_view name) {
         {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
         {"swift_getErrorValue", reinterpret_cast<void*>(swift_get_error_value)},
+        {"$s10Foundation18IntegerFormatStyleV6localeACyxGAA6LocaleV_tcfC", reinterpret_cast<void*>(integer_style_init)},
+        {"$s10Foundation30NumberFormatStyleConfigurationO8NotationV11compactNameAEvgZ", reinterpret_cast<void*>(notation_compact_name)},
+        {"$s10Foundation18IntegerFormatStyleV8notationyACyxGAA06NumbercD13ConfigurationO8NotationVF", reinterpret_cast<void*>(integer_style_notation)},
+        {"$sSz10FoundationE9formattedy12FormatOutputQyd__qd__0C5InputQyd__RszAA0C5StyleRd__lF", reinterpret_cast<void*>(integer_formatted_style)},
+        {"$sSz10FoundationE9formattedSSyF", reinterpret_cast<void*>(integer_formatted)},
+        {"$s10Foundation4DateVACycfC", reinterpret_cast<void*>(date_now)},
+        {"$s10Foundation4DateV11FormatStyleV0bD0V11abbreviatedAGvgZ", reinterpret_cast<void*>(date_style_word)},
+        {"$s10Foundation4DateV11FormatStyleV04TimeD0V9shortenedAGvgZ", reinterpret_cast<void*>(date_style_word)},
+        {"$s10Foundation4DateV9formatted4date4timeSSAC11FormatStyleV0bG0V_AH04TimeG0VtF", reinterpret_cast<void*>(date_formatted)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},
