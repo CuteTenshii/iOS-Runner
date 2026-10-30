@@ -83,6 +83,7 @@ ViewBox* new_box() {
     return box;
 }
 
+const int32_t kStorageCaseValueTag = 0;
 char g_view_body_requirement;
 char g_view_body_type_requirement;
 
@@ -141,12 +142,22 @@ BindingNode* new_binding(BindingKind kind) {
 constexpr size_t kMetadataFirstArgumentWord = 2;
 void* generic_argument(void* metadata) { return static_cast<void**>(metadata)[kMetadataFirstArgumentWord]; }
 
+struct TextValue {
+    uint64_t text_bits;
+    uint64_t text_object;
+    uint64_t kind;
+    uint64_t style;
+};
+
 struct ChildValue {
     void* value;
     void* type;
 };
 
-enum class NodeKind : uint32_t { TabView, Tab };
+enum class NodeKind : uint32_t {
+    TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
+    Sheet, Toolbar, OnChange,
+};
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
 struct ViewNode {
@@ -155,6 +166,9 @@ struct ViewNode {
     std::string* title;
     std::string* system_image;
     std::vector<ChildValue>* children;
+    const void* action;
+    void* action_context;
+    BindingNode* binding;
 };
 
 void destroy_node(HeapHeader* object) {
@@ -166,6 +180,8 @@ void destroy_node(HeapHeader* object) {
         free(child.value);
     }
     delete node->children;
+    rt_swift_release(node->action_context);
+    rt_swift_release(node->binding);
     free(node);
 }
 
@@ -204,39 +220,179 @@ SWIFTCC void tab_init(SWIFT_OUT ViewNode** out, LocalizedBox** title, SwiftStrin
     *out = node;
 }
 
-// Backing store of @State: the initial value is computed on first read, as LazyState promises.
+// Keeps a copy of `self` as the node's child, for modifiers whose result type is opaque.
+void add_self_child(ViewNode* node, void* self, void* type) {
+    const size_t size = witnesses_of(type)->size;
+    void* value = calloc(1, size == 0 ? 1 : size);
+    witnesses_of(type)->initialize_with_copy(value, self, type);
+    node->children->push_back({value, type});
+}
+
+SWIFTCC void navigation_stack_init(SWIFT_OUT ViewNode** out, const void* closure, void* context, void* root_type, void*) {
+    auto* node = new_node(NodeKind::NavigationStack);
+    evaluate_child(node, closure, context, root_type);
+    *out = node;
+}
+
+SWIFTCC void list_init(SWIFT_OUT ViewNode** out, const void* closure, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::List);
+    evaluate_child(node, closure, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void button_init(SWIFT_OUT ViewNode** out, const void* action, void* action_context, const void* label, void* label_context, void* label_type, void*) {
+    auto* node = new_node(NodeKind::Button);
+    node->action = action;
+    node->action_context = rt_swift_retain(action_context);
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+SWIFTCC void button_role_init(SWIFT_OUT ViewNode** out, uint64_t, const void* action, void* action_context, const void* label, void* label_context, void* label_type, void*) {
+    auto* node = new_node(NodeKind::Button);
+    node->action = action;
+    node->action_context = rt_swift_retain(action_context);
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+SWIFTCC void label_init(SWIFT_OUT ViewNode** out, const void* title, void* title_context, const void* icon, void* icon_context, void* title_type, void* icon_type, void*, void*) {
+    auto* node = new_node(NodeKind::Label);
+    evaluate_child(node, title, title_context, title_type);
+    evaluate_child(node, icon, icon_context, icon_type);
+    *out = node;
+}
+
+SWIFTCC void toggle_label_init(SWIFT_OUT ViewNode** out, BindingNode** binding, const void* label, void* label_context, void* label_type, void*) {
+    auto* node = new_node(NodeKind::Toggle);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(*binding));
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+SWIFTCC void toggle_title_init(SWIFT_OUT ViewNode** out, const SwiftString* title, BindingNode** binding, void*, void*) {
+    auto* node = new_node(NodeKind::Toggle);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(*binding));
+    *node->title = swift_string_to_utf8(*title);
+    *out = node;
+}
+
+// `style` modifiers: only the wrapped content matters until rendering honours the style.
+SWIFTCC void modifier_generic_style(SWIFT_OUT ViewNode** out, const void*, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void navigation_title_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    *node->title = interpolation != nullptr ? localized_text(interpolation) : localization_lookup(swift_string_to_utf8(key));
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void navigation_title_text(SWIFT_OUT ViewNode** out, TextValue text, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    *node->title = swift_string_to_utf8({text.text_bits, text.text_object});
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void navigation_title_string(SWIFT_OUT ViewNode** out, const SwiftString* title, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    *node->title = swift_string_to_utf8(*title);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void navigation_display_mode(SWIFT_OUT ViewNode** out, const void*, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void toolbar_modifier(SWIFT_OUT ViewNode** out, const void* closure, void* context, void* self_type, void* content_type, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Toolbar);
+    add_self_child(node, self, self_type);
+    evaluate_child(node, closure, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void on_change_modifier(SWIFT_OUT ViewNode** out, const void*, uint64_t, const void* action, void* action_context, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::OnChange);
+    node->action = action;
+    node->action_context = rt_swift_retain(action_context);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, BindingNode** item, uint64_t, uint64_t, const void* content, void* content_context, void* self_type, void*, void*, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Sheet);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(*item));
+    node->action = content;
+    node->action_context = rt_swift_retain(content_context);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+// Backing store of @State, attached to the inline LazyState through its location word.
 struct StateBox {
     HeapHeader header;
     void* type;
-    const void* initializer;
-    void* initializer_context;
     void* value;
 };
 
 const BoxMetadata kStateMetadata = {destroy_box, nullptr, 0};
 
-void* state_value(StateBox* state) {
-    if (state->value == nullptr) {
-        const auto* witnesses = witnesses_of(state->type);
-        state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
-        rt_call_witness(state->initializer, state->value, state->initializer_context, nullptr, nullptr);
-    }
-    return state->value;
+constexpr uint8_t kStorageCaseThunk = 1;
+constexpr uint32_t kLazyStateLocationField = 1;
+constexpr size_t kLazyStateOffsetsWord = 3;
+
+size_t lazy_state_location_offset(void* metadata) {
+    const auto* offsets = reinterpret_cast<const uint32_t*>(static_cast<void**>(metadata) + kLazyStateOffsetsWord);
+    return offsets[kLazyStateLocationField];
 }
 
-SWIFTCC void lazy_state_init(SWIFT_OUT StateBox** out, const void* initializer, void* context, void* type) {
+void* state_value(StateBox* state) { return state->value; }
+
+// The first read fixes the state: a thunk runs once, and later copies of the view share the box.
+StateBox* state_box_for(char* self, void* metadata) {
+    void* type = generic_argument(metadata);
+    auto** location = reinterpret_cast<StateBox**>(self + lazy_state_location_offset(metadata));
+    if (*location != nullptr) return *location;
+    const auto* witnesses = witnesses_of(type);
     auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
     state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
     new (&state->header.references) std::atomic<uint64_t>(1);
     state->type = type;
-    state->initializer = initializer;
-    state->initializer_context = context;
-    *out = state;
+    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    const size_t payload = witnesses->size < 2 * sizeof(void*) ? 2 * sizeof(void*) : witnesses->size;
+    if (static_cast<uint8_t>(self[payload]) == kStorageCaseThunk) {
+        const void* thunk;
+        void* context;
+        memcpy(&thunk, self, sizeof thunk);
+        memcpy(&context, self + sizeof thunk, sizeof context);
+        rt_call_witness(thunk, state->value, context, nullptr, nullptr);
+    } else {
+        witnesses->initialize_with_copy(state->value, self, type);
+    }
+    *location = state;
+    return state;
 }
 
-SWIFTCC void lazy_state_wrapped_value_get(SWIFT_OUT void* out, __attribute__((swift_context)) StateBox** self) {
-    auto* state = *self;
-    witnesses_of(state->type)->initialize_with_copy(out, state_value(state), state->type);
+SWIFTCC void lazy_state_init(SWIFT_OUT char* out, const void* initializer, void* context, void* type) {
+    void* metadata = lazy_state_metadata(type);
+    const auto* witnesses = witnesses_of(type);
+    const size_t payload = witnesses->size < 2 * sizeof(void*) ? 2 * sizeof(void*) : witnesses->size;
+    memset(out, 0, witnesses_of(metadata)->size);
+    memcpy(out, &initializer, sizeof initializer);
+    memcpy(out + sizeof initializer, &context, sizeof context);
+    out[payload] = static_cast<char>(kStorageCaseThunk);
+}
+
+SWIFTCC void lazy_state_wrapped_value_get(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT char* self) {
+    auto* state = state_box_for(self, metadata);
+    witnesses_of(state->type)->initialize_with_copy(out, state->value, state->type);
 }
 
 // Framework constants are tagged immediates: the high bit makes retain and release ignore them.
@@ -339,9 +495,9 @@ SWIFTCC void binding_get_set(SWIFT_OUT BindingNode** out, const void* getter, vo
     *out = binding;
 }
 
-SWIFTCC void lazy_state_projected(SWIFT_OUT BindingNode** out, void*, SWIFT_CONTEXT StateBox** self) {
+SWIFTCC void lazy_state_projected(SWIFT_OUT BindingNode** out, void* metadata, SWIFT_CONTEXT char* self) {
     auto* binding = new_binding(BindingKind::State);
-    binding->source = rt_swift_retain(*self);
+    binding->source = rt_swift_retain(state_box_for(self, metadata));
     *out = binding;
 }
 
@@ -372,13 +528,6 @@ SWIFTCC void frame_layout_init(SWIFT_OUT FrameLayout* out, uint64_t width, uint6
 }
 
 // Text: words 0-1 hold the resolved string, and the last word packs font and colour as an immediate.
-struct TextValue {
-    uint64_t text_bits;
-    uint64_t text_object;
-    uint64_t kind;
-    uint64_t style;
-};
-
 constexpr uint64_t kTextFontMask = 0x3ffff;
 constexpr unsigned kTextColorShift = 24;
 constexpr uint64_t kTextColorMask = 0xffULL << kTextColorShift;
@@ -427,6 +576,15 @@ const char* node_kind_name(NodeKind kind) {
     switch (kind) {
         case NodeKind::TabView: return "TabView";
         case NodeKind::Tab: return "Tab";
+        case NodeKind::NavigationStack: return "NavigationStack";
+        case NodeKind::List: return "List";
+        case NodeKind::Button: return "Button";
+        case NodeKind::Label: return "Label";
+        case NodeKind::Toggle: return "Toggle";
+        case NodeKind::Modifier: return "Modifier";
+        case NodeKind::Sheet: return "Sheet";
+        case NodeKind::Toolbar: return "Toolbar";
+        case NodeKind::OnChange: return "OnChange";
     }
     return "?";
 }
@@ -556,6 +714,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI11WindowGroupV2id5title11lazyContentACyxGSSSg_AA4TextVSgxyctcfC", reinterpret_cast<void*>(window_group_init)},
         {"$s7SwiftUI12SceneBuilderV10buildBlockyxxAA0C0RzlFZ", reinterpret_cast<void*>(scene_build_block)},
         {"$s7SwiftUI9LazyStateV12wrappedValueACyxGxyXA_tcfC", reinterpret_cast<void*>(lazy_state_init)},
+        {"$s7SwiftUI9LazyStateV7StorageO5valueyAEyx_GxcAGmlFWC", const_cast<int32_t*>(&kStorageCaseValueTag)},
         {"$s7SwiftUI9LazyStateV12wrappedValuexvg", reinterpret_cast<void*>(lazy_state_wrapped_value_get)},
         {"$s7SwiftUI4FontV4bodyACvgZ", reinterpret_cast<void*>(constant_getter<kFontBody>)},
         {"$s7SwiftUI4FontV7captionACvgZ", reinterpret_cast<void*>(constant_getter<kFontCaption>)},
@@ -603,6 +762,24 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI8BindableV12wrappedValuexvg", reinterpret_cast<void*>(bindable_wrapped_get)},
         {"$s7SwiftUI8BindableV14projectedValueACyxGvg", reinterpret_cast<void*>(bindable_projected)},
         {"$s7SwiftUI8BindableVAARlzClE13dynamicMemberAA7BindingVyqd__Gs24ReferenceWritableKeyPathCyxqd__G_tcluig", reinterpret_cast<void*>(bindable_member)},
+        {"$s7SwiftUI15NavigationStackV4rootACyAA0C4PathVq_Gq_yXE_tcAFRszrlufC", reinterpret_cast<void*>(navigation_stack_init)},
+        {"$s7SwiftUI4ListVAAs5NeverORszrlE7contentACyAEq_Gq_yXE_tcfC", reinterpret_cast<void*>(list_init)},
+        {"$s7SwiftUI6ButtonV6action5labelACyxGyyc_xyXEtcfC", reinterpret_cast<void*>(button_init)},
+        {"$s7SwiftUI6ButtonV4role6action5labelACyxGAA0C4RoleVSg_yycxyXEtcfC", reinterpret_cast<void*>(button_role_init)},
+        {"$s7SwiftUI5LabelV5title4iconACyxq_GxyXE_q_yXEtcfC", reinterpret_cast<void*>(label_init)},
+        {"$s7SwiftUI6ToggleV4isOn5labelACyxGAA7BindingVySbG_xyXEtcfC", reinterpret_cast<void*>(toggle_label_init)},
+        {"$s7SwiftUI6ToggleVA2A4TextVRszrlE_4isOnACyAEGqd___AA7BindingVySbGtcSyRd__lufC", reinterpret_cast<void*>(toggle_title_init)},
+        {"$s7SwiftUI4ViewPAAE11buttonStyleyQrqd__AA015PrimitiveButtonE0Rd__lF", reinterpret_cast<void*>(modifier_generic_style)},
+        {"$s7SwiftUI4ViewPAAE11pickerStyleyQrqd__AA06PickerE0Rd__lF", reinterpret_cast<void*>(modifier_generic_style)},
+        {"$s7SwiftUI4ViewPAAE13textSelectionyQrqd__AA17TextSelectabilityRd__lF", reinterpret_cast<void*>(modifier_generic_style)},
+        {"$s7SwiftUI4ViewPAAE15navigationTitleyQrAA18LocalizedStringKeyVF", reinterpret_cast<void*>(navigation_title_key)},
+        {"$s7SwiftUI4ViewPAAE15navigationTitleyQrAA4TextVF", reinterpret_cast<void*>(navigation_title_text)},
+        {"$s7SwiftUI4ViewPAAE15navigationTitleyQrqd__SyRd__lF", reinterpret_cast<void*>(navigation_title_string)},
+        {"$s7SwiftUI4ViewPAAE29navigationBarTitleDisplayModeyQrAA010NavigationE4ItemV0fgH0OF", reinterpret_cast<void*>(navigation_display_mode)},
+        {"$s7SwiftUI4ViewPAAE7toolbar7contentQrqd__yXE_tAA14ToolbarContentRd__lF", reinterpret_cast<void*>(toolbar_modifier)},
+        {"$s7SwiftUI4ViewPAAE7toolbar7contentQrqd__yXE_tAaBRd__lF", reinterpret_cast<void*>(toolbar_modifier)},
+        {"$s7SwiftUI4ViewPAAE8onChange2of7initial_Qrqd___Sbyqd___qd__tctSQRd__lF", reinterpret_cast<void*>(on_change_modifier)},
+        {"$s7SwiftUI4ViewPAAE5sheet4item9onDismiss7contentQrAA7BindingVyqd__SgG_yycSgqd_0_qd__cts12IdentifiableRd__AaBRd_0_r0_lF", reinterpret_cast<void*>(sheet_modifier)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

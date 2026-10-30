@@ -63,7 +63,7 @@ struct ValueWitnessTable {
     void (*destructive_inject_enum_tag)(void*, uint32_t, void*);
 };
 
-enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential };
+enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential, StateStorage };
 
 struct Metadata;
 
@@ -145,11 +145,26 @@ void* witness_assign_take(void* destination, void* source, void* type) {
     return witness_take(destination, source, type);
 }
 
+constexpr uint8_t kStorageCaseValue = 0;
+constexpr size_t kStorageThunkContextOffset = 8;
+
+uint8_t state_storage_tag(const void* value, const void* type) {
+    return static_cast<const uint8_t*>(value)[witnesses_of(type)->size - 1];
+}
+
 void* witness_copy(void* destination, void* source, void* type) {
     const auto* layout = layout_of(type);
     auto* to = static_cast<char*>(destination);
     auto* from = static_cast<char*>(source);
     switch (layout->kind) {
+        case LayoutKind::StateStorage:
+            memcpy(destination, source, witnesses_of(type)->size);
+            if (state_storage_tag(source, type) == kStorageCaseValue) {
+                witnesses_of(layout->payload)->initialize_with_copy(destination, source, layout->payload);
+            } else {
+                retain(*reinterpret_cast<void**>(from + kStorageThunkContextOffset));
+            }
+            break;
         case LayoutKind::Pod:
             memcpy(destination, source, witnesses_of(type)->size);
             break;
@@ -191,6 +206,10 @@ void witness_destroy(void* raw, void* type) {
     const auto* layout = layout_of(type);
     auto* value = static_cast<char*>(raw);
     switch (layout->kind) {
+        case LayoutKind::StateStorage:
+            if (state_storage_tag(raw, type) == kStorageCaseValue) witnesses_of(layout->payload)->destroy(raw, layout->payload);
+            else release(*reinterpret_cast<void**>(value + kStorageThunkContextOffset));
+            break;
         case LayoutKind::Pod:
             break;
         case LayoutKind::NativeReference:
@@ -254,6 +273,7 @@ uint32_t extra_inhabitant_get(const void* value, void* type) {
             return bits < kPointerExtraInhabitants ? static_cast<uint32_t>(bits) + 1 : 0;
         }
         case LayoutKind::Pod:
+        case LayoutKind::StateStorage:
             return 0;
     }
     return 0;
@@ -286,6 +306,7 @@ void extra_inhabitant_store(void* value, uint32_t tag, void* type) {
             break;
         }
         case LayoutKind::Pod:
+        case LayoutKind::StateStorage:
             break;
     }
 }
@@ -359,7 +380,13 @@ Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector
     // Resilient framework enums are one word here: the case index, tagged so refcounting skips it.
     witnesses->get_enum_tag = +[](const void* value, void*) { return static_cast<uint32_t>(*static_cast<const uint64_t*>(value)); };
     witnesses->destructive_project_enum_data = +[](void*, void*) {};
-    witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void*) { *static_cast<uint64_t*>(value) = kBridgeImmediateBit | tag; };
+    witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void* self) {
+        if (layout_of(self)->kind == LayoutKind::StateStorage) {
+            static_cast<uint8_t*>(value)[witnesses_of(self)->size - 1] = static_cast<uint8_t>(tag);
+        } else {
+            *static_cast<uint64_t*>(value) = kBridgeImmediateBit | tag;
+        }
+    };
 
     const size_t words = 4 + (arguments.empty() ? 1 : arguments.size());
     auto* block = static_cast<MetadataAllocation*>(calloc(words, sizeof(void*)));
@@ -497,7 +524,37 @@ Metadata* struct_from_fields(const std::string& key, const std::vector<FrozenFie
         if (witnesses->flags & kFlagNonPod) plain = false;
     }
     if (plain) layout->kind = LayoutKind::Pod;
-    return named_type(key, kKindStruct, layout, offset, alignment, inhabitants, arguments);
+    std::vector<void*> with_offsets = arguments;
+    const size_t offset_words = (layout->fields.size() + 1) / 2;
+    with_offsets.resize(arguments.size() + offset_words, nullptr);
+    auto* metadata = named_type(key, kKindStruct, layout, offset, alignment, inhabitants, with_offsets);
+    // The field offset vector follows the generic arguments; the app reads offsets from it directly.
+    auto* offsets = reinterpret_cast<uint32_t*>(&metadata->arguments[arguments.size()]);
+    for (size_t i = 0; i < layout->fields.size(); ++i) offsets[i] = static_cast<uint32_t>(layout->fields[i].offset);
+    return metadata;
+}
+
+Metadata* state_storage_of(Metadata* value) {
+    const std::string key = "StateStorage" + pointer_key(value);
+    const auto* witnesses = witnesses_of(value);
+    const size_t payload = witnesses->size < 2 * kPointerSize ? 2 * kPointerSize : witnesses->size;
+    const size_t alignment = (witnesses->flags & 0xff) + 1 < kPointerSize ? kPointerSize : (witnesses->flags & 0xff) + 1;
+    return named_type(key, kKindStruct, new Layout{LayoutKind::StateStorage, {}, value}, payload + 1, alignment, 0, {value});
+}
+
+Metadata* lazy_state_of(Metadata* value) {
+    const std::string key = "LazyState" + pointer_key(value);
+    if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
+    Metadata* storage = state_storage_of(value);
+    auto* layout = new Layout{LayoutKind::Aggregate, {}, nullptr};
+    const size_t storage_size = witnesses_of(storage)->size;
+    const size_t location_offset = (storage_size + kPointerSize - 1) & ~(kPointerSize - 1);
+    layout->fields = {{storage, 0}, {native_type(), location_offset}};
+    auto* metadata = named_type(key, kKindStruct, layout, location_offset + kPointerSize, (witnesses_of(storage)->flags & 0xff) + 1, 0, {value, nullptr});
+    auto* offsets = reinterpret_cast<uint32_t*>(&metadata->arguments[1]);
+    offsets[0] = 0;
+    offsets[1] = static_cast<uint32_t>(location_offset);
+    return metadata;
 }
 
 constexpr FrozenField kWord = {8, 8, -1, false};
@@ -544,6 +601,8 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
 }
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
+    if (symbol == "_$s7SwiftUI9LazyStateVMn" && !arguments.empty()) return lazy_state_of(static_cast<Metadata*>(arguments[0]));
+    if (symbol == "_$s7SwiftUI9LazyStateV7StorageOMn" && !arguments.empty()) return state_storage_of(static_cast<Metadata*>(arguments[0]));
     const auto found = frozen_layouts().find(symbol);
     if (found == frozen_layouts().end()) return nullptr;
     for (const auto& field : found->second) {
@@ -748,6 +807,10 @@ private:
 
     void bound_generic() {
         std::vector<void*> arguments = pop_generic_arguments();
+        if (!failure_.empty()) return;
+        for (const void* argument : arguments) {
+            if (argument == nullptr) { fail("generic argument did not resolve"); return; }
+        }
         Node base = pop();
         if (base.tag != Node::Tag::Nominal) {
             fail("bound generic base is not a nominal type");
@@ -775,6 +838,10 @@ private:
                 break;
             }
             elements.insert(elements.begin(), as_type(top));
+        }
+        if (!failure_.empty()) return;
+        for (const auto* element : elements) {
+            if (element == nullptr) { fail("tuple element did not resolve"); return; }
         }
         push_type(tuple_of(elements));
     }
@@ -912,7 +979,13 @@ private:
                 substitution();
                 return;
             case 'X':
-                if (cursor_ < end_ && *cursor_ == 'l') { ++cursor_; push_type(native_type()); return; }
+                if (cursor_ < end_ && *cursor_ == 'l') {
+                    // `yXl` is AnyObject: a composition of no protocols, whose empty list was just pushed.
+                    ++cursor_;
+                    if (!stack_.empty() && stack_.back().tag == Node::Tag::ListMarker) pop();
+                    push_type(native_type());
+                    return;
+                }
                 fail("unsupported X type");
                 return;
             case 'm':
@@ -1063,6 +1136,23 @@ struct SingletonInitialization {
 using CompletionFunction = void* (*)(void*, void*, void*);
 
 const void* relative_target(const int32_t* field) { return reinterpret_cast<const char*>(field) + *field; }
+
+constexpr uint64_t kKindObjCClassWrapper = 0x305;
+
+// The metadata form of an Objective-C class: lets it stand as a generic argument, stored as one retained word.
+extern "C" void* rt_getObjCClassMetadata(void* cls) {
+    const std::lock_guard guard(g_types_lock);
+    if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(cls)) == nullptr) return cls;
+    const std::string key = "objc" + pointer_key(cls);
+    if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
+    auto* metadata = make_metadata(kKindObjCClassWrapper, cls, {}, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants);
+    g_named_types[key] = metadata;
+    return metadata;
+}
+
+extern "C" void* rt_getObjCClassFromMetadata(Metadata* metadata) {
+    return metadata->kind == kKindObjCClassWrapper ? const_cast<void*>(metadata->descriptor) : metadata;
+}
 
 extern "C" MetadataResponse rt_getSingletonMetadata(size_t, const char* descriptor) {
     static pthread_mutex_t lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
@@ -1229,6 +1319,8 @@ void* make_accessor_stub(const std::string& symbol) {
 void* type_system_symbol(std::string_view name) {
     if (name == "swift_getTypeByMangledNameInContext2") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContext2);
     if (name == "swift_getTypeByMangledNameInContextInMetadataState2") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContextInMetadataState2);
+    if (name == "swift_getObjCClassMetadata") return reinterpret_cast<void*>(rt_getObjCClassMetadata);
+    if (name == "swift_getObjCClassFromMetadata") return reinterpret_cast<void*>(rt_getObjCClassFromMetadata);
     if (name == "swift_getSingletonMetadata") return reinterpret_cast<void*>(rt_getSingletonMetadata);
     if (name == "swift_initStructMetadata") return reinterpret_cast<void*>(rt_initStructMetadata);
     if (name == "swift_updateClassMetadata2") return reinterpret_cast<void*>(rt_updateClassMetadata2);
@@ -1295,4 +1387,9 @@ void* make_code_stub(void* entry, const void* data) {
     memcpy(stub + 6, &entry, sizeof entry);
     __builtin___clear_cache(reinterpret_cast<char*>(stub), reinterpret_cast<char*>(stub + 8));
     return stub;
+}
+
+void* lazy_state_metadata(void* value_type) {
+    const std::lock_guard guard(g_types_lock);
+    return lazy_state_of(static_cast<Metadata*>(value_type));
 }

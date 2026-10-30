@@ -557,8 +557,6 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_once", rt_once),
         SYM("dispatch_once_f", rt_dispatch_once),
         SYM("objc_opt_self", rt_identity),
-        SYM("swift_getObjCClassMetadata", rt_identity),
-        SYM("swift_getObjCClassFromMetadata", rt_identity),
         SYM("swift_beginAccess", +[](void*, void*, uintptr_t, void*) {}),
         SYM("swift_endAccess", +[](void*) {}),
         SYM("_swiftImmortalRefCount", kImmortal),
