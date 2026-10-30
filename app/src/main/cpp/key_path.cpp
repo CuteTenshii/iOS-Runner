@@ -18,6 +18,7 @@ constexpr uint32_t kBufferSizeMask = 0x00ffffff;
 constexpr uint32_t kComponentKindMask = 0x7f000000;
 constexpr unsigned kComponentKindShift = 24;
 constexpr uint32_t kPayloadMask = 0x00ffffff;
+constexpr uint32_t kKindExternal = 0;
 constexpr uint32_t kKindStruct = 1;
 constexpr uint32_t kKindComputed = 2;
 constexpr uint32_t kKindClass = 3;
@@ -104,7 +105,15 @@ bool decode_step(const char*& cursor, Step& step, const char* end) {
     cursor += sizeof header;
     step = {};
     step.kind = (header & kComponentKindMask) >> kComponentKindShift;
-    const uint32_t payload = header & kPayloadMask;
+    uint32_t payload = header & kPayloadMask;
+    if (step.kind == kKindExternal) {
+        // A property in another module: its descriptor and arguments, then a local component that does the work.
+        cursor += sizeof(uint32_t) * (1 + payload);
+        const uint32_t local = read_u32(cursor);
+        cursor += sizeof local;
+        step.kind = (local & kComponentKindMask) >> kComponentKindShift;
+        payload = local & kPayloadMask;
+    }
     switch (step.kind) {
         case kKindStruct:
         case kKindClass:

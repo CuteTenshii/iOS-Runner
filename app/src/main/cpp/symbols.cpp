@@ -71,6 +71,10 @@ void darwin_block_release(const void* raw) {
     free(block);
 }
 
+uint8_t darwin_log_type_fault() { return 0x11; }
+bool darwin_log_type_enabled(void*, uint8_t) { return false; }
+void darwin_log_impl(...) {}
+
 // The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
 bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
@@ -97,6 +101,9 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"_Block_copy", reinterpret_cast<void*>(darwin_block_copy)},
         {"_Block_release", reinterpret_cast<void*>(darwin_block_release)},
         {"_NSConcreteStackBlock", darwin_stack_block_class},
+        {"$sSo13os_log_type_ta0A0E5faultABvgZ", reinterpret_cast<void*>(darwin_log_type_fault)},
+        {"os_log_type_enabled", reinterpret_cast<void*>(darwin_log_type_enabled)},
+        {"_os_log_impl", reinterpret_cast<void*>(darwin_log_impl)},
         {"_availability_version_check", reinterpret_cast<void*>(darwin_availability_version_check)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
         {"fopen", reinterpret_cast<void*>(fopen)},

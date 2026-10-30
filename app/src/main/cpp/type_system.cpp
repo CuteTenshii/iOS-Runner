@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "engine.h"
@@ -269,7 +270,17 @@ void* witness_buffer_copy(void* destination, void* source, void* type) {
     return witness_copy(destination, source, type);
 }
 
+// App-defined types have no layout record here, only their own value witnesses.
+std::unordered_set<const void*>& runtime_metadata() {
+    static std::unordered_set<const void*> all;
+    return all;
+}
+
 uint32_t extra_inhabitant_get(const void* value, void* type) {
+    if (runtime_metadata().count(type) == 0) {
+        const auto* witnesses = witnesses_of(type);
+        return witnesses->get_enum_tag_single_payload(value, witnesses->extra_inhabitants, type);
+    }
     const auto* layout = layout_of(type);
     const auto* bytes = static_cast<const char*>(value);
     switch (layout->kind) {
@@ -302,6 +313,11 @@ uint32_t extra_inhabitant_get(const void* value, void* type) {
 }
 
 void extra_inhabitant_store(void* value, uint32_t tag, void* type) {
+    if (runtime_metadata().count(type) == 0) {
+        const auto* witnesses = witnesses_of(type);
+        witnesses->store_enum_tag_single_payload(value, tag, witnesses->extra_inhabitants, type);
+        return;
+    }
     const auto* layout = layout_of(type);
     auto* bytes = static_cast<char*>(value);
     switch (layout->kind) {
@@ -420,7 +436,9 @@ Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector
     block->kind = kind;
     block->descriptor = descriptor;
     for (size_t i = 0; i < arguments.size(); ++i) block->arguments[i] = arguments[i];
-    return reinterpret_cast<Metadata*>(&block->kind);
+    auto* metadata = reinterpret_cast<Metadata*>(&block->kind);
+    runtime_metadata().insert(metadata);
+    return metadata;
 }
 
 Metadata* named_type(const std::string& key, uint64_t kind, Layout* layout, size_t size, size_t alignment,
@@ -928,6 +946,14 @@ private:
                 substitute(node);
                 return;
             }
+            case 'p': case 'P': case 'r': case 'R': {
+                // Unsafe pointers: one plain word, whatever they point at.
+                Node node;
+                node.tag = Node::Tag::Nominal;
+                node.nominal.foreign_symbol = "$Pointer";
+                stack_.push_back(node);
+                return;
+            }
             case 'a': case 'D': case 'h': {
                 Node node;
                 node.tag = Node::Tag::Nominal;
@@ -991,7 +1017,7 @@ private:
         if (name != nullptr && name[0] == '$') {
             std::string key = name;
             for (const void* argument : arguments) key += pointer_key(argument);
-            node.type = bridge_type(key, arguments);
+            node.type = strcmp(name, "$Pointer") == 0 ? pod_type("Bp", kPointerSize) : bridge_type(key, arguments);
             if (strcmp(name, "$Array") == 0 && !arguments.empty()) g_array_elements[node.type] = arguments[0];
             if (strcmp(name, "$Dictionary") == 0 && arguments.size() == 2) g_dictionary_values[node.type] = arguments[1];
         } else {
@@ -1216,6 +1242,9 @@ private:
                 return;
             case 'Q':
                 opaque_type();
+                return;
+            // inout: a parameter convention, and function types here are only ever laid out as closures.
+            case 'z':
                 return;
             default:
                 fail(std::string("unsupported operator '") + code + "'");

@@ -796,6 +796,9 @@ std::set<std::string>& started_tasks() {
     return started;
 }
 
+// SwiftUI's runtime warnings go nowhere: the log object only needs to be something it can pass along.
+SWIFTCC void* runtime_issues_log() { return reinterpret_cast<void*>(kImmediate); }
+
 // Optional doubles travel in integer registers, so these words hold raw bit patterns.
 struct FrameLayout {
     uint64_t width;
@@ -1615,6 +1618,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4ViewPAAE22accessibilityAddTraitsyAA15ModifiedContentVyxAA31AccessibilityAttachmentModifierVGAA0iF0VF", reinterpret_cast<void*>(accessibility_traits)},
         {"$s7SwiftUI19AccessibilityTraitsV8isHeaderACvgZ", reinterpret_cast<void*>(accessibility_is_header)},
         {"$s7SwiftUI17NavigationBarItemV16TitleDisplayModeO6inlineyA2EmFWC", const_cast<int32_t*>(&kTitleDisplayInline)},
+        {"$s7SwiftUI3LogO013runtimeIssuesC0So9OS_os_logCvgZ", reinterpret_cast<void*>(runtime_issues_log)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };
