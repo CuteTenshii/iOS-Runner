@@ -10,6 +10,7 @@
 #include "engine.h"
 #include "foundation_shim.h"
 #include "objc_runtime.h"
+#include "stdlib_shim.h"
 #include "swift_runtime.h"
 #include "swiftui_shim.h"
 #include "type_system.h"
@@ -60,6 +61,7 @@ void* resolve_symbol(const char* name) {
     if (void* symbol = swiftui_symbol(name)) return symbol;
     if (void* symbol = objc_runtime_symbol(name)) return symbol;
     if (void* symbol = foundation_symbol(name)) return symbol;
+    if (void* symbol = stdlib_symbol(name)) return symbol;
     return type_system_symbol(name);
 }
 

@@ -415,6 +415,8 @@ extern "C" void rt_app_main(void* metadata, void** witness_table) {
     swiftui_run_scene(scene);
 }
 
+uint64_t* empty_set_singleton() { return g_empty_set; }
+
 void* swift_runtime_symbol(std::string_view name) {
 #define SYM(symbol, target) {symbol, reinterpret_cast<void*>(target)}
 #define THUNK_SYMS(reg)                                  \

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <string_view>
 
 // Runtime type lookup: mangled-name resolution and metadata for standard library and framework types.
@@ -9,3 +10,6 @@ const char* foreign_type_name(const void* metadata);
 
 // Resolves a mangled type name, as swift_getTypeByMangledNameInContext2 does.
 void* resolve_mangled_type(const char* name, void* const* generics);
+
+// Metadata of a generic standard library storage class, whose prefix holds its destroyer.
+void* storage_class_metadata(const char* symbol, void* const* arguments, size_t count);

@@ -18,6 +18,8 @@
 #include "engine.h"
 #include "macho.h"
 
+extern "C" void (*storage_destroyer_for(const char* symbol))(void*);
+
 namespace {
 
 constexpr uint64_t kKindStruct = 0x200;
@@ -453,6 +455,16 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
     std::string key = symbol;
     for (const void* argument : arguments) key += pointer_key(argument);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
+    if (storage_destroyer_for(symbol.c_str()) != nullptr) {
+        auto* block = static_cast<void**>(calloc(4 + (arguments.empty() ? 1 : arguments.size()), sizeof(void*)));
+        block[0] = reinterpret_cast<void*>(storage_destroyer_for(symbol.c_str()));
+        block[2] = nullptr;
+        auto* metadata = reinterpret_cast<Metadata*>(block + 2);
+        for (size_t i = 0; i < arguments.size(); ++i) block[4 + i] = arguments[i];
+        g_named_types[key] = metadata;
+        g_foreign_names[metadata] = strdup(symbol.c_str());
+        return metadata;
+    }
     // Text is frozen, so the app's compiled code passes its four words inline.
     Metadata* metadata = symbol == "_$s7SwiftUI4TextVMn"
         ? named_type(key, kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants)
@@ -1101,4 +1113,9 @@ void* resolve_mangled_type(const char* name, void* const* generics) {
         length += byte >= 1 && byte <= 0x17 ? 5 : 1;
     }
     return rt_getTypeByMangledNameInContext2(name, length, nullptr, generics);
+}
+
+void* storage_class_metadata(const char* symbol, void* const* arguments, size_t count) {
+    const std::lock_guard guard(g_types_lock);
+    return foreign_nominal(symbol, std::vector<void*>(arguments, arguments + count));
 }
