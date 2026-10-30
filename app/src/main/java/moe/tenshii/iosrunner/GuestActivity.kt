@@ -2,9 +2,11 @@ package moe.tenshii.iosrunner
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -19,6 +21,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -33,7 +39,9 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
+import java.util.Collections
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 /** Hosts the guest app in the isolated :engine process and draws the view tree it reports. */
 class GuestActivity : Activity() {
@@ -42,7 +50,9 @@ class GuestActivity : Activity() {
     private var selectedTab = 0
     private val expanded = HashSet<String>()
     private val scrollPositions = HashMap<String, Int>()
-    private var sheetDialog: AlertDialog? = null
+    private var sheetDialog: Dialog? = null
+    private val webViews = HashMap<Int, WebView>()
+    private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,7 +91,82 @@ class GuestActivity : Activity() {
                 draw()
             }
             "open" -> openExternal(payload)
+            "webnew" -> createWebView(JSONObject(payload))
+            "webload" -> JSONObject(payload).let { webViews[it.getInt("id")]?.loadUrl(it.getString("url")) }
+            "webjs" -> runScript(JSONObject(payload))
         }
+    }
+
+    private fun createWebView(spec: JSONObject) {
+        val id = spec.getInt("id")
+        val scripts = spec.getJSONArray("scripts").let { array -> List(array.length()) { array.getString(it) } }
+        val web = WebView(this)
+        web.settings.javaScriptEnabled = true
+        web.settings.domStorageEnabled = true
+        // WKWebView's default agent plus the app's own suffix, which it relies on to be served the mobile sites.
+        web.settings.userAgentString = "$IOS_WEBKIT_AGENT ${spec.optString("name")}".trim()
+        CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
+        web.addJavascriptInterface(ScriptBridge(), SCRIPT_BRIDGE)
+        web.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                // Without AndroidX there is no true document-start injection, so this is as early as it gets.
+                scripts.forEach { view.evaluateJavascript(it, null) }
+                nativeUrlChanged(id, url)
+            }
+
+            override fun onPageFinished(view: WebView, url: String) {
+                rememberCookieHost(url)
+                nativeUrlChanged(id, url)
+                nativeCookiesChanged()
+            }
+        }
+        webViews[id] = web
+    }
+
+    private fun rememberCookieHost(url: String) {
+        val host = Uri.parse(url).host ?: return
+        val preferences = getSharedPreferences(COOKIE_PREFERENCES, MODE_PRIVATE)
+        val hosts = preferences.getStringSet(COOKIE_HOSTS, emptySet()).orEmpty()
+        if (host !in hosts) preferences.edit().putStringSet(COOKIE_HOSTS, hosts + host).apply()
+    }
+
+    private fun runScript(call: JSONObject) {
+        val id = call.getInt("call")
+        val web = webViews[call.getInt("id")]
+        if (web == null) {
+            nativeScriptFinished(id, "", true)
+            return
+        }
+        val arguments = call.getJSONObject("args")
+        val names = arguments.keys().asSequence().toList()
+        val values = names.joinToString(",") { name ->
+            val value = arguments.get(name)
+            if (value is String) JSONObject.quote(value) else value.toString()
+        }
+        val script = "(async function(${names.joinToString(",")}){${call.getString("body")}}).call(null,$values)" +
+            ".then(r=>$SCRIPT_BRIDGE.finish($id,JSON.stringify(r===undefined?null:r)),e=>$SCRIPT_BRIDGE.fail($id));"
+        pendingScripts.add(id)
+        web.evaluateJavascript(script, null)
+        // A page mid-navigation may never answer, and the app polls with its own deadlines.
+        mainThread.postDelayed({ if (pendingScripts.remove(id)) nativeScriptFinished(id, "", true) }, SCRIPT_TIMEOUT_MS)
+    }
+
+    private inner class ScriptBridge {
+        @JavascriptInterface
+        fun finish(id: Int, json: String?) {
+            if (pendingScripts.remove(id)) nativeScriptFinished(id, json ?: "null", false)
+        }
+
+        @JavascriptInterface
+        fun fail(id: Int) {
+            if (pendingScripts.remove(id)) nativeScriptFinished(id, "", true)
+        }
+    }
+
+    private fun detachedWebView(id: Int): WebView? {
+        val web = webViews[id] ?: return null
+        (web.parent as? ViewGroup)?.removeView(web)
+        return web
     }
 
     private fun openExternal(url: String) {
@@ -106,20 +191,25 @@ class GuestActivity : Activity() {
 
     private fun draw() {
         rememberScroll(root)
+        webViews.values.forEach { (it.parent as? ViewGroup)?.removeView(it) }
         root.removeAllViews()
-        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        var sheet: JSONObject? = null
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(themeColor(android.R.attr.colorBackground))
+        }
         forEachChild(tree) { node ->
             when (node.optString("k")) {
-                "sheet" -> sheet = node
-                // Native iOS views have no counterpart yet: the web preview is not drawn.
-                "native" -> Unit
+                "sheet" -> Unit
+                // A top-level web view works behind the UI: its page still needs real layout to run.
+                "native" -> detachedWebView(node.optInt("w", -1))?.let { web ->
+                    root.addView(web, FrameLayout.LayoutParams(dp(HIDDEN_WEB_WIDTH_DP), dp(HIDDEN_WEB_HEIGHT_DP)))
+                }
                 else -> build(node, column, "r")
             }
         }
         root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         restoreScroll(root)
-        showSheet(sheet ?: findSheet(tree))
+        showSheet(findSheet(tree))
     }
 
     private fun findSheet(nodes: JSONArray): JSONObject? {
@@ -132,18 +222,23 @@ class GuestActivity : Activity() {
     }
 
     private fun showSheet(sheet: JSONObject?) {
-        sheetDialog?.setOnDismissListener(null)
-        sheetDialog?.dismiss()
-        sheetDialog = null
-        if (sheet == null) return
-        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (sheet == null) {
+            sheetDialog?.setOnCancelListener(null)
+            sheetDialog?.dismiss()
+            sheetDialog = null
+            return
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(themeColor(android.R.attr.colorBackground))
+        }
+        applySystemBarInsets(content)
         children(sheet).forEach { build(it, content, "sheet") }
         val action = sheet.optInt("d", -1)
-        sheetDialog = AlertDialog.Builder(this)
-            .setView(ScrollView(this).apply { addView(content) })
-            .setPositiveButton(R.string.close) { _, _ -> }
-            .setOnDismissListener { if (action >= 0) nativeAction(action) }
-            .show()
+        val dialog = sheetDialog ?: Dialog(this, android.R.style.Theme_DeviceDefault_NoActionBar).also { sheetDialog = it }
+        dialog.setOnCancelListener { if (action >= 0) nativeAction(action) }
+        dialog.setContentView(content, ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        if (!dialog.isShowing) dialog.show()
     }
 
     private fun build(node: JSONObject, parent: ViewGroup, path: String) {
@@ -172,6 +267,7 @@ class GuestActivity : Activity() {
             "disclosure" -> buildDisclosure(node, parent, key)
             "progress" -> parent.addView(ProgressBar(this), LinearLayout.LayoutParams(dp(24), dp(24)))
             "unavailable" -> parent.addView(buildUnavailable(node))
+            "native" -> detachedWebView(node.optInt("w", -1))?.let { parent.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)) }
             else -> buildChildren(node, parent, key)
         }
     }
@@ -239,7 +335,7 @@ class GuestActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
             setSingleLine()
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        findToolbarItems(node).forEachIndexed { index, item -> build(item, bar, "$path/toolbar/$index") }
+        children(node).flatMap { findToolbarItems(it) }.forEachIndexed { index, item -> build(item, bar, "$path/toolbar/$index") }
         column.addView(bar)
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         children(node).forEachIndexed { index, child -> buildNavigationContent(child, content, "$path/$index") }
@@ -247,14 +343,13 @@ class GuestActivity : Activity() {
         parent.addView(column, ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
     }
 
-    // Toolbar items are drawn in the bar, so the main content leaves them out.
+    // A toolbar's first child is the content it decorates; the rest belong in the bar.
     private fun buildNavigationContent(node: JSONObject, parent: ViewGroup, path: String) {
-        if (node.optString("k") == "toolbaritem") return
-        if (node.optString("k") in setOf("toolbar", "titled")) {
-            children(node).forEachIndexed { index, child -> buildNavigationContent(child, parent, "$path/$index") }
-            return
+        when (node.optString("k")) {
+            "toolbar" -> children(node).firstOrNull()?.let { buildNavigationContent(it, parent, "$path/0") }
+            "titled" -> children(node).forEachIndexed { index, child -> buildNavigationContent(child, parent, "$path/$index") }
+            else -> build(node, parent, path)
         }
-        build(node, parent, path)
     }
 
     private fun findTitle(node: JSONObject): String {
@@ -262,10 +357,10 @@ class GuestActivity : Activity() {
         return children(node).firstNotNullOfOrNull { findTitle(it).ifEmpty { null } }.orEmpty()
     }
 
-    private fun findToolbarItems(node: JSONObject): List<JSONObject> {
-        if (node.optString("k") == "toolbaritem") return listOf(node)
-        if (node.optString("k") == "list") return emptyList()
-        return children(node).flatMap { findToolbarItems(it) }
+    private fun findToolbarItems(node: JSONObject): List<JSONObject> = when (node.optString("k")) {
+        "toolbar" -> children(node).let { parts -> parts.drop(1) + parts.take(1).flatMap { findToolbarItems(it) } }
+        "titled" -> children(node).flatMap { findToolbarItems(it) }
+        else -> emptyList()
     }
 
     private fun buildList(node: JSONObject, parent: ViewGroup, path: String) {
@@ -614,6 +709,13 @@ class GuestActivity : Activity() {
         private const val EXTRA_APP = "app"
         private const val FALLBACK_LANGUAGE = "en"
         private const val NETWORK_TIMEOUT_MS = 30_000
+        private const val SCRIPT_TIMEOUT_MS = 5_000L
+        private const val SCRIPT_BRIDGE = "__iosRunnerBridge"
+        private const val COOKIE_PREFERENCES = "guest_cookies"
+        private const val COOKIE_HOSTS = "hosts"
+        private const val HIDDEN_WEB_WIDTH_DP = 360
+        private const val HIDDEN_WEB_HEIGHT_DP = 640
+        private const val IOS_WEBKIT_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)"
         private const val HTTP_FIRST_ERROR = 400
         private const val SURFACE_ALPHA = 0x14000000
         private var current: GuestActivity? = null
@@ -655,6 +757,28 @@ class GuestActivity : Activity() {
         } catch (_: IOException) {
             null
         }
+
+        /** Every cookie for the hosts visited so far, as tab-separated domain, name and value lines. */
+        @JvmStatic
+        fun readCookies(): String {
+            val activity = current ?: return ""
+            val manager = CookieManager.getInstance()
+            val hosts = activity.getSharedPreferences(COOKIE_PREFERENCES, MODE_PRIVATE).getStringSet(COOKIE_HOSTS, emptySet()).orEmpty()
+            return hosts.flatMap { host ->
+                manager.getCookie("https://$host").orEmpty().split("; ").filter { '=' in it }.map { cookie ->
+                    "$host\t${cookie.substringBefore('=')}\t${cookie.substringAfter('=')}"
+                }
+            }.joinToString("\n")
+        }
+
+        @JvmStatic
+        private external fun nativeScriptFinished(call: Int, json: String, failed: Boolean)
+
+        @JvmStatic
+        private external fun nativeUrlChanged(webView: Int, url: String)
+
+        @JvmStatic
+        private external fun nativeCookiesChanged()
 
         @JvmStatic
         private external fun nativeRun(bundleDir: String, executable: String, logPath: String, language: String): Int

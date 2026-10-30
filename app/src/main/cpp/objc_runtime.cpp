@@ -229,3 +229,8 @@ bool objc_is_framework_class(const void* object, const void* cls) {
     const std::string name = framework_class_name(cls);
     return !name.empty() && name == framework_class_name(*static_cast<void* const*>(object));
 }
+
+void objc_send(void* receiver, const char* selector, void* argument) {
+    using Method = void (*)(void*, const char*, void*);
+    reinterpret_cast<Method>(const_cast<void*>(rt_objc_lookup(receiver, selector)))(receiver, selector, argument);
+}

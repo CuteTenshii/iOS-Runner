@@ -13,3 +13,6 @@ void* objc_native_class(const char* name, void (*destroyer)(void*));
 
 // True if an object's class is, or names the same framework class as, `cls`.
 bool objc_is_framework_class(const void* object, const void* cls);
+
+// Sends a one-argument message to a guest object.
+void objc_send(void* receiver, const char* selector, void* argument);

@@ -307,6 +307,10 @@ void concurrency_start(const void* async_function, void* context) {
     ready_tasks().push_back({base + entry->function, context, calloc(1, kMinimumResultBytes), async_context, false});
 }
 
+void concurrency_resume_call(void* context, void* error) {
+    ready_tasks().push_back({static_cast<AsyncContextHeader*>(context)->resume_parent, error, nullptr, context, true});
+}
+
 void concurrency_drain() {
     auto& queue = ready_tasks();
     while (!queue.empty()) {

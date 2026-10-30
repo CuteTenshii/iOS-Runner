@@ -217,6 +217,8 @@ void (*g_message_sink)(const char*, const char*) = nullptr;
 std::mutex g_action_lock;
 std::condition_variable g_action_ready;
 std::deque<int> g_pending_actions;
+std::deque<std::function<void()>> g_pending_events;
+std::string (*g_cookie_handler)() = nullptr;
 bool g_actions_closed = false;
 
 }  // namespace
@@ -239,12 +241,28 @@ void engine_emit(const char* kind, const std::string& payload) {
 
 int engine_wait_for_action() {
     std::unique_lock lock(g_action_lock);
-    g_action_ready.wait(lock, [] { return g_actions_closed || !g_pending_actions.empty(); });
+    g_action_ready.wait(lock, [] { return g_actions_closed || !g_pending_actions.empty() || !g_pending_events.empty(); });
+    if (!g_pending_events.empty()) {
+        const auto event = std::move(g_pending_events.front());
+        g_pending_events.pop_front();
+        lock.unlock();
+        event();
+        return kEngineEventRan;
+    }
     if (g_pending_actions.empty()) return -1;
     const int action = g_pending_actions.front();
     g_pending_actions.pop_front();
     return action;
 }
+
+void engine_post_event(std::function<void()> event) {
+    const std::lock_guard lock(g_action_lock);
+    g_pending_events.push_back(std::move(event));
+    g_action_ready.notify_one();
+}
+
+void engine_set_cookie_handler(std::string (*handler)()) { g_cookie_handler = handler; }
+std::string engine_cookies() { return g_cookie_handler != nullptr ? g_cookie_handler() : std::string(); }
 
 void engine_post_action(int action) {
     const std::lock_guard lock(g_action_lock);

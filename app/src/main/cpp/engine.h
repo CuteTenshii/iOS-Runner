@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 
 // Runs the app bundle's main executable. Never returns control to a crashed guest: faults end the process.
@@ -26,3 +27,11 @@ struct HttpResult {
 // Performs a blocking HTTP request through the host. Headers are "Name: value" lines.
 HttpResult engine_http(const std::string& url, const std::string& method, const std::string& headers, const std::string& body);
 void engine_set_http_handler(HttpResult (*handler)(const std::string&, const std::string&, const std::string&, const std::string&));
+
+// Runs `event` on the guest thread, waking it if it is idle. engine_wait_for_action then returns kEngineEventRan.
+constexpr int kEngineEventRan = -2;
+void engine_post_event(std::function<void()> event);
+
+// Reads all cookies from the host as "domain\tname\tvalue" lines.
+std::string engine_cookies();
+void engine_set_cookie_handler(std::string (*handler)());

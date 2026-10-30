@@ -23,3 +23,6 @@ void swift_runtime_attach_conformances(const void* section, size_t size);
 
 // A distinct witness table standing in for a conformance whose type is not known.
 void* swift_runtime_placeholder_conformance(const void* protocol);
+
+// Finds a conformance's witness by the requirement's symbol name.
+const void* swift_runtime_find_witness_named(const char* conformance, const char* requirement);

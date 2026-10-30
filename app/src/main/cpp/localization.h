@@ -19,3 +19,6 @@ std::string localized_text(const LocalizedBox* box);
 void localization_set_language(const std::string& language);
 std::string localization_lookup(const std::string& key);
 std::string localization_format(const std::string& format, const std::vector<std::string>& arguments);
+
+// A string value from the bundle's Info.plist, or empty if it has none.
+std::string bundle_info_string(const std::string& key);

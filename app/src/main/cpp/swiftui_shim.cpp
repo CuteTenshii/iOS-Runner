@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 #include <map>
@@ -935,12 +936,17 @@ const char* find_conformance(const void* type, const char* protocol_symbol) {
     return nullptr;
 }
 
+extern "C" void* rt_call_make_ui_view(const void* function, void* context, void* self, void* type, void** table);
+
 const char* find_view_conformance(const void* type) { return find_conformance(type, kViewProtocolSymbol); }
 
 constexpr uint64_t kTupleKind = 0x301;
 constexpr const char* kTextSymbol = "_$s7SwiftUI4TextVMn";
 constexpr const char* kModifiedContentSymbol = "_$s7SwiftUI15ModifiedContentVMn";
 constexpr const char* kTagModifierSymbol = "_$s7SwiftUI24_TagTraitWritingModifierVMn";
+constexpr const char* kAppearanceSymbol = "_$s7SwiftUI25_AppearanceActionModifierVMn";
+constexpr const char* kMakeUIViewRequirement = "_$s7SwiftUI19UIViewRepresentableP04makeC07context0C4TypeQzAA0cD7ContextVyxG_tFTq";
+constexpr size_t kRepresentableContextBytes = 256;
 BindingNode* g_picker_binding = nullptr;
 
 bool is_runtime_node_type(void* type) {
@@ -1068,6 +1074,13 @@ std::vector<StateField> state_fields(char* view, void* type) {
     }
     return found;
 }
+
+struct AppearanceAction {
+    const void* function;
+    void* context;
+};
+
+std::vector<AppearanceAction> g_pending_appear;
 
 void* g_selection_value = nullptr;
 void* g_selection_type = nullptr;
@@ -1274,6 +1287,10 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
                 const int action = add_action({ActionKind::SetValue, nullptr, nullptr, g_picker_binding, tag, tag_type, 0, {}});
                 return node_json("option", "\"a\":" + std::to_string(action) + ",\"v\":" + (selected ? "true" : "false"), content);
             }
+            if (modifier != nullptr && strcmp(modifier, kAppearanceSymbol) == 0) {
+                const auto* action = reinterpret_cast<const AppearanceAction*>(modifier_value);
+                if (action->function != nullptr && started_tasks().insert(path + "#appear").second) g_pending_appear.push_back(*action);
+            }
             if (is_runtime_node_type(fields[1].type)) {
                 const std::string extra = render(modifier_value, fields[1].type, path + "/m", depth);
                 if (!extra.empty()) content = content.empty() ? extra : content + "," + extra;
@@ -1295,7 +1312,19 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         if (strcmp(name, "_$s7SwiftUI6VStackVMn") == 0) return node_json("v", {}, children);
         return children;
     }
-    if (find_conformance(type, kRepresentableSymbol) != nullptr) return node_json("native", {}, {});
+    if (const char* representable = find_conformance(type, kRepresentableSymbol)) {
+        const void* make = swift_runtime_find_witness_named(representable, kMakeUIViewRequirement);
+        if (make == nullptr) return node_json("native", {}, {});
+        // The context is opaque to the view; this app's implementation only returns a stored view.
+        void* context = calloc(1, kRepresentableContextBytes);
+        auto** table = static_cast<void**>(swift_runtime_witness_table(representable, type, static_cast<void**>(type) + kMetadataArgumentsWord));
+        // UIView is a class, so the view comes back directly, owned by the caller.
+        void* view = rt_call_make_ui_view(make, context, value, type, table);
+        free(context);
+        const int web_view = foundation_web_view_id(view);
+        rt_swift_release(view);
+        return node_json("native", "\"w\":" + std::to_string(web_view), {});
+    }
     const char* conformance = find_view_conformance(type);
     if (conformance == nullptr) return {};
     const void* body = find_witness(conformance, &g_view_body_requirement);
@@ -1333,6 +1362,14 @@ void dismiss_presented_sheet() {
     witnesses->store_enum_tag_single_payload(nothing, 1, 1, g_presented_sheet_type);
     binding_write(g_presented_sheet, nothing, g_presented_sheet_type);
     g_presented_sheet = nullptr;
+    // A sheet's next presentation starts over, with fresh @State and onAppear.
+    constexpr const char* kSheetPath = "/sheet";
+    for (auto it = preserved_states().begin(); it != preserved_states().end();) {
+        it = it->first.find(kSheetPath) != std::string::npos ? preserved_states().erase(it) : std::next(it);
+    }
+    for (auto it = started_tasks().begin(); it != started_tasks().end();) {
+        it = it->find(kSheetPath) != std::string::npos ? started_tasks().erase(it) : std::next(it);
+    }
 }
 
 void perform_action(const Action& action) {
@@ -1375,9 +1412,33 @@ void render_tree() {
     g_tree_dirty.store(false, std::memory_order_relaxed);
     const std::string tree = render(g_root_content, g_root_type, "r", 0);
     engine_emit("tree", "[" + tree + "]");
+    std::vector<AppearanceAction> appeared;
+    appeared.swap(g_pending_appear);
+    for (const auto& action : appeared) {
+        rt_call_witness(action.function, nullptr, action.context, nullptr, nullptr);
+        g_tree_dirty.store(true, std::memory_order_relaxed);
+    }
 }
 
 }  // namespace
+
+// makeUIView(context:): context in x0, self in x20, then Self and its witness table.
+__asm__(
+    ".text\n"
+    ".globl rt_call_make_ui_view\n"
+    "rt_call_make_ui_view:\n"
+    "  stp x29, x30, [sp, #-32]!\n"
+    "  mov x29, sp\n"
+    "  str x20, [sp, #16]\n"
+    "  mov x16, x0\n"
+    "  mov x0, x1\n"
+    "  mov x20, x2\n"
+    "  mov x1, x3\n"
+    "  mov x2, x4\n"
+    "  blr x16\n"
+    "  ldr x20, [sp, #16]\n"
+    "  ldp x29, x30, [sp], #32\n"
+    "  ret\n");
 
 // withMutation(of:keyPath:_:): the closure is in x2/x3; x8 and the error register x21 pass straight through.
 __asm__(
@@ -1409,12 +1470,18 @@ void swiftui_run_scene(void* scene) {
     rt_call_witness(box->closure, g_root_content, box->closure_context, nullptr, nullptr);
 
     // The guest thread lives here: each action runs the app's own code, then the tree is re-evaluated if needed.
+    g_tree_dirty.store(true, std::memory_order_relaxed);
     for (;;) {
-        do {
+        while (g_tree_dirty.load(std::memory_order_relaxed)) {
             render_tree();
             concurrency_drain();
-        } while (g_tree_dirty.load(std::memory_order_relaxed));
+        }
         const int action = engine_wait_for_action();
+        if (action == kEngineEventRan) {
+            // Host events only redraw if they changed something the app observes.
+            concurrency_drain();
+            continue;
+        }
         if (action < 0) return;
         if (static_cast<size_t>(action) < g_actions.size()) {
             const Action current = g_actions[static_cast<size_t>(action)];

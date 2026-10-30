@@ -4,6 +4,7 @@
 #include <string>
 
 #include "engine.h"
+#include "foundation_shim.h"
 #include "localization.h"
 
 namespace {
@@ -12,6 +13,7 @@ JavaVM* g_vm = nullptr;
 jclass g_activity_class = nullptr;
 jmethodID g_on_message = nullptr;
 jmethodID g_http = nullptr;
+jmethodID g_cookies = nullptr;
 
 std::string to_string(JNIEnv* env, jstring value) {
     const char* chars = env->GetStringUTFChars(value, nullptr);
@@ -81,6 +83,15 @@ HttpResult perform_http(const std::string& url, const std::string& method, const
     return out;
 }
 
+std::string read_cookies() {
+    JNIEnv* env = guest_env();
+    auto cookies = static_cast<jstring>(env->CallStaticObjectMethod(g_activity_class, g_cookies));
+    if (cookies == nullptr) return {};
+    std::string text = to_string(env, cookies);
+    env->DeleteLocalRef(cookies);
+    return text;
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeRun(
@@ -91,6 +102,8 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
     g_http = env->GetStaticMethodID(activity_class, "httpFetch", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)[B");
     engine_set_message_sink(send_message);
     engine_set_http_handler(perform_http);
+    g_cookies = env->GetStaticMethodID(activity_class, "readCookies", "()Ljava/lang/String;");
+    engine_set_cookie_handler(read_cookies);
     localization_set_language(to_string(env, language));
     return run_app_bundle(to_string(env, bundle_dir), to_string(env, executable), to_string(env, log_path));
 }
@@ -98,3 +111,13 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
 extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeAction(JNIEnv*, jclass, jint action) {
     engine_post_action(action);
 }
+
+extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeScriptFinished(JNIEnv* env, jclass, jint call, jstring json, jboolean failed) {
+    foundation_js_finished(call, to_string(env, json), failed);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeUrlChanged(JNIEnv* env, jclass, jint web_view, jstring url) {
+    foundation_web_url_changed(web_view, to_string(env, url));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeCookiesChanged(JNIEnv*, jclass) { foundation_cookies_changed(); }

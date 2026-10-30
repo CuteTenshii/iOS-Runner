@@ -383,6 +383,7 @@ std::recursive_mutex g_types_lock;
 std::map<std::string, Metadata*> g_named_types;
 std::map<const void*, const char*> g_foreign_names;
 std::map<const void*, void*> g_array_elements;
+std::map<const void*, void*> g_dictionary_values;
 
 Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector<void*>& arguments, Layout* layout,
                         size_t size, size_t alignment, uint32_t extra_inhabitants) {
@@ -992,6 +993,7 @@ private:
             for (const void* argument : arguments) key += pointer_key(argument);
             node.type = bridge_type(key, arguments);
             if (strcmp(name, "$Array") == 0 && !arguments.empty()) g_array_elements[node.type] = arguments[0];
+            if (strcmp(name, "$Dictionary") == 0 && arguments.size() == 2) g_dictionary_values[node.type] = arguments[1];
         } else {
             node.type = metadata_for_descriptor(base.nominal, arguments);
         }
@@ -1734,4 +1736,10 @@ fail:
     }
     if (flags & kCastDestroyOnFailure) witnesses_of(source_type)->destroy(source, source_type);
     return false;
+}
+
+void* dictionary_value_type(const void* metadata) {
+    const std::lock_guard guard(g_types_lock);
+    const auto found = g_dictionary_values.find(metadata);
+    return found == g_dictionary_values.end() ? nullptr : found->second;
 }

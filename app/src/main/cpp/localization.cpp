@@ -186,3 +186,22 @@ std::string localization_format(const std::string& format, const std::vector<std
 std::string localized_text(const LocalizedBox* box) {
     return localization_format(localization_lookup(*box->key), *box->arguments);
 }
+
+std::string bundle_info_string(const std::string& key) {
+    std::ifstream file(engine_bundle_dir() + "/Info.plist", std::ios::binary);
+    BinaryPlist plist;
+    plist.data.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    if (!plist.parse_trailer()) return {};
+    const size_t start = plist.object_offset(plist.top_object);
+    if ((static_cast<uint8_t>(plist.data[start]) >> 4) != kMarkerDictionary) return {};
+    size_t body;
+    const size_t count = plist.read_count(start, body);
+    for (size_t i = 0; i < count; ++i) {
+        std::string name, value;
+        if (plist.read_string(plist.read_big_endian(body + i * plist.reference_size, plist.reference_size), name) && name == key &&
+            plist.read_string(plist.read_big_endian(body + (count + i) * plist.reference_size, plist.reference_size), value)) {
+            return value;
+        }
+    }
+    return {};
+}

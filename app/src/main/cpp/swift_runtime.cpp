@@ -600,6 +600,8 @@ extern "C" const void* rt_dispatch_lookup(const DispatchThunk* thunk, void** tab
     return witness;
 }
 
+const void* swift_runtime_find_witness_named(const char* conformance, const char* requirement) { return find_witness_by_name(conformance, requirement); }
+
 void register_foreign_witness(const char* conformance_symbol, const char* requirement_symbol, const void* implementation) {
     foreign_witnesses()[std::string(conformance_symbol) + "|" + requirement_symbol] = implementation;
 }

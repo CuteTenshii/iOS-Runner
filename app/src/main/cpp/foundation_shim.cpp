@@ -20,7 +20,9 @@
 
 #include "engine.h"
 #include "localization.h"
+#include "concurrency_shim.h"
 #include "objc_runtime.h"
+#include "stdlib_shim.h"
 #include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
@@ -264,7 +266,6 @@ void* framework_singleton(const char* class_name) {
 void* process_info_shared(void*, const char*) { return framework_singleton("NSProcessInfo"); }
 void* main_bundle(void*, const char*) { return framework_singleton("NSBundle"); }
 void* bundle_for_class(void*, const char*, void*) { return framework_singleton("NSBundle"); }
-void* bundle_info_value(void*, const char*, void*) { return nullptr; }
 void* file_manager_default(void*, const char*) { return framework_singleton("NSFileManager"); }
 void* shared_application(void*, const char*) { return framework_singleton("UIApplication"); }
 
@@ -273,16 +274,7 @@ bool file_exists_at_path(void*, const char*, void* path) { return access(nsstrin
 // iOS's coarsest accuracy constant, in metres; the value only needs to be the one the app passes back.
 const double kLocationAccuracyKilometer = 1000.0;
 
-std::vector<std::string>& user_scripts() {
-    static std::vector<std::string> scripts;
-    return scripts;
-}
 
-void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
-    user_scripts().push_back(nsstring_text(source));
-    engine_log("WEBKIT: registered user script, %zu bytes", nsstring_text(source).size());
-    return self;
-}
 
 // NSArray keeps retained references; the app only receives arrays from this runtime.
 struct NSArrayObject {
@@ -313,7 +305,6 @@ struct BlockHeader {
     void (*invoke)(void*, void*);
 };
 
-void cookie_store_get_all(void*, const char*, BlockHeader* completion) { completion->invoke(completion, new_nsarray()); }
 
 constexpr size_t kArrayHeaderBytes = 32;
 constexpr size_t kArrayCountOffset = 16;
@@ -334,15 +325,12 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
     return storage;
 }
 
-void* web_view_configuration(void*, const char*) { return framework_singleton("WKWebViewConfiguration"); }
 
 void* cookie_store(void*, const char*) { return framework_singleton("WKHTTPCookieStore"); }
 
 void* web_view_layer(void*, const char*) { return framework_singleton("CALayer"); }
 
-void* web_view_init(void* self, const char*, double, double, double, double, void*) { return self; }
 
-void* web_kit_child_singleton(void*, const char* selector) { return framework_singleton(selector); }
 void* web_data_store_default(void*, const char*) { return framework_singleton("WKWebsiteDataStore"); }
 void* content_world_page(void*, const char*) { return framework_singleton("WKContentWorld"); }
 void* url_session_configuration_default(void*, const char*) { return framework_singleton("NSURLSessionConfiguration"); }
@@ -767,6 +755,7 @@ struct BridgedCollection {
 
 void* g_bridged_collection_class = nullptr;
 extern "C" void rt_swift_release(void*);
+extern "C" void* rt_swift_retain(void*);
 extern "C" void* rt_swift_bridgeObjectRetain(void*);
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 
@@ -912,6 +901,19 @@ SwiftString swift_string_from_utf8(const std::string& text) {
     "  ldr x3, [x22, #8]\n"                    \
     "  br x3\n"
 
+// Suspends: control returns to the scheduler until the host reports the script's result.
+__asm__(
+    ".text\n"
+    ".globl rt_web_view_call_script_entry\n"
+    "rt_web_view_call_script_entry:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  mov x6, x22\n"
+    "  mov x7, x20\n"
+    "  bl rt_web_view_call_script\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ret\n");
+
 __asm__(
     ".text\n"
     URL_SESSION_ENTRY(rt_url_session_data_url, rt_url_session_fetch_url)
@@ -952,6 +954,264 @@ SWIFTCC void url_error_code(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
 SWIFTCC void url_error_init(SWIFT_OUT uint64_t* out, const void*, void*) { *out = kStyleWord; }
 SWIFTCC void* url_error_ns_error(void*) { return make_error("The server's response could not be used.", 1); }
 
+struct WebConfiguration {
+    std::vector<std::string> scripts;
+    std::string application_name;
+    NativeObject* controller = nullptr;
+};
+
+std::map<const void*, WebConfiguration*>& web_configurations() {
+    static std::map<const void*, WebConfiguration*> table;
+    return table;
+}
+
+WebConfiguration* configuration_of(void* object) {
+    auto*& entry = web_configurations()[object];
+    if (entry == nullptr) entry = new WebConfiguration();
+    return entry;
+}
+
+std::map<const void*, std::string>& user_script_sources() {
+    static std::map<const void*, std::string> table;
+    return table;
+}
+
+struct WebViewState {
+    int id;
+    void* configuration;
+    std::string url;
+};
+
+std::map<const void*, WebViewState>& web_views() {
+    static std::map<const void*, WebViewState> table;
+    return table;
+}
+
+std::string json_quote(const std::string& text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (byte < 0x20) {
+            char escaped[8];
+            snprintf(escaped, sizeof escaped, "\\u%04x", byte);
+            out += escaped;
+        } else {
+            out += c;
+        }
+    }
+    return out + "\"";
+}
+
+void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
+    user_script_sources()[self] = nsstring_text(source);
+    return self;
+}
+
+void* configuration_controller(void* self, const char*) {
+    auto* configuration = configuration_of(self);
+    if (configuration->controller == nullptr) {
+        configuration->controller = static_cast<NativeObject*>(calloc(1, sizeof(NativeObject)));
+        static void* controller_class = objc_native_class("WKUserContentController", free);
+        configuration->controller->isa = controller_class;
+        configuration->controller->references = 1ULL << 63;
+        web_configurations()[configuration->controller] = configuration;
+    }
+    return configuration->controller;
+}
+
+void controller_add_script(void* self, const char*, void* script) { configuration_of(self)->scripts.push_back(user_script_sources()[script]); }
+void configuration_set_application_name(void* self, const char*, void* name) { configuration_of(self)->application_name = nsstring_text(name); }
+
+void* web_view_init(void* self, const char*, double, double, double, double, void* configuration) {
+    static int next_id = 0;
+    const int id = next_id++;
+    // The web view owns its configuration, as WKWebView does.
+    web_views()[self] = {id, rt_swift_retain(configuration), {}};
+    auto* config = configuration_of(configuration);
+    std::string scripts;
+    for (const auto& script : config->scripts) {
+        if (!scripts.empty()) scripts += ',';
+        scripts += json_quote(script);
+    }
+    engine_emit("webnew", "{\"id\":" + std::to_string(id) + ",\"name\":" + json_quote(config->application_name) + ",\"scripts\":[" + scripts + "]}");
+    return self;
+}
+
+void* web_view_configuration(void* self, const char*) { return web_views()[self].configuration; }
+
+// Bridged requests only need to carry their URL into loadRequest:.
+SWIFTCC void* url_request_bridge_to_objc(SWIFT_CTX URLRequestBox** self) {
+    auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->url));
+    object->header.isa = g_nsurl_class;
+    return object;
+}
+
+void* web_view_load(void* self, const char*, void* request) {
+    engine_emit("webload", "{\"id\":" + std::to_string(web_views()[self].id) + ",\"url\":" + json_quote(nsstring_text(request)) + "}");
+    return nullptr;
+}
+
+void* web_view_url(void* self, const char*) {
+    const std::string& url = web_views()[self].url;
+    if (url.empty()) return nullptr;
+    auto* object = static_cast<NSStringObject*>(new_nsstring(url));
+    object->header.isa = g_nsurl_class;
+    return object;
+}
+
+bool is_any_type(void* type) { return static_cast<char*>(type) == static_cast<char*>(type_system_symbol("$sypN")) + sizeof(void*); }
+
+// Swift values to JSON, for the arguments of a script call.
+std::string value_to_json(void* value, void* type) {
+    if (type == type_system_symbol("$sSSN")) return json_quote(swift_string_to_utf8(*static_cast<SwiftString*>(value)));
+    if (type == type_system_symbol("$sSbN")) return *static_cast<uint8_t*>(value) ? "true" : "false";
+    if (type == type_system_symbol("$sSiN")) return std::to_string(*static_cast<int64_t*>(value));
+    if (is_any_type(type)) {
+        auto* any = static_cast<AnyValue*>(value);
+        return any->type == nullptr ? "null" : value_to_json(any->buffer, any->type);
+    }
+    constexpr size_t kWitnessStrideOffset = 0x48;
+    const auto stride_of = [&](void* element) {
+        size_t stride;
+        memcpy(&stride, value_witnesses(element) + kWitnessStrideOffset, sizeof stride);
+        return stride;
+    };
+    const auto storage_of = [&]() { return reinterpret_cast<const char*>(*static_cast<uint64_t*>(value) & kCollectionPointerMask); };
+    if (void* element = array_element_type(type)) {
+        const char* storage = storage_of();
+        int64_t count;
+        memcpy(&count, storage + kArrayCountOffset, sizeof count);
+        std::string out = "[";
+        const size_t stride = stride_of(element);
+        for (int64_t i = 0; i < count; ++i) {
+            if (i != 0) out += ',';
+            out += value_to_json(const_cast<char*>(storage) + kArrayHeaderBytes + static_cast<size_t>(i) * stride, element);
+        }
+        return out + "]";
+    }
+    if (void* value_type = dictionary_value_type(type)) {
+        const char* storage = storage_of();
+        const int scale = static_cast<int8_t>(storage[kDictionaryScaleOffset]);
+        const char* keys;
+        const char* values;
+        memcpy(&keys, storage + kDictionaryKeysOffset, sizeof keys);
+        memcpy(&values, storage + kDictionaryValuesOffset, sizeof values);
+        const char* bitmap = storage + kDictionaryBitmapOffset;
+        const size_t stride = stride_of(value_type);
+        std::string out = "{";
+        for (size_t bucket = 0; bucket < (1ULL << scale); ++bucket) {
+            uint64_t word;
+            memcpy(&word, bitmap + bucket / kBitsPerWord * sizeof word, sizeof word);
+            if (!((word >> (bucket % kBitsPerWord)) & 1)) continue;
+            if (out.size() > 1) out += ',';
+            out += json_quote(swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(keys + bucket * sizeof(SwiftString)))) + ":";
+            out += value_to_json(const_cast<char*>(values) + bucket * stride, value_type);
+        }
+        return out + "}";
+    }
+    engine_log("STOP: a script argument of a type this runtime cannot convert");
+    abort();
+}
+
+struct PendingScriptCall {
+    AnyValue* out;
+    void* context;
+};
+
+std::map<int, PendingScriptCall>& pending_script_calls() {
+    static std::map<int, PendingScriptCall> table;
+    return table;
+}
+
+extern "C" void rt_web_view_call_script(AnyValue* out, uint64_t body_bits, uint64_t body_object, void* arguments, void*, void*, void* context, void* self) {
+    static int next_call = 0;
+    const int call = next_call++;
+    pending_script_calls()[call] = {out, context};
+    void* type = resolve_mangled_type("SDySSypG", nullptr);
+    const std::string json = value_to_json(&arguments, type);
+    engine_emit("webjs", "{\"id\":" + std::to_string(web_views()[self].id) + ",\"call\":" + std::to_string(call) + ",\"body\":" + json_quote(swift_string_to_utf8({body_bits, body_object})) + ",\"args\":" + json + "}");
+}
+
+extern "C" void rt_web_view_call_script_entry();
+AsyncFunctionRecord g_web_script_record;
+
+struct NSCookieObject {
+    NativeObject header;
+    std::string* domain;
+    std::string* name;
+    std::string* value;
+};
+
+void* g_cookie_class = nullptr;
+void* cookie_name(void* self, const char*) { return new_nsstring(*static_cast<NSCookieObject*>(self)->name); }
+void* cookie_value(void* self, const char*) { return new_nsstring(*static_cast<NSCookieObject*>(self)->value); }
+void* cookie_domain(void* self, const char*) { return new_nsstring(*static_cast<NSCookieObject*>(self)->domain); }
+
+void* g_cookie_observer = nullptr;
+void cookie_store_add_observer(void*, const char*, void* observer) { g_cookie_observer = observer; }
+
+void* bundle_info_value_string(void*, const char*, void* key) {
+    const std::string value = bundle_info_string(nsstring_text(key));
+    return value.empty() ? nullptr : new_nsstring(value);
+}
+
+void cookie_store_get_all(void*, const char*, BlockHeader* completion) {
+    auto* array = static_cast<NSArrayObject*>(new_nsarray());
+    std::istringstream lines(engine_cookies());
+    std::string line;
+    while (std::getline(lines, line)) {
+        const size_t first = line.find('\t');
+        const size_t second = first == std::string::npos ? first : line.find('\t', first + 1);
+        if (second == std::string::npos) continue;
+        auto* cookie = static_cast<NSCookieObject*>(calloc(1, sizeof(NSCookieObject)));
+        cookie->header.isa = g_cookie_class;
+        cookie->header.references = 1;
+        cookie->domain = new std::string(line.substr(0, first));
+        cookie->name = new std::string(line.substr(first + 1, second - first - 1));
+        cookie->value = new std::string(line.substr(second + 1));
+        array->items->push_back(cookie);
+    }
+    completion->invoke(completion, array);
+}
+
+// Only what the script results here need: an object of booleans, or a single value.
+void write_script_result(AnyValue* out, const std::string& json) {
+    memset(out, 0, sizeof *out);
+    std::string text = json;
+    text.erase(0, text.find_first_not_of(" \n\t"));
+    if (text.empty() || text == "null") return;
+    if (text == "true" || text == "false") {
+        const bool flag = text == "true";
+        memcpy(out->buffer, &flag, sizeof flag);
+        out->type = type_system_symbol("$sSbN");
+        return;
+    }
+    if (text[0] == '{') {
+        std::vector<std::pair<std::string, bool>> entries;
+        size_t cursor = 1;
+        while (cursor < text.size()) {
+            const size_t open = text.find('"', cursor);
+            if (open == std::string::npos) break;
+            const size_t close = text.find('"', open + 1);
+            const size_t colon = text.find(':', close);
+            const bool flag = text.compare(colon + 1, 4, "true") == 0;
+            entries.emplace_back(text.substr(open + 1, close - open - 1), flag);
+            cursor = text.find_first_of(",}", colon);
+            if (cursor == std::string::npos || text[cursor] == '}') break;
+            ++cursor;
+        }
+        out->buffer[0] = reinterpret_cast<uint64_t>(make_string_bool_dictionary(entries));
+        out->type = resolve_mangled_type("SDySSSbG", nullptr);
+        return;
+    }
+    engine_log("SCRIPT: ignoring a result this runtime does not convert: %.60s", text.c_str());
+}
+
 // Puts an Objective-C object into an Any as its Swift value, as the runtime's bridging does.
 SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     memset(out, 0, sizeof *out);
@@ -976,6 +1236,38 @@ SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     }
 }
 
+int foundation_web_view_id(const void* object) {
+    const auto found = web_views().find(object);
+    return found == web_views().end() ? -1 : found->second.id;
+}
+
+void foundation_js_finished(int call, const std::string& json, bool failed) {
+    engine_post_event([call, json, failed] {
+        const auto found = pending_script_calls().find(call);
+        if (found == pending_script_calls().end()) return;
+        const PendingScriptCall pending = found->second;
+        pending_script_calls().erase(found);
+        void* error = nullptr;
+        if (failed) error = make_error("The script could not run.", 1);
+        else write_script_result(pending.out, json);
+        concurrency_resume_call(pending.context, error);
+    });
+}
+
+void foundation_web_url_changed(int web_view, const std::string& url) {
+    engine_post_event([web_view, url] {
+        for (auto& [object, state] : web_views()) {
+            if (state.id == web_view) state.url = url;
+        }
+    });
+}
+
+void foundation_cookies_changed() {
+    engine_post_event([] {
+        if (g_cookie_observer != nullptr) objc_send(g_cookie_observer, "cookiesDidChangeInCookieStore:", framework_singleton("WKHTTPCookieStore"));
+    });
+}
+
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
 
 void foundation_register_classes() {
@@ -995,18 +1287,26 @@ void foundation_register_classes() {
     g_nsarray_class = objc_native_class("NSArray", destroy_nsarray);
     g_bridged_collection_class = objc_native_class("NSDictionary", destroy_bridged_collection);
     objc_register_method("-[WKHTTPCookieStore getAllCookies:]", reinterpret_cast<const void*>(cookie_store_get_all));
-    objc_register_method("-[WKHTTPCookieStore addObserver:]", reinterpret_cast<const void*>(ignore_message_with_word));
+    objc_register_method("-[WKHTTPCookieStore addObserver:]", reinterpret_cast<const void*>(cookie_store_add_observer));
+    g_cookie_class = objc_native_class("NSHTTPCookie", free);
+    objc_register_method("-[NSHTTPCookie name]", reinterpret_cast<const void*>(cookie_name));
+    objc_register_method("-[NSHTTPCookie value]", reinterpret_cast<const void*>(cookie_value));
+    objc_register_method("-[NSHTTPCookie domain]", reinterpret_cast<const void*>(cookie_domain));
+    g_web_script_record.context_size = kUrlSessionContextBytes;
+    g_web_script_record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(rt_web_view_call_script_entry) - reinterpret_cast<intptr_t>(&g_web_script_record));
     objc_register_method("-[WKWebView configuration]", reinterpret_cast<const void*>(web_view_configuration));
     objc_register_method("-[WKWebView layer]", reinterpret_cast<const void*>(web_view_layer));
     objc_register_method("-[CALayer setCornerRadius:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("-[CALayer setMasksToBounds:]", reinterpret_cast<const void*>(ignore_message_with_word));
+    objc_register_method("-[WKWebView loadRequest:]", reinterpret_cast<const void*>(web_view_load));
+    objc_register_method("-[WKWebView URL]", reinterpret_cast<const void*>(web_view_url));
     objc_register_method("-[WKWebView setNavigationDelegate:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView setInspectable:]", reinterpret_cast<const void*>(ignore_message_with_word));
-    objc_register_method("-[WKWebViewConfiguration userContentController]", reinterpret_cast<const void*>(web_kit_child_singleton));
+    objc_register_method("-[WKWebViewConfiguration userContentController]", reinterpret_cast<const void*>(configuration_controller));
     objc_register_method("-[WKWebViewConfiguration websiteDataStore]", reinterpret_cast<const void*>(web_data_store_default));
     objc_register_method("-[WKWebViewConfiguration setWebsiteDataStore:]", reinterpret_cast<const void*>(ignore_message_with_word));
-    objc_register_method("-[WKWebViewConfiguration setApplicationNameForUserAgent:]", reinterpret_cast<const void*>(ignore_message_with_word));
-    objc_register_method("-[userContentController addUserScript:]", reinterpret_cast<const void*>(ignore_message_with_word));
+    objc_register_method("-[WKWebViewConfiguration setApplicationNameForUserAgent:]", reinterpret_cast<const void*>(configuration_set_application_name));
+    objc_register_method("-[WKUserContentController addUserScript:]", reinterpret_cast<const void*>(controller_add_script));
     objc_register_method("+[WKWebsiteDataStore defaultDataStore]", reinterpret_cast<const void*>(web_data_store_default));
     objc_register_method("+[WKContentWorld pageWorld]", reinterpret_cast<const void*>(content_world_page));
     objc_register_method("+[NSURLSessionConfiguration defaultSessionConfiguration]", reinterpret_cast<const void*>(url_session_configuration_default));
@@ -1022,7 +1322,7 @@ void foundation_register_classes() {
     objc_register_method("-[NSProcessInfo operatingSystemVersion]", reinterpret_cast<const void*>(process_info_version));
     objc_register_method("+[NSBundle mainBundle]", reinterpret_cast<const void*>(main_bundle));
     objc_register_method("+[NSBundle bundleForClass:]", reinterpret_cast<const void*>(bundle_for_class));
-    objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value));
+    objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value_string));
     g_nsurl_class = objc_native_class("NSURL", destroy_nsstring);
     g_nsnumber_class = objc_native_class("NSNumber", free);
     objc_register_method("-[NSFileManager createDirectoryAtURL:withIntermediateDirectories:attributes:error:]", reinterpret_cast<const void*>(file_manager_create_directory));
@@ -1109,6 +1409,9 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation8URLErrorV4CodeV19cannotParseResponseAEvgZ", reinterpret_cast<void*>(url_error_code)},
         {"$s10Foundation21_BridgedStoredNSErrorPAAE_8userInfox4CodeQz_SDySSypGtcfC", reinterpret_cast<void*>(url_error_init)},
         {"$s10Foundation8URLErrorV8_nsErrorSo7NSErrorCvg", reinterpret_cast<void*>(url_error_ns_error)},
+        {"$s10Foundation10URLRequestV19_bridgeToObjectiveCSo12NSURLRequestCyF", reinterpret_cast<void*>(url_request_bridge_to_objc)},
+        {"$sSo9WKWebViewC6WebKitE19callAsyncJavaScript_9arguments2in12contentWorldypSgSS_SDySSypGSo11WKFrameInfoCSgSo09WKContentL0CtYaKFTu", &g_web_script_record},
+        {"$sSo9WKWebViewC6WebKitE19callAsyncJavaScript_9arguments2in12contentWorldypSgSS_SDySSypGSo11WKFrameInfoCSgSo09WKContentL0CtYaKF", reinterpret_cast<void*>(rt_web_view_call_script_entry)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

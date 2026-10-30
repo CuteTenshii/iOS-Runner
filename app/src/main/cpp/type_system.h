@@ -46,3 +46,6 @@ void* any_object_metadata();
 
 // swift_dynamicCast: `as?` between Any, its contained types and Optional.
 bool swift_cast(void* destination, void* source, void* source_type, void* target_type, size_t flags);
+
+// The value type of a [String: V] dictionary's metadata, or nullptr for any other type.
+void* dictionary_value_type(const void* metadata);

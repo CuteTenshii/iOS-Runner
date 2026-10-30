@@ -752,3 +752,29 @@ extern "C" void (*storage_destroyer_for(const char* symbol))(void*) {
     if (name == "_$ss23_ContiguousArrayStorageCMn") return destroy_array_storage;
     return nullptr;
 }
+
+void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>>& entries) {
+    void* arguments[] = {type_system_symbol("$sSSN"), type_system_symbol("$sSbN")};
+    void* metadata = storage_class_metadata("_$ss18_DictionaryStorageCMn", arguments, 2);
+    auto* raw = static_cast<char*>(allocate_dictionary(metadata, scale_for_capacity(static_cast<int64_t>(entries.size())), 0, 0, false));
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    char* keys;
+    char* values;
+    memcpy(&keys, raw + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
+    auto* bitmap = reinterpret_cast<uint64_t*>(raw + kDictionaryBitmapOffset);
+    const uint64_t mask = (1ULL << header->scale) - 1;
+    for (const auto& [key, value] : entries) {
+        const SwiftString text = swift_string_from_utf8(key);
+        HasherState hasher;
+        hasher_seed(&hasher, header->seed);
+        string_hash_into(&hasher, text);
+        uint64_t bucket = static_cast<uint64_t>(hasher_finalize(&hasher)) & mask;
+        while ((bitmap[bucket / kWordBits] >> (bucket % kWordBits)) & 1) bucket = (bucket + 1) & mask;
+        bitmap[bucket / kWordBits] |= 1ULL << (bucket % kWordBits);
+        memcpy(keys + bucket * sizeof(SwiftString), &text, sizeof text);
+        values[bucket] = value ? 1 : 0;
+    }
+    header->count = static_cast<int64_t>(entries.size());
+    return raw;
+}
