@@ -422,7 +422,11 @@ EnumShape enum_shape(void* type) {
     return {info & kEnumPayloadCaseMask, payload_size, witnesses_of(type)->size - payload_size};
 }
 
+// Framework enums have no descriptor in this runtime: their tag is simply the last byte.
+bool is_framework_enum(void* type) { return static_cast<void**>(type)[kMetadataDescriptorWord] == nullptr; }
+
 uint32_t get_enum_case_multi_payload(const char* value, void* type) {
+    if (is_framework_enum(type)) return static_cast<uint8_t>(value[witnesses_of(type)->size - 1]);
     const auto shape = enum_shape(type);
     uint32_t tag = 0;
     memcpy(&tag, value + shape.payload_size, shape.tag_bytes < 4 ? shape.tag_bytes : 4);
@@ -434,6 +438,10 @@ uint32_t get_enum_case_multi_payload(const char* value, void* type) {
 }
 
 void store_enum_tag_multi_payload(char* value, void* type, uint32_t which) {
+    if (is_framework_enum(type)) {
+        value[witnesses_of(type)->size - 1] = static_cast<char>(which);
+        return;
+    }
     const auto shape = enum_shape(type);
     uint32_t tag = which;
     if (which >= shape.payload_cases) {

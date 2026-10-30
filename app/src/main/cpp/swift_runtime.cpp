@@ -584,6 +584,7 @@ void* swift_runtime_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, size_t> thunks = {
         {"$ss23CustomStringConvertibleP11descriptionSSvgTj", 1},
         {"$sScA15unownedExecutorScevgTj", 1},
+        {"$s7SwiftUI10TabContentP15_identifiedView011_IdentifiedF0QzvgTj", 1},
     };
     if (const auto thunk = thunks.find(name); thunk != thunks.end()) {
         std::string requirement = "_" + std::string(name);

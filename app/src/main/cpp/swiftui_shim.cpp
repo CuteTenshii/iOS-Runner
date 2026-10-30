@@ -111,6 +111,7 @@ struct BindingNode {
     BindingKind kind;
     void* source;  // The state box, parent binding or observed object, retained.
     void* key_path;
+    void* parent_type;
     const void* getter;
     void* getter_context;
     const void* setter;
@@ -441,6 +442,7 @@ SWIFTCC void registrar_mark_dirty() { g_tree_dirty.store(true, std::memory_order
 extern "C" void rt_registrar_with_mutation();
 
 void binding_read(BindingNode* binding, void* out, void* type);
+void binding_write(BindingNode* binding, void* value, void* type);
 
 void binding_read(BindingNode* binding, void* out, void* type) {
     switch (binding->kind) {
@@ -455,9 +457,15 @@ void binding_read(BindingNode* binding, void* out, void* type) {
         case BindingKind::ObjectKeyPath:
             key_path_get(binding->key_path, &binding->source, out, type);
             return;
-        case BindingKind::BindingKeyPath:
-            engine_log("STOP: nested binding key paths are not supported yet");
-            abort();
+        case BindingKind::BindingKeyPath: {
+            const size_t size = witnesses_of(binding->parent_type)->size;
+            void* parent = calloc(1, size == 0 ? 1 : size);
+            binding_read(static_cast<BindingNode*>(binding->source), parent, binding->parent_type);
+            key_path_get(binding->key_path, parent, out, type);
+            witnesses_of(binding->parent_type)->destroy(parent, binding->parent_type);
+            free(parent);
+            return;
+        }
     }
 }
 
@@ -472,9 +480,16 @@ void binding_write(BindingNode* binding, void* value, void* type) {
         case BindingKind::ObjectKeyPath:
             key_path_set(binding->key_path, &binding->source, value, type);
             break;
-        case BindingKind::BindingKeyPath:
-            engine_log("STOP: nested binding key paths are not supported yet");
-            abort();
+        case BindingKind::BindingKeyPath: {
+            const size_t size = witnesses_of(binding->parent_type)->size;
+            void* parent = calloc(1, size == 0 ? 1 : size);
+            binding_read(static_cast<BindingNode*>(binding->source), parent, binding->parent_type);
+            key_path_set(binding->key_path, parent, value, type);
+            binding_write(static_cast<BindingNode*>(binding->source), parent, binding->parent_type);
+            witnesses_of(binding->parent_type)->destroy(parent, binding->parent_type);
+            free(parent);
+            break;
+        }
     }
     registrar_mark_dirty();
 }
@@ -501,6 +516,14 @@ SWIFTCC void lazy_state_projected(SWIFT_OUT BindingNode** out, void* metadata, S
     *out = binding;
 }
 
+SWIFTCC void binding_member(SWIFT_OUT BindingNode** out, void* key_path, void* metadata, void*, SWIFT_CONTEXT BindingNode** self) {
+    auto* binding = new_binding(BindingKind::BindingKeyPath);
+    binding->source = rt_swift_retain(*self);
+    binding->key_path = rt_swift_retain(key_path);
+    binding->parent_type = generic_argument(metadata);
+    *out = binding;
+}
+
 // Bindable keeps the observed object itself in its single word.
 SWIFTCC void bindable_init(SWIFT_OUT void** out, void* object) { *out = object; }
 SWIFTCC void bindable_wrapped_get(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
@@ -512,6 +535,23 @@ SWIFTCC void bindable_member(SWIFT_OUT BindingNode** out, void* key_path, void*,
     binding->key_path = rt_swift_retain(key_path);
     *out = binding;
 }
+
+constexpr uint64_t kEnvironmentImmediate = kImmediate;
+
+SWIFTCC void environment_values_init(SWIFT_OUT uint64_t* out) { *out = kEnvironmentImmediate; }
+SWIFTCC bool environment_is_enabled(SWIFT_CONTEXT void*) { return true; }
+SWIFTCC void environment_set_ignored() {}
+
+// Optional<AnyShapeStyle> is one reference word here; null means no tint.
+SWIFTCC void* environment_tint(SWIFT_CONTEXT void*) { return nullptr; }
+
+SWIFTCC void environment_action_get(SWIFT_OUT uint64_t* out, SWIFT_CONTEXT void*) { *out = kImmediate; }
+
+SWIFTCC void dismiss_action_call(SWIFT_CONTEXT void*) { engine_log("ACTION: dismiss"); }
+SWIFTCC void open_url_action_call(const void*, SWIFT_CONTEXT void*) { engine_log("ACTION: open URL"); }
+
+// A tab's identified view is the tab itself, kept as one reference to its node.
+SWIFTCC void tab_identified_view(SWIFT_OUT void** out, void*, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
 
 // Optional doubles travel in integer registers, so these words hold raw bit patterns.
 struct FrameLayout {
@@ -710,6 +750,12 @@ void swiftui_run_scene(void* scene) {
 }
 
 void* swiftui_symbol(std::string_view name) {
+    static const bool registered = [] {
+        register_foreign_witness("_$s7SwiftUI3TabVyxq_q0_GAA0C7ContentAASHRzAA4ViewR_AaFR0_rlMc",
+                                 "_$s7SwiftUI10TabContentP15_identifiedView011_IdentifiedF0QzvgTq", reinterpret_cast<const void*>(tab_identified_view));
+        return true;
+    }();
+    (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
         {"$s7SwiftUI11WindowGroupV2id5title11lazyContentACyxGSSSg_AA4TextVSgxyctcfC", reinterpret_cast<void*>(window_group_init)},
         {"$s7SwiftUI12SceneBuilderV10buildBlockyxxAA0C0RzlFZ", reinterpret_cast<void*>(scene_build_block)},
@@ -756,6 +802,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI3TabVAAs5NeverORszAA4ViewR_AaFR0_rlE_11systemImage7contentACyAEq_AA07DefaultC5LabelVG10Foundation23LocalizedStringResourceV_SSq_yXEtcAJRs0_rlufC", reinterpret_cast<void*>(tab_init)},
         {"$s7SwiftUI7BindingV12wrappedValuexvg", reinterpret_cast<void*>(binding_wrapped_get)},
         {"$s7SwiftUI7BindingV12wrappedValuexvs", reinterpret_cast<void*>(binding_wrapped_set)},
+        {"$s7SwiftUI7BindingV13dynamicMemberACyqd__Gs15WritableKeyPathCyxqd__G_tcluig", reinterpret_cast<void*>(binding_member)},
         {"$s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfC", reinterpret_cast<void*>(binding_get_set)},
         {"$s7SwiftUI9LazyStateV14projectedValueAA7BindingVyxGvg", reinterpret_cast<void*>(lazy_state_projected)},
         {"$s7SwiftUI8BindableVAARlzC11Observation10ObservableRzlE12wrappedValueACyxGx_tcfC", reinterpret_cast<void*>(bindable_init)},
@@ -780,6 +827,16 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4ViewPAAE7toolbar7contentQrqd__yXE_tAaBRd__lF", reinterpret_cast<void*>(toolbar_modifier)},
         {"$s7SwiftUI4ViewPAAE8onChange2of7initial_Qrqd___Sbyqd___qd__tctSQRd__lF", reinterpret_cast<void*>(on_change_modifier)},
         {"$s7SwiftUI4ViewPAAE5sheet4item9onDismiss7contentQrAA7BindingVyqd__SgG_yycSgqd_0_qd__cts12IdentifiableRd__AaBRd_0_r0_lF", reinterpret_cast<void*>(sheet_modifier)},
+        {"$s7SwiftUI17EnvironmentValuesVACycfC", reinterpret_cast<void*>(environment_values_init)},
+        {"$s7SwiftUI17EnvironmentValuesV9isEnabledSbvg", reinterpret_cast<void*>(environment_is_enabled)},
+        {"$s7SwiftUI17EnvironmentValuesV9isEnabledSbvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV4tintAA13AnyShapeStyleVSgvg", reinterpret_cast<void*>(environment_tint)},
+        {"$s7SwiftUI17EnvironmentValuesV4tintAA13AnyShapeStyleVSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV7dismissAA13DismissActionVvg", reinterpret_cast<void*>(environment_action_get)},
+        {"$s7SwiftUI17EnvironmentValuesV7openURLAA13OpenURLActionVvg", reinterpret_cast<void*>(environment_action_get)},
+        {"$s7SwiftUI17EnvironmentValuesV7openURLAA13OpenURLActionVvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI13DismissActionV14callAsFunctionyyF", reinterpret_cast<void*>(dismiss_action_call)},
+        {"$s7SwiftUI13OpenURLActionV14callAsFunctionyy10Foundation3URLVF", reinterpret_cast<void*>(open_url_action_call)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

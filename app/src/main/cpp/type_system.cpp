@@ -76,6 +76,9 @@ struct Layout {
     LayoutKind kind = LayoutKind::Pod;
     std::vector<Field> fields;
     Metadata* payload = nullptr;
+    // StateStorage: which case holds `payload`, and where the other case keeps its retained word.
+    uint8_t value_case = 0;
+    size_t reference_offset = 8;
 };
 
 // Runtime metadata plus its two prefix words: this runtime's layout, then the value witnesses.
@@ -145,9 +148,6 @@ void* witness_assign_take(void* destination, void* source, void* type) {
     return witness_take(destination, source, type);
 }
 
-constexpr uint8_t kStorageCaseValue = 0;
-constexpr size_t kStorageThunkContextOffset = 8;
-
 uint8_t state_storage_tag(const void* value, const void* type) {
     return static_cast<const uint8_t*>(value)[witnesses_of(type)->size - 1];
 }
@@ -159,10 +159,10 @@ void* witness_copy(void* destination, void* source, void* type) {
     switch (layout->kind) {
         case LayoutKind::StateStorage:
             memcpy(destination, source, witnesses_of(type)->size);
-            if (state_storage_tag(source, type) == kStorageCaseValue) {
+            if (state_storage_tag(source, type) == layout->value_case) {
                 witnesses_of(layout->payload)->initialize_with_copy(destination, source, layout->payload);
             } else {
-                retain(*reinterpret_cast<void**>(from + kStorageThunkContextOffset));
+                retain(*reinterpret_cast<void**>(from + layout->reference_offset));
             }
             break;
         case LayoutKind::Pod:
@@ -207,8 +207,8 @@ void witness_destroy(void* raw, void* type) {
     auto* value = static_cast<char*>(raw);
     switch (layout->kind) {
         case LayoutKind::StateStorage:
-            if (state_storage_tag(raw, type) == kStorageCaseValue) witnesses_of(layout->payload)->destroy(raw, layout->payload);
-            else release(*reinterpret_cast<void**>(value + kStorageThunkContextOffset));
+            if (state_storage_tag(raw, type) == layout->value_case) witnesses_of(layout->payload)->destroy(raw, layout->payload);
+            else release(*reinterpret_cast<void**>(value + layout->reference_offset));
             break;
         case LayoutKind::Pod:
             break;
@@ -473,7 +473,15 @@ Metadata* tuple_of(const std::vector<Metadata*>& elements) {
         if (witnesses->flags & kFlagNonPod) pod = false;
     }
     if (pod) layout->kind = LayoutKind::Pod;
-    return named_type(key, kKindTuple, layout, offset, alignment, inhabitants);
+    // ABI shape: kind, element count, labels, then a (type, offset) pair for each element.
+    std::vector<void*> words = {nullptr};
+    for (const auto& field : layout->fields) {
+        words.push_back(field.type);
+        words.push_back(reinterpret_cast<void*>(field.offset));
+    }
+    auto* metadata = named_type(key, kKindTuple, layout, offset, alignment, inhabitants, words);
+    metadata->descriptor = reinterpret_cast<const void*>(elements.size());
+    return metadata;
 }
 
 Metadata* any_type() {
@@ -542,6 +550,18 @@ Metadata* state_storage_of(Metadata* value) {
     return named_type(key, kKindStruct, new Layout{LayoutKind::StateStorage, {}, value}, payload + 1, alignment, 0, {value});
 }
 
+// Environment<T>.Content: case 0 is a key path, case 1 a resolved value.
+Metadata* environment_content_of(Metadata* value) {
+    const std::string key = "EnvironmentContent" + pointer_key(value);
+    const auto* witnesses = witnesses_of(value);
+    const size_t payload = witnesses->size < kPointerSize ? kPointerSize : witnesses->size;
+    const size_t alignment = (witnesses->flags & 0xff) + 1 < kPointerSize ? kPointerSize : (witnesses->flags & 0xff) + 1;
+    auto* layout = new Layout{LayoutKind::StateStorage, {}, value};
+    layout->value_case = 1;
+    layout->reference_offset = 0;
+    return named_type(key, kKindStruct, layout, payload + 1, alignment, 0, {value});
+}
+
 Metadata* lazy_state_of(Metadata* value) {
     const std::string key = "LazyState" + pointer_key(value);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
@@ -603,6 +623,15 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
     if (symbol == "_$s7SwiftUI9LazyStateVMn" && !arguments.empty()) return lazy_state_of(static_cast<Metadata*>(arguments[0]));
     if (symbol == "_$s7SwiftUI9LazyStateV7StorageOMn" && !arguments.empty()) return state_storage_of(static_cast<Metadata*>(arguments[0]));
+    if (symbol == "_$s7SwiftUI11EnvironmentV7ContentOMn" && !arguments.empty()) return environment_content_of(static_cast<Metadata*>(arguments[0]));
+    if (symbol == "_$s7SwiftUI11EnvironmentVMn" && !arguments.empty()) {
+        Metadata* content = environment_content_of(static_cast<Metadata*>(arguments[0]));
+        const auto* witnesses = witnesses_of(content);
+        std::vector<void*> with_offset = arguments;
+        with_offset.push_back(nullptr);
+        auto* metadata = named_type(key, kKindStruct, new Layout{LayoutKind::Aggregate, {{content, 0}}, nullptr}, witnesses->size, (witnesses->flags & 0xff) + 1, 0, with_offset);
+        return metadata;
+    }
     const auto found = frozen_layouts().find(symbol);
     if (found == frozen_layouts().end()) return nullptr;
     for (const auto& field : found->second) {
@@ -1280,6 +1309,7 @@ constexpr size_t kAccessorStubSize = 32;
 size_t accessor_generic_arity(std::string_view symbol) {
     if (symbol == "$s7SwiftUI15ModifiedContentVMa") return 2;
     if (symbol == "$s7SwiftUI8BindableVMa" || symbol == "$s7SwiftUI9LazyStateVMa" || symbol == "$sSqMa" ||
+        symbol == "$s7SwiftUI11EnvironmentV7ContentOMa" ||
         symbol == "$s7SwiftUI16TagValueTraitKeyVMa" || symbol == "$s7SwiftUI21_TraitWritingModifierVMa" ||
         symbol == "$s7SwiftUI24_TagTraitWritingModifierVMa") {
         return 1;
