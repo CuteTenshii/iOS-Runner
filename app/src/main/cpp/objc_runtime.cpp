@@ -1,6 +1,7 @@
 #include "objc_runtime.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -108,7 +109,9 @@ extern "C" const void* rt_objc_lookup(void* receiver, const char* selector) {
     std::string framework_root;
     if (const void* method = find_guest_method(cls, selector, framework_root)) return method;
     if (!framework_root.empty()) return lookup_framework_method("-[" + framework_root + " " + selector + "]");
-    stop_unknown_message(std::string("unknown class -[? ") + selector + "]");
+    char detail[96];
+    snprintf(detail, sizeof detail, "receiver %p, class word %p", receiver, static_cast<const void*>(cls));
+    stop_unknown_message(std::string("-[? ") + selector + "] on " + detail);
 }
 
 extern "C" const void* rt_objc_super_lookup(void* const* super_info, const char* selector) {

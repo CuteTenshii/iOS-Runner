@@ -111,6 +111,11 @@ void* defaults_string_for_key(void*, const char*, void* key) {
     return found == defaults().values.end() ? nullptr : new_nsstring(found->second);
 }
 
+void* defaults_object_for_key(void* self, const char* selector, void* key) { return defaults_string_for_key(self, selector, key); }
+
+// Arrays are not persisted yet, so a missing value is the only answer this can give truthfully.
+void* defaults_string_array_for_key(void*, const char*, void*) { return nullptr; }
+
 bool defaults_bool_for_key(void*, const char*, void* key) {
     const auto found = defaults().values.find(nsstring_text(key));
     return found != defaults().values.end() && (found->second == "1" || found->second == "true");
@@ -191,6 +196,8 @@ void foundation_register_classes() {
     g_defaults_class = objc_native_class("NSUserDefaults");
     objc_register_method("+[NSUserDefaults standardUserDefaults]", reinterpret_cast<const void*>(defaults_standard));
     objc_register_method("-[NSUserDefaults stringForKey:]", reinterpret_cast<const void*>(defaults_string_for_key));
+    objc_register_method("-[NSUserDefaults objectForKey:]", reinterpret_cast<const void*>(defaults_object_for_key));
+    objc_register_method("-[NSUserDefaults stringArrayForKey:]", reinterpret_cast<const void*>(defaults_string_array_for_key));
     objc_register_method("-[NSUserDefaults boolForKey:]", reinterpret_cast<const void*>(defaults_bool_for_key));
     objc_register_method("-[NSUserDefaults integerForKey:]", reinterpret_cast<const void*>(defaults_integer_for_key));
     objc_register_method("-[NSUserDefaults setBool:forKey:]", reinterpret_cast<const void*>(defaults_set_bool));

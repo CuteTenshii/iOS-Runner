@@ -311,8 +311,8 @@ char g_app_body_requirement;
 }  // namespace
 
 // Register-preserving retain and release variants: the argument arrives in the named register,
-// and callers rely on every other caller-saved register surviving the call.
-#define PRESERVING_THUNK(name, target, reg)        \
+// callers rely on every other caller-saved register surviving, and retains return the object in x0.
+#define PRESERVING_THUNK(name, target, reg, result)        \
     ".globl " #name "\n"                           \
     #name ":\n"                                    \
     "  stp x29, x30, [sp, #-176]!\n"               \
@@ -337,10 +337,11 @@ char g_app_body_requirement;
     "  ldp x14, x15, [sp, #128]\n"                 \
     "  ldp x16, x17, [sp, #144]\n"                 \
     "  ldp x29, x30, [sp], #176\n"                 \
+    result                                         \
     "  ret\n"
 
 #define THUNK_PAIR(reg) \
-    PRESERVING_THUNK(rt_retain_##reg, rt_swift_retain, reg) PRESERVING_THUNK(rt_release_##reg, rt_swift_release, reg)
+    PRESERVING_THUNK(rt_retain_##reg, rt_swift_retain, reg, "  mov x0, " #reg "\n") PRESERVING_THUNK(rt_release_##reg, rt_swift_release, reg, "")
 
 __asm__(
     ".text\n"

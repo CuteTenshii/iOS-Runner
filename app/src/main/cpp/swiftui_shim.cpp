@@ -158,6 +158,14 @@ SWIFTCC UnitPointValue unit_point_center() { return {0.5, 0.5}; }
 SWIFTCC uint64_t font_bold(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontBold; }
 SWIFTCC uint64_t font_monospaced(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontMonospaced; }
 
+std::atomic<bool> g_tree_dirty{true};
+
+SWIFTCC void registrar_init(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
+SWIFTCC void registrar_access() {}
+SWIFTCC void registrar_mark_dirty() { g_tree_dirty.store(true, std::memory_order_relaxed); }
+
+extern "C" void rt_registrar_with_mutation();
+
 void walk_view(void* value, void* type, void** witnesses, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
@@ -182,6 +190,22 @@ void walk_view(void* value, void* type, void** witnesses, int depth) {
 }
 
 }  // namespace
+
+// withMutation(of:keyPath:_:): the closure is in x2/x3; x8 and the error register x21 pass straight through.
+__asm__(
+    ".text\n"
+    ".globl rt_registrar_with_mutation\n"
+    "rt_registrar_with_mutation:\n"
+    "  stp x29, x30, [sp, #-32]!\n"
+    "  mov x29, sp\n"
+    "  str x20, [sp, #16]\n"
+    "  mov x20, x3\n"
+    "  blr x2\n"
+    "  ldr x20, [sp, #16]\n"
+    "  ldp x29, x30, [sp], #32\n"
+    "  b rt_registrar_mark_dirty_c\n");
+
+extern "C" void rt_registrar_mark_dirty_c() { g_tree_dirty.store(true, std::memory_order_relaxed); }
 
 void swiftui_run_scene(void* scene) {
     auto* box = *static_cast<ViewBox**>(scene);
@@ -221,6 +245,11 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4EdgeO3SetV6bottomAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x04>)},
         {"$s7SwiftUI4EdgeO3SetV8trailingAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x08>)},
         {"$s7SwiftUI9UnitPointV6centerACvgZ", reinterpret_cast<void*>(unit_point_center)},
+        {"$s11Observation0A9RegistrarVACycfC", reinterpret_cast<void*>(registrar_init)},
+        {"$s11Observation0A9RegistrarV6access_7keyPathyx_s03KeyE0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
+        {"$s11Observation0A9RegistrarV7willSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
+        {"$s11Observation0A9RegistrarV6didSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_mark_dirty)},
+        {"$s11Observation0A9RegistrarV12withMutation2of7keyPath_q0_x_s03KeyG0Cyxq_Gq0_yKXEtKAA10ObservableRzr1_lF", reinterpret_cast<void*>(rt_registrar_with_mutation)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };
