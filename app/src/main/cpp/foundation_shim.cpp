@@ -1,6 +1,10 @@
 #include "foundation_shim.h"
 
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <cerrno>
 
 #include <cstdlib>
 #include <cstring>
@@ -231,6 +235,109 @@ void* content_world_page(void*, const char*) { return framework_singleton("WKCon
 void* url_session_configuration_default(void*, const char*) { return framework_singleton("NSURLSessionConfiguration"); }
 void* url_session_with_configuration(void*, const char*, void*) { return framework_singleton("NSURLSession"); }
 
+// Foundation.URL is resilient, so the guest only ever holds this object through one reference.
+struct URLBox {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    std::string* text;
+};
+
+void destroy_url(void* raw) {
+    auto* box = static_cast<URLBox*>(raw);
+    delete box->text;
+    free(box);
+}
+
+const StorageMetadata kUrlMetadata = {destroy_url, nullptr, 0};
+
+URLBox* new_url(const std::string& text) {
+    auto* box = static_cast<URLBox*>(calloc(1, sizeof(URLBox)));
+    box->metadata = const_cast<uint64_t*>(&kUrlMetadata.kind);
+    new (&box->references) std::atomic<uint64_t>(1);
+    box->text = new std::string(text);
+    return box;
+}
+
+constexpr const char* kFileScheme = "file://";
+constexpr size_t kFileSchemeLength = 7;
+
+bool make_directories(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            const std::string prefix = path.substr(0, i);
+            if (mkdir(prefix.c_str(), 0700) != 0 && errno != EEXIST) return false;
+        }
+    }
+    return true;
+}
+
+std::string url_path(const std::string& text) {
+    size_t start = 0;
+    const size_t scheme_end = text.find("://");
+    if (scheme_end != std::string::npos) {
+        start = text.find('/', scheme_end + 3);
+        if (start == std::string::npos) return {};
+    }
+    const size_t end = text.find_first_of("?#", start);
+    return text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+SWIFTCC void url_application_support(__attribute__((swift_indirect_result)) URLBox** out) {
+    const std::string directory = engine_bundle_dir() + "/.Library/Application Support";
+    make_directories(directory);
+    *out = new_url(kFileScheme + directory + "/");
+}
+
+SWIFTCC void url_from_string(__attribute__((swift_indirect_result)) URLBox** out, SwiftString value) {
+    const std::string text = swift_string_to_utf8(value);
+    *out = text.empty() ? nullptr : new_url(text);
+}
+
+SWIFTCC SwiftString url_absolute_string(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
+SWIFTCC SwiftString url_path_getter(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
+
+struct OptionalSwiftString {
+    uint64_t count_and_flags;
+    uint64_t object;
+};
+
+SWIFTCC OptionalSwiftString url_scheme(__attribute__((swift_context)) URLBox** self) {
+    const size_t end = (*self)->text->find(':');
+    if (end == std::string::npos) return {0, 0};
+    const SwiftString scheme = swift_string_from_utf8((*self)->text->substr(0, end));
+    return {scheme.count_and_flags, scheme.object};
+}
+
+SWIFTCC void url_appending_path(__attribute__((swift_indirect_result)) URLBox** out, const SwiftString* component, const void*, void*, void*, __attribute__((swift_context)) URLBox** self) {
+    std::string base = *(*self)->text;
+    if (!base.empty() && base.back() != '/') base += '/';
+    *out = new_url(base + swift_string_to_utf8(*component));
+}
+
+SWIFTCC void url_deleting_last_component(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) {
+    std::string text = *(*self)->text;
+    if (!text.empty() && text.back() == '/') text.pop_back();
+    const size_t slash = text.rfind('/');
+    *out = new_url(slash == std::string::npos ? text : text.substr(0, slash + 1));
+}
+
+void* g_nsurl_class = nullptr;
+
+SWIFTCC void* url_bridge_to_objc(__attribute__((swift_context)) URLBox** self) {
+    auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->text));
+    object->header.isa = g_nsurl_class;
+    return object;
+}
+
+SWIFTCC void url_bridge_from_objc(__attribute__((swift_indirect_result)) URLBox** out, void* object) { *out = new_url(nsstring_text(object)); }
+
+const int32_t kDirectoryHintInferFromPath = 2;
+
+bool file_manager_create_directory(void*, const char*, void* url, bool, void*, void** error) {
+    if (error != nullptr) *error = nullptr;
+    return make_directories(url_path(nsstring_text(url)));
+}
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -318,6 +425,8 @@ void foundation_register_classes() {
     objc_register_method("+[NSBundle mainBundle]", reinterpret_cast<const void*>(main_bundle));
     objc_register_method("+[NSBundle bundleForClass:]", reinterpret_cast<const void*>(bundle_for_class));
     objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value));
+    g_nsurl_class = objc_native_class("NSURL", destroy_nsstring);
+    objc_register_method("-[NSFileManager createDirectoryAtURL:withIntermediateDirectories:attributes:error:]", reinterpret_cast<const void*>(file_manager_create_directory));
     objc_register_method("+[NSFileManager defaultManager]", reinterpret_cast<const void*>(file_manager_default));
     objc_register_method("-[NSFileManager fileExistsAtPath:]", reinterpret_cast<const void*>(file_exists_at_path));
     objc_register_method("+[UIApplication sharedApplication]", reinterpret_cast<const void*>(shared_application));
@@ -345,6 +454,16 @@ void foundation_register_classes() {
 
 void* foundation_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$s10Foundation3URLV27applicationSupportDirectoryACvgZ", reinterpret_cast<void*>(url_application_support)},
+        {"$s10Foundation3URLV6stringACSgSSh_tcfC", reinterpret_cast<void*>(url_from_string)},
+        {"$s10Foundation3URLV14absoluteStringSSvg", reinterpret_cast<void*>(url_absolute_string)},
+        {"$s10Foundation3URLV4pathSSvg", reinterpret_cast<void*>(url_path_getter)},
+        {"$s10Foundation3URLV6schemeSSSgvg", reinterpret_cast<void*>(url_scheme)},
+        {"$s10Foundation3URLV9appending4path13directoryHintACx_AC09DirectoryF0OtSyRzlF", reinterpret_cast<void*>(url_appending_path)},
+        {"$s10Foundation3URLV25deletingLastPathComponentACyF", reinterpret_cast<void*>(url_deleting_last_component)},
+        {"$s10Foundation3URLV19_bridgeToObjectiveCSo5NSURLCyF", reinterpret_cast<void*>(url_bridge_to_objc)},
+        {"$s10Foundation3URLV36_unconditionallyBridgeFromObjectiveCyACSo5NSURLCSgFZ", reinterpret_cast<void*>(url_bridge_from_objc)},
+        {"$s10Foundation3URLV13DirectoryHintO13inferFromPathyA2EmFWC", const_cast<int32_t*>(&kDirectoryHintInferFromPath)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

@@ -54,6 +54,9 @@ struct ValueWitnessTable {
     size_t stride;
     uint32_t flags;
     uint32_t extra_inhabitants;
+    uint32_t (*get_enum_tag)(const void*, void*);
+    void (*destructive_project_enum_data)(void*, void*);
+    void (*destructive_inject_enum_tag)(void*, uint32_t, void*);
 };
 
 enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential };
@@ -349,6 +352,10 @@ Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector
     if (layout->kind != LayoutKind::Pod) witnesses->flags |= kFlagNonPod;
     if (size > kInlineBufferSize || alignment > kPointerSize) witnesses->flags |= kFlagNonInline;
     witnesses->extra_inhabitants = extra_inhabitants;
+    // Resilient framework enums are one word here: the case index, tagged so refcounting skips it.
+    witnesses->get_enum_tag = +[](const void* value, void*) { return static_cast<uint32_t>(*static_cast<const uint64_t*>(value)); };
+    witnesses->destructive_project_enum_data = +[](void*, void*) {};
+    witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void*) { *static_cast<uint64_t*>(value) = kBridgeImmediateBit | tag; };
 
     const size_t words = 4 + (arguments.empty() ? 1 : arguments.size());
     auto* block = static_cast<MetadataAllocation*>(calloc(words, sizeof(void*)));
@@ -995,6 +1002,9 @@ extern "C" void rt_initStructMetadata(void** metadata, size_t, size_t field_coun
 constexpr size_t kClassSuperclassOffset = 8;
 constexpr size_t kClassInstanceSizeOffset = 48;
 constexpr size_t kClassInstanceAlignOffset = 52;
+constexpr size_t kClassDataOffset = 32;
+constexpr size_t kRoInstanceSizeOffset = 8;
+constexpr size_t kRoIvarsOffset = 48;
 constexpr uint32_t kRootInstanceSize = sizeof(HeapObject);
 
 extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_count, const void* const* field_layouts, size_t* field_offsets) {
@@ -1017,6 +1027,25 @@ extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_co
     }
     memcpy(metadata + kClassInstanceSizeOffset, &size, sizeof size);
     memcpy(metadata + kClassInstanceAlignOffset, &alignment_mask, sizeof alignment_mask);
+
+    // The guest reads field offsets from globals that the ObjC runtime fills in through the ivar list.
+    uintptr_t data;
+    memcpy(&data, metadata + kClassDataOffset, sizeof data);
+    auto* read_only = reinterpret_cast<char*>(data & ~static_cast<uintptr_t>(7));
+    memcpy(read_only + kRoInstanceSizeOffset, &size, sizeof size);
+    const char* ivars;
+    memcpy(&ivars, read_only + kRoIvarsOffset, sizeof ivars);
+    if (ivars != nullptr) {
+        uint32_t entry_size, count;
+        memcpy(&entry_size, ivars, sizeof entry_size);
+        memcpy(&count, ivars + sizeof entry_size, sizeof count);
+        const char* entries = ivars + 2 * sizeof(uint32_t);
+        for (uint32_t i = 0; i < count && i < field_count; ++i) {
+            uint64_t* offset_global;
+            memcpy(&offset_global, entries + i * entry_size, sizeof offset_global);
+            if (offset_global != nullptr) *offset_global = field_offsets[i];
+        }
+    }
     return nullptr;
 }
 
@@ -1077,7 +1106,8 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_updateClassMetadata2") return reinterpret_cast<void*>(rt_updateClassMetadata2);
     if (name.size() > 3 && name.substr(0, 2) == "$s" && name.back() == 'N') {
         const std::lock_guard guard(g_types_lock);
-        if (name == "$sytN") return pod_type("yt", 0);
+        // Unlike nominal types, this symbol names the full metadata, one word before its address point.
+        if (name == "$sytN") return reinterpret_cast<char*>(pod_type("yt", 0)) - sizeof(void*);
         if (name == "$sypN") return any_type();
         if (name == "$sSSN" || name == "$sSS8UTF8ViewVN" || name == "$ss11_StringGutsVN" || name == "$ss26DefaultStringInterpolationVN") return string_type();
         if (name == "$sSiN") return pod_type("Si", 8);

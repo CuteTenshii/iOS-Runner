@@ -91,6 +91,11 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
     } else {
         engine_log("CRASH: %s at %s, address 0x%zx, lr %s", signal_name(number), pc_text, static_cast<size_t>(fault), lr_text);
     }
+    engine_log("  x0=%llx x1=%llx x2=%llx x8=%llx x19=%llx x20=%llx x21=%llx x22=%llx",
+               static_cast<unsigned long long>(machine.regs[0]), static_cast<unsigned long long>(machine.regs[1]),
+               static_cast<unsigned long long>(machine.regs[2]), static_cast<unsigned long long>(machine.regs[8]),
+               static_cast<unsigned long long>(machine.regs[19]), static_cast<unsigned long long>(machine.regs[20]),
+               static_cast<unsigned long long>(machine.regs[21]), static_cast<unsigned long long>(machine.regs[22]));
     uintptr_t frame = machine.regs[29];
     for (int depth = 0; depth < 16 && frame != 0 && (frame & 7) == 0; ++depth) {
         uintptr_t next, ret;
