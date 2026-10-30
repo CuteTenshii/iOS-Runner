@@ -673,10 +673,15 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI13_VStackLayoutVMn", {kWord, kOptionalDouble}},
         {"_$s7SwiftUI13_ZStackLayoutVMn", {kAlignment}},
         {"_$s7SwiftUI6SpacerVMn", {kOptionalDouble}},
+        {"_$s7SwiftUI5StateVMn", {kFirstArgument, kReference}},
+        {"_$s7SwiftUI16SubscriptionViewVMn", {kSecondArgument, kFirstArgument, kClosure}},
+        {"_$s7SwiftUI14ObservedObjectVMn", {kWord, kReference}},
+        {"_$s7SwiftUI11StateObjectVMn", {kWord, kReference, kByte}},
         {"_$s7SwiftUI6CircleVMn", {}},
         {"_$s7SwiftUI9RectangleVMn", {}},
         {"_$s7SwiftUI9EmptyViewVMn", {}},
         {"_$s7SwiftUI12TupleContentVMn", {kFirstArgument}},
+        {"_$s7SwiftUI9TupleViewVMn", {kFirstArgument}},
         {"_$s7SwiftUI16_TupleTabContentVMn", {kFirstArgument, kSecondArgument}},
     };
     return table;
@@ -691,6 +696,8 @@ size_t witness_word_count(const std::string& symbol) {
         {"_$s7SwiftUI11_ClipEffectVMn", 1}, {"_$s7SwiftUI21_ContentShapeModifierVMn", 1},
         {"_$s7SwiftUI18_AnimationModifierVMn", 1}, {"_$s7SwiftUI21_TraitWritingModifierVMn", 1},
         {"_$s7SwiftUI24_TagTraitWritingModifierVMn", 1},
+        {"_$s7SwiftUI14ObservedObjectVMn", 1}, {"_$s7SwiftUI11StateObjectVMn", 1},
+        {"_$s7SwiftUI16SubscriptionViewVMn", 2},
     };
     const auto found = counts.find(symbol);
     return found == counts.end() ? 0 : found->second;
@@ -1603,6 +1610,8 @@ void* make_accessor_stub(const std::string& symbol) {
 
 void* type_system_symbol(std::string_view name) {
     if (name == "swift_getTypeByMangledNameInContext2") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContext2);
+    if (name == "swift_getTypeByMangledNameInContext") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContext2);
+    if (name == "swift_getTypeByMangledNameInContextInMetadataState") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContextInMetadataState2);
     if (name == "swift_getTypeByMangledNameInContextInMetadataState2") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContextInMetadataState2);
     if (name == "swift_getObjCClassMetadata") return reinterpret_cast<void*>(rt_getObjCClassMetadata);
     if (name == "swift_getObjCClassFromMetadata") return reinterpret_cast<void*>(rt_getObjCClassFromMetadata);

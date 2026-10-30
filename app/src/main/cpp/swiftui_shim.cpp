@@ -1,5 +1,6 @@
 #include "swiftui_shim.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -15,9 +16,11 @@
 #include <unordered_set>
 
 #include "concurrency_shim.h"
+#include "coredata_shim.h"
 #include "engine.h"
 #include "objc_runtime.h"
 #include "foundation_shim.h"
+#include "json.h"
 #include "key_path.h"
 #include "localization.h"
 #include "macho.h"
@@ -111,7 +114,7 @@ SWIFTCC void scene_build_block(SWIFT_OUT void* out, void* value, void* type, voi
 
 SWIFTCC void registrar_mark_dirty();
 
-enum class BindingKind : uint32_t { State, Closures, ObjectKeyPath, BindingKeyPath };
+enum class BindingKind : uint32_t { State, Closures, ObjectKeyPath, BindingKeyPath, AppStorage };
 
 // A two-way reference to a value, in whichever of SwiftUI's forms the app created it.
 struct BindingNode {
@@ -174,6 +177,7 @@ enum class NodeKind : uint32_t {
     TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
     Sheet, Toolbar, OnChange, Task, Picker, ForEach, Section, ProgressView, Stepper, Image, AsyncImage,
     Disclosure, LabeledContent, Unavailable, Menu, Link, ToolbarItem, ImageResource,
+    RowMenu, PresentedSheet, Alert, NavigationLink, TextField, Stack, Divider,
 };
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
@@ -326,8 +330,20 @@ constexpr size_t kArrayCountOffsetBytes = 16;
 constexpr size_t kArrayElementsOffsetBytes = 32;
 constexpr uint64_t kCollectionPointerMask = 0x00fffffffffffff8ULL;
 
+const std::vector<void*>& fetched_results_contents(void* value);
+
 // Evaluates the row closure for each element, which needs Data to be an Array.
 void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row, void* row_context, void* row_type) {
+    const char* data_name = foreign_type_name(data_type);
+    if (data_name != nullptr && strcmp(data_name, "_$s7SwiftUI14FetchedResultsVMn") == 0) {
+        for (void* object : fetched_results_contents(data)) {
+            const size_t size = witnesses_of(row_type)->size;
+            void* value = calloc(1, size == 0 ? 1 : size);
+            rt_call_witness(row, value, row_context, &object, nullptr);
+            node->children->push_back({value, row_type});
+        }
+        return;
+    }
     void* element = array_element_type(data_type);
     if (element == nullptr) {
         engine_log("STOP: ForEach over a collection other than Array");
@@ -544,6 +560,395 @@ SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, const uint64_t* item, uint
     *out = node;
 }
 
+// Most modifiers only change appearance: they keep `self` as a child, and only differ in where Self is passed.
+template <size_t SelfTypeRegister>
+SWIFTCC void modifier_passthrough(SWIFT_OUT ViewNode** out, void* x0, void* x1, void* x2, void* x3, void* x4, void* x5, void* x6, void* x7, SWIFT_CONTEXT void* self) {
+    void* const registers[] = {x0, x1, x2, x3, x4, x5, x6, x7};
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, self, registers[SelfTypeRegister]);
+    *out = node;
+}
+
+// ModifiedContent<Self, M> written inline, for modifiers whose concrete type the app was compiled against.
+void write_modified_content(void* out, void* self, void* type, const void* modifier, size_t modifier_size) {
+    const auto* witnesses = witnesses_of(type);
+    witnesses->initialize_with_copy(out, self, type);
+    const size_t offset = (witnesses->size + 7) & ~static_cast<size_t>(7);
+    memcpy(static_cast<char*>(out) + offset, modifier, modifier_size);
+}
+
+constexpr size_t kPaddingLayoutBytes = 48;
+
+SWIFTCC void view_padding(SWIFT_OUT void* out, uint8_t, uint64_t, bool, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    const char modifier[kPaddingLayoutBytes] = {};
+    write_modified_content(out, self, self_type, modifier, sizeof modifier);
+}
+
+// _EnvironmentKeyWritingModifier: the key path is unused, because the environment isn't modelled.
+SWIFTCC void view_environment_word(SWIFT_OUT void* out, uint64_t value, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    const uint64_t modifier[] = {0, value};
+    write_modified_content(out, self, self_type, modifier, sizeof modifier);
+}
+
+SWIFTCC void view_transition(SWIFT_OUT void* out, uint64_t transition, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    write_modified_content(out, self, self_type, &transition, sizeof transition);
+}
+
+SWIFTCC void view_on_appear(SWIFT_OUT void* out, const void* action, void* context, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    const void* const modifier[] = {action, context, nullptr, nullptr};
+    write_modified_content(out, self, self_type, modifier, sizeof modifier);
+}
+
+SWIFTCC void view_on_disappear(SWIFT_OUT void* out, const void* action, void* context, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    const void* const modifier[] = {nullptr, nullptr, action, context};
+    write_modified_content(out, self, self_type, modifier, sizeof modifier);
+}
+
+SWIFTCC void view_on_tap(SWIFT_OUT ViewNode** out, int64_t, const void* action, void* context, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Button);
+    node->action = action;
+    node->action_context = rt_swift_retain(context);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+// The action takes the tap's location, which only arrives in d0/d1 and which an untouched closure ignores.
+SWIFTCC void view_on_tap_location(SWIFT_OUT ViewNode** out, int64_t count, uint8_t, const void* action, void* context, void* self_type, void* table, SWIFT_CONTEXT void* self) {
+    view_on_tap(out, count, action, context, self_type, table, self);
+}
+
+// A row's context menu and swipe actions are reached from a menu next to the row.
+SWIFTCC void view_row_menu(SWIFT_OUT ViewNode** out, const void* content, void* context, void* self_type, void* content_type, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::RowMenu);
+    add_self_child(node, self, self_type);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void view_swipe_actions(SWIFT_OUT ViewNode** out, uint8_t, bool, const void* content, void* context, void* self_type, void* content_type, void* a, void* b, SWIFT_CONTEXT void* self) {
+    view_row_menu(out, content, context, self_type, content_type, a, b, self);
+}
+
+SWIFTCC void view_toolbar_title_menu(SWIFT_OUT ViewNode** out, const void* content, void* context, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    (void)content;
+    (void)context;
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void view_refreshable(SWIFT_OUT ViewNode** out, const void*, void*, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void view_on_open_url(SWIFT_OUT ViewNode** out, const void*, void*, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void view_tab_item(SWIFT_OUT ViewNode** out, const void* label, void* label_context, void* self_type, void* label_type, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Tab);
+    add_self_child(node, self, self_type);
+    evaluate_child(node, label, label_context, label_type);
+    node->lower = 1;
+    *out = node;
+}
+
+// Binding<Bool> arrives as {transaction, location, value}; the closure builds the presented view each time.
+SWIFTCC void view_sheet_presented(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void*, void*, const void* content, void* content_context, void* self_type, void* content_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::PresentedSheet);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    node->action = content;
+    node->action_context = rt_swift_retain(content_context);
+    node->content_type = content_type;
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+SWIFTCC void view_navigation_destination(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void* content, void* content_context, void* self_type, void* content_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::PresentedSheet);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    node->action = content;
+    node->action_context = rt_swift_retain(content_context);
+    node->content_type = content_type;
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
+void make_alert(ViewNode** out, std::string title, BindingNode* location, const void* actions, void* actions_context, void* actions_type, void* self_type, void* self) {
+    auto* node = new_node(NodeKind::Alert);
+    *node->title = std::move(title);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    add_self_child(node, self, self_type);
+    evaluate_child(node, actions, actions_context, actions_type);
+    *out = node;
+}
+
+SWIFTCC void view_alert_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location, uint64_t, const void* actions, void* actions_context, void* self_type, void* actions_type, void*, void*, SWIFT_CONTEXT void* self) {
+    make_alert(out, interpolation != nullptr ? localized_text(interpolation) : localization_lookup(swift_string_to_utf8(key)), location, actions, actions_context, actions_type, self_type, self);
+}
+
+SWIFTCC void view_alert_string(SWIFT_OUT ViewNode** out, const SwiftString* title, uint64_t, BindingNode* location, uint64_t, const void* actions, void* actions_context, void* self_type, void*, void* actions_type, void*, void*, SWIFT_CONTEXT void* self) {
+    make_alert(out, swift_string_to_utf8(*title), location, actions, actions_context, actions_type, self_type, self);
+}
+
+SWIFTCC void view_alert_message(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location, uint64_t, const void* actions, void* actions_context, const void* message, void* message_context, void* self_type, void* actions_type, void* message_type, void*, void*, SWIFT_CONTEXT void* self) {
+    make_alert(out, interpolation != nullptr ? localized_text(interpolation) : localization_lookup(swift_string_to_utf8(key)), location, actions, actions_context, actions_type, self_type, self);
+    evaluate_child(*out, message, message_context, message_type);
+}
+
+// A transition only animates a view in and out, which the tree doesn't show.
+SWIFTCC uint64_t transition_constant() { return kImmediate; }
+SWIFTCC uint64_t transition_with_argument(uint64_t) { return kImmediate; }
+
+// Constructors whose title is a key or string instead of a label view.
+std::string key_text(SwiftString key, LocalizedBox* interpolation) {
+    return interpolation != nullptr ? localized_text(interpolation) : localization_lookup(swift_string_to_utf8(key));
+}
+
+void make_titled_button(ViewNode** out, std::string title, const void* action, void* context) {
+    auto* node = new_node(NodeKind::Button);
+    *node->title = std::move(title);
+    node->action = action;
+    node->action_context = rt_swift_retain(context);
+    *out = node;
+}
+
+SWIFTCC void button_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, const void* action, void* context) {
+    make_titled_button(out, key_text(key, interpolation), action, context);
+}
+
+SWIFTCC void button_key_role(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, const void*, const void* action, void* context) {
+    make_titled_button(out, key_text(key, interpolation), action, context);
+}
+
+SWIFTCC void button_string(SWIFT_OUT ViewNode** out, const SwiftString* title, const void* action, void* context, void*, void*) {
+    make_titled_button(out, swift_string_to_utf8(*title), action, context);
+}
+
+void make_system_label(ViewNode** out, std::string title, SwiftString image) {
+    auto* node = new_node(NodeKind::Label);
+    *node->title = std::move(title);
+    *node->system_image = swift_string_to_utf8(image);
+    *out = node;
+}
+
+SWIFTCC void label_key_system(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, SwiftString image) {
+    make_system_label(out, key_text(key, interpolation), image);
+}
+
+SWIFTCC void label_string_system(SWIFT_OUT ViewNode** out, const SwiftString* title, SwiftString image, void*, void*) {
+    make_system_label(out, swift_string_to_utf8(*title), image);
+}
+
+SWIFTCC ViewNode* image_named(SwiftString name, void*) {
+    auto* node = new_node(NodeKind::Image);
+    *node->title = swift_string_to_utf8(name);
+    return node;
+}
+
+SWIFTCC void navigation_link_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, void* destination, void* destination_type, void*) {
+    auto* node = new_node(NodeKind::NavigationLink);
+    *node->title = key_text(key, interpolation);
+    add_value_child(node, destination, destination_type);
+    *out = node;
+}
+
+SWIFTCC void navigation_link_label(SWIFT_OUT ViewNode** out, void* destination, const void* label, void* label_context, void* label_type, void* destination_type, void*, void*) {
+    auto* node = new_node(NodeKind::NavigationLink);
+    add_value_child(node, destination, destination_type);
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+void make_text_field(ViewNode** out, std::string title, BindingNode* location, bool secure) {
+    auto* node = new_node(NodeKind::TextField);
+    *node->title = std::move(title);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    node->lower = secure ? 1 : 0;
+    *out = node;
+}
+
+SWIFTCC void text_field_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location) {
+    make_text_field(out, key_text(key, interpolation), location, false);
+}
+
+SWIFTCC void secure_field_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location) {
+    make_text_field(out, key_text(key, interpolation), location, true);
+}
+
+SWIFTCC void text_field_string(SWIFT_OUT ViewNode** out, const SwiftString* title, uint64_t, BindingNode* location) {
+    make_text_field(out, swift_string_to_utf8(*title), location, false);
+}
+
+SWIFTCC void for_each_init_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void* id_type, void* row_type) {
+    for_each_identifiable(out, data, row, row_context, data_type, id_type, row_type);
+}
+
+SWIFTCC void for_each_init_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void*, void* row_type) {
+    auto* node = new_node(NodeKind::ForEach);
+    evaluate_rows(node, data, data_type, row, row_context, row_type);
+    *out = node;
+}
+
+// Section's forms differ only in which of header, content and footer they take, and how.
+ViewNode* new_section() { return new_node(NodeKind::Section); }
+
+SWIFTCC void section_header_view(SWIFT_OUT ViewNode** out, void* header, const void* content, void* context, void* header_type, void* content_type, void*, void*) {
+    auto* node = new_section();
+    add_value_child(node, header, header_type);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void section_content(SWIFT_OUT ViewNode** out, const void* content, void* context, void* content_type, void*) {
+    auto* node = new_section();
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void section_footer_view(SWIFT_OUT ViewNode** out, void* footer, const void* content, void* context, void* content_type, void* footer_type, void*, void*) {
+    auto* node = new_section();
+    evaluate_child(node, content, context, content_type);
+    add_value_child(node, footer, footer_type);
+    *out = node;
+}
+
+SWIFTCC void section_header_footer(SWIFT_OUT ViewNode** out, void* header, void* footer, const void* content, void* context, void* header_type, void* content_type, void* footer_type, void*) {
+    auto* node = new_section();
+    add_value_child(node, header, header_type);
+    evaluate_child(node, content, context, content_type);
+    add_value_child(node, footer, footer_type);
+    *out = node;
+}
+
+SWIFTCC void section_title_string(SWIFT_OUT ViewNode** out, const SwiftString* title, const void* content, void* context, void* content_type, void*, void*, void*) {
+    auto* node = new_section();
+    *node->title = swift_string_to_utf8(*title);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void section_title_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, const void* content, void* context, void* content_type, void*) {
+    auto* node = new_section();
+    *node->title = key_text(key, interpolation);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void group_init(SWIFT_OUT ViewNode** out, const void* content, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::Modifier);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void scroll_view_init(SWIFT_OUT ViewNode** out, uint8_t, bool, const void* content, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::List);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+// ZStack is frozen: its alignment, then the content in place.
+SWIFTCC void z_stack_init(SWIFT_OUT char* out, uint64_t horizontal, uint64_t vertical, const void* content, void* context, void* content_type, void*) {
+    memcpy(out, &horizontal, sizeof horizontal);
+    memcpy(out + sizeof horizontal, &vertical, sizeof vertical);
+    rt_call_witness(content, out + sizeof horizontal + sizeof vertical, context, nullptr, nullptr);
+    (void)content_type;
+}
+
+SWIFTCC void lazy_stack_init(SWIFT_OUT ViewNode** out, uint64_t, uint64_t, bool, uint8_t, const void* content, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::Stack);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void lazy_grid_init(SWIFT_OUT ViewNode** out, void*, uint64_t, uint64_t, bool, uint8_t, const void* content, void* context, void* content_type) {
+    auto* node = new_node(NodeKind::Stack);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void divider_init(SWIFT_OUT ViewNode** out) { *out = new_node(NodeKind::Divider); }
+
+SWIFTCC void* any_view_init(void* value, void* type, void*) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, value, type);
+    witnesses_of(type)->destroy(value, type);
+    return node;
+}
+
+SWIFTCC void tab_view_selection(SWIFT_OUT ViewNode** out, void*, const void* closure, void* context, void*, void* content_type, void*, void*) {
+    auto* node = new_node(NodeKind::TabView);
+    evaluate_child(node, closure, context, content_type);
+    *out = node;
+}
+
+// _ConditionalContent and its Storage share one layout: the larger branch, then the tag.
+SWIFTCC void conditional_from_storage(SWIFT_OUT void* out, void* storage, void* true_type, void* false_type) {
+    const size_t larger = std::max(witnesses_of(true_type)->size, witnesses_of(false_type)->size);
+    memcpy(out, storage, larger + 1);
+}
+
+// A builder result is the value itself, for toolbar content as for views.
+SWIFTCC void builder_identity(SWIFT_OUT void* out, void* value, void* type, void*) { witnesses_of(type)->initialize_with_copy(out, value, type); }
+
+// Layout-only descriptions: nothing reads them, but the app passes them around as one word.
+SWIFTCC uint64_t immediate_value() { return kImmediate; }
+SWIFTCC void immediate_indirect(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
+
+SWIFTCC void with_transaction(SWIFT_OUT void* out, void*, const void* body, void* context) { rt_call_witness(body, out, context, nullptr, nullptr); }
+
+struct FetchRequestBox {
+    HeapHeader header;
+    std::string* entity;
+    void* sort_descriptors;
+};
+
+void destroy_fetch_request(HeapHeader* object) {
+    auto* box = reinterpret_cast<FetchRequestBox*>(object);
+    delete box->entity;
+    free(box);
+}
+
+const BoxMetadata kFetchRequestMetadata = {destroy_fetch_request, nullptr, 0};
+
+SWIFTCC void fetch_request_init(SWIFT_OUT FetchRequestBox** out, void* entity, void* sort_descriptors, void*, void*, void*) {
+    auto* box = static_cast<FetchRequestBox*>(calloc(1, sizeof(FetchRequestBox)));
+    box->header.metadata = const_cast<uint64_t*>(&kFetchRequestMetadata.kind);
+    new (&box->header.references) std::atomic<uint64_t>(1);
+    box->entity = new std::string(coredata_entity_name(entity));
+    box->sort_descriptors = sort_descriptors;
+    *out = box;
+}
+
+struct FetchedResultsBox {
+    HeapHeader header;
+    std::vector<void*>* objects;
+};
+
+void destroy_fetched_results(HeapHeader* object) {
+    auto* box = reinterpret_cast<FetchedResultsBox*>(object);
+    delete box->objects;
+    free(box);
+}
+
+const BoxMetadata kFetchedResultsMetadata = {destroy_fetched_results, nullptr, 0};
+
+SWIFTCC void fetch_request_wrapped(SWIFT_OUT FetchedResultsBox** out, void*, SWIFT_CONTEXT FetchRequestBox** self) {
+    auto* box = static_cast<FetchedResultsBox*>(calloc(1, sizeof(FetchedResultsBox)));
+    box->header.metadata = const_cast<uint64_t*>(&kFetchedResultsMetadata.kind);
+    new (&box->header.references) std::atomic<uint64_t>(1);
+    box->objects = new std::vector<void*>(coredata_objects_of(*(*self)->entity));
+    *out = box;
+}
+
+const std::vector<void*>& fetched_results_contents(void* value) { return *(*static_cast<FetchedResultsBox**>(value))->objects; }
+
+SWIFTCC void* fetched_results_subscript(int64_t index, void*, SWIFT_CONTEXT FetchedResultsBox** self) { return rt_swift_retain((*(*self)->objects)[static_cast<size_t>(index)]); }
+
 // Backing store of @State, attached to the inline LazyState through its location word.
 struct StateBox {
     HeapHeader header;
@@ -613,7 +1018,11 @@ enum ConstantId : uint64_t {
     kColorAccent, kColorRed, kColorGreen, kColorSecondary,
     kStyleSecondary, kStyleQuaternary,
     kAnimationDefault, kButtonRoleDestructive, kToolbarTopBarTrailing,
-    kAlignLeading, kAlignTrailing, kAlignCenter, kAlignBottom,
+    kAlignLeading, kAlignTrailing, kAlignCenter, kAlignBottom, kAlignTop,
+    kFontLargeTitle, kFontTitle, kFontTitle2, kFontHeadline, kFontSubheadline,
+    kColorPrimary, kColorGray, kColorPink, kColorBlack, kColorClear, kColorWhite, kColorOrange, kColorYellow,
+    kStylePrimary, kWeightBold, kWeightSemibold,
+    kStyleConstantOther,
 };
 
 template <uint64_t Value>
@@ -640,6 +1049,8 @@ struct UnitPointValue {
 };
 
 SWIFTCC UnitPointValue unit_point_center() { return {0.5, 0.5}; }
+SWIFTCC UnitPointValue unit_point_top() { return {0.5, 0.0}; }
+SWIFTCC UnitPointValue unit_point_bottom() { return {0.5, 1.0}; }
 
 SWIFTCC uint64_t font_bold(uint64_t font) { return font | kFontBold; }
 SWIFTCC uint64_t font_monospaced(uint64_t font) { return font | kFontMonospaced; }
@@ -655,6 +1066,73 @@ extern "C" void rt_registrar_with_mutation();
 void binding_read(BindingNode* binding, void* out, void* type);
 void binding_write(BindingNode* binding, void* value, void* type);
 
+// AppStorage is one reference to this box: the key, and the default until something is stored.
+struct AppStorageBox {
+    HeapHeader header;
+    std::string* key;
+    std::string* fallback_text;
+    int64_t fallback_number;
+};
+
+void destroy_app_storage(HeapHeader* object) {
+    auto* box = reinterpret_cast<AppStorageBox*>(object);
+    delete box->key;
+    delete box->fallback_text;
+    free(box);
+}
+
+const BoxMetadata kAppStorageMetadata = {destroy_app_storage, nullptr, 0};
+
+AppStorageBox* new_app_storage(SwiftString key) {
+    auto* box = static_cast<AppStorageBox*>(calloc(1, sizeof(AppStorageBox)));
+    box->header.metadata = const_cast<uint64_t*>(&kAppStorageMetadata.kind);
+    new (&box->header.references) std::atomic<uint64_t>(1);
+    box->key = new std::string(swift_string_to_utf8(key));
+    box->fallback_text = new std::string();
+    return box;
+}
+
+SWIFTCC void app_storage_bool(SWIFT_OUT AppStorageBox** out, bool value, SwiftString key, void*) {
+    *out = new_app_storage(key);
+    (*out)->fallback_number = value ? 1 : 0;
+}
+
+SWIFTCC void app_storage_integer(SWIFT_OUT AppStorageBox** out, int64_t value, SwiftString key, void*) {
+    *out = new_app_storage(key);
+    (*out)->fallback_number = value;
+}
+
+SWIFTCC void app_storage_string(SWIFT_OUT AppStorageBox** out, SwiftString value, SwiftString key, void*) {
+    *out = new_app_storage(key);
+    *(*out)->fallback_text = swift_string_to_utf8(value);
+}
+
+void* bool_metadata();
+void* int_metadata();
+void* string_metadata();
+
+void app_storage_read(void* raw, void* out, void* type) {
+    auto* box = static_cast<AppStorageBox*>(raw);
+    if (type == bool_metadata()) {
+        *static_cast<bool*>(out) = foundation_defaults_lookup_bool(*box->key, box->fallback_number != 0);
+    } else if (type == int_metadata()) {
+        *static_cast<int64_t*>(out) = foundation_defaults_lookup_integer(*box->key, box->fallback_number);
+    } else {
+        *static_cast<SwiftString*>(out) = swift_string_from_utf8(foundation_defaults_lookup_string(*box->key, *box->fallback_text));
+    }
+}
+
+void app_storage_write(void* raw, void* value, void* type) {
+    auto* box = static_cast<AppStorageBox*>(raw);
+    if (type == bool_metadata()) {
+        foundation_defaults_store_bool(*box->key, *static_cast<bool*>(value));
+    } else if (type == int_metadata()) {
+        foundation_defaults_store_integer(*box->key, *static_cast<int64_t*>(value));
+    } else {
+        foundation_defaults_store_string(*box->key, swift_string_to_utf8(*static_cast<SwiftString*>(value)));
+    }
+}
+
 void binding_read(BindingNode* binding, void* out, void* type) {
     switch (binding->kind) {
         case BindingKind::State: {
@@ -667,6 +1145,9 @@ void binding_read(BindingNode* binding, void* out, void* type) {
             return;
         case BindingKind::ObjectKeyPath:
             key_path_get(binding->key_path, &binding->source, out, type);
+            return;
+        case BindingKind::AppStorage:
+            app_storage_read(binding->source, out, type);
             return;
         case BindingKind::BindingKeyPath: {
             const size_t size = witnesses_of(binding->parent_type)->size;
@@ -690,6 +1171,9 @@ void binding_write(BindingNode* binding, void* value, void* type) {
             break;
         case BindingKind::ObjectKeyPath:
             key_path_set(binding->key_path, &binding->source, value, type);
+            break;
+        case BindingKind::AppStorage:
+            app_storage_write(binding->source, value, type);
             break;
         case BindingKind::BindingKeyPath: {
             const size_t size = witnesses_of(binding->parent_type)->size;
@@ -753,6 +1237,74 @@ SWIFTCC void binding_member(SWIFT_OUT void* out, void* key_path, void* metadata,
     write_binding(out, binding, key_path_value_type(key_path));
 }
 
+SWIFTCC void app_storage_wrapped_get(SWIFT_OUT void* out, void* box, void* metadata) { app_storage_read(box, out, generic_argument(metadata)); }
+SWIFTCC void app_storage_wrapped_set(void* value, void* box, void* metadata) {
+    void* type = generic_argument(metadata);
+    app_storage_write(box, value, type);
+    witnesses_of(type)->destroy(value, type);
+    registrar_mark_dirty();
+}
+SWIFTCC void app_storage_projected(SWIFT_OUT void* out, void* box, void* metadata) {
+    auto* binding = new_binding(BindingKind::AppStorage);
+    binding->source = rt_swift_retain(box);
+    write_binding(out, binding, generic_argument(metadata));
+}
+
+// State<T> is frozen: the value inline, then the location word this box hangs from.
+size_t state_location_offset(void* type) { return (witnesses_of(type)->size + 7) & ~static_cast<size_t>(7); }
+
+StateBox* plain_state_box(char* self, void* type) {
+    auto** location = reinterpret_cast<StateBox**>(self + state_location_offset(type));
+    if (*location != nullptr) return *location;
+    const auto* witnesses = witnesses_of(type);
+    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
+    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
+    new (&state->header.references) std::atomic<uint64_t>(1);
+    state->type = type;
+    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    witnesses->initialize_with_copy(state->value, self, type);
+    *location = state;
+    return state;
+}
+
+SWIFTCC void state_init(SWIFT_OUT char* out, void* value, void* type) {
+    witnesses_of(type)->initialize_with_take(out, value, type);
+    memset(out + state_location_offset(type), 0, sizeof(void*));
+}
+
+SWIFTCC void state_wrapped_get(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT char* self) {
+    void* type = generic_argument(metadata);
+    witnesses_of(type)->initialize_with_copy(out, plain_state_box(self, type)->value, type);
+}
+
+SWIFTCC void state_wrapped_set(void* value, void* metadata, SWIFT_CONTEXT char* self) {
+    void* type = generic_argument(metadata);
+    witnesses_of(type)->assign_with_take(plain_state_box(self, type)->value, value, type);
+    registrar_mark_dirty();
+}
+
+SWIFTCC void state_projected(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT char* self) {
+    void* type = generic_argument(metadata);
+    auto* binding = new_binding(BindingKind::State);
+    binding->source = rt_swift_retain(plain_state_box(self, type));
+    write_binding(out, binding, type);
+}
+
+SWIFTCC void binding_constant(SWIFT_OUT void* out, void* value, void* type) {
+    const auto* witnesses = witnesses_of(type);
+    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
+    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
+    new (&state->header.references) std::atomic<uint64_t>(1);
+    state->type = type;
+    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    witnesses->initialize_with_take(state->value, value, type);
+    auto* binding = new_binding(BindingKind::State);
+    binding->source = state;
+    write_binding(out, binding, type);
+}
+
+SWIFTCC void binding_projected(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT void* self) { witnesses_of(metadata)->initialize_with_copy(out, self, metadata); }
+
 // Bindable keeps the observed object itself in its single word.
 SWIFTCC void bindable_init(SWIFT_OUT void** out, void* object) { *out = object; }
 SWIFTCC void bindable_wrapped_get(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
@@ -764,6 +1316,51 @@ SWIFTCC void bindable_member(SWIFT_OUT void* out, void* key_path, void*, SWIFT_C
     binding->key_path = rt_swift_retain(key_path);
     write_binding(out, binding, key_path_value_type(key_path));
 }
+
+// The view whose body is being evaluated, which is what gives a @StateObject its identity.
+std::string g_body_path;
+
+struct StateObjectKey {
+    const void* thunk;
+    std::string path;
+    bool operator<(const StateObjectKey& other) const { return thunk != other.thunk ? thunk < other.thunk : path < other.path; }
+};
+
+// StateObject is {thunk, context, is_object}. An object made once must outlive every copy of the view holding the thunk.
+void* state_object_resolve(const void* thunk, void* context, uint8_t is_object) {
+    if (is_object != 0) return const_cast<void*>(thunk);
+    static std::map<StateObjectKey, void*> by_position;
+    static std::map<const void*, void*> by_context;
+    static std::map<const void*, void*> latest;
+    if (context != nullptr) {
+        const auto seen = by_context.find(context);
+        if (seen != by_context.end()) return seen->second;
+    }
+    if (g_body_path.empty()) {
+        const auto last = latest.find(thunk);
+        if (last != latest.end()) return last->second;
+    }
+    void*& object = by_position[{thunk, g_body_path}];
+    if (object == nullptr) {
+        // The autoclosure returns the class instance directly, in x0, so it needs no result buffer.
+        using Thunk = SWIFTCC void* (*)(SWIFT_CONTEXT void*);
+        object = reinterpret_cast<Thunk>(const_cast<void*>(thunk))(context);
+    }
+    latest[thunk] = object;
+    if (context != nullptr) by_context[rt_swift_retain(context)] = object;
+    return object;
+}
+
+SWIFTCC void* state_object_wrapped(const void* thunk, void* context, uint8_t is_object) { return rt_swift_retain(state_object_resolve(thunk, context, is_object)); }
+
+// ObservedObject is {seed, object}, and the guest reads the object straight out of the second word.
+struct ObservedObjectValue {
+    uint64_t seed;
+    void* object;
+};
+
+SWIFTCC ObservedObjectValue observed_object_init(void* object) { return {0, object}; }
+SWIFTCC void* observed_object_projected(uint64_t, void* object) { return rt_swift_retain(object); }
 
 constexpr uint64_t kEnvironmentImmediate = kImmediate;
 
@@ -886,6 +1483,13 @@ const char* node_kind_name(NodeKind kind) {
         case NodeKind::Link: return "Link";
         case NodeKind::ToolbarItem: return "ToolbarItem";
         case NodeKind::ImageResource: return "ImageResource";
+        case NodeKind::RowMenu: return "RowMenu";
+        case NodeKind::PresentedSheet: return "PresentedSheet";
+        case NodeKind::Alert: return "Alert";
+        case NodeKind::NavigationLink: return "NavigationLink";
+        case NodeKind::TextField: return "TextField";
+        case NodeKind::Stack: return "Stack";
+        case NodeKind::Divider: return "Divider";
     }
     return "?";
 }
@@ -986,7 +1590,7 @@ std::string json_string(const std::string& text) {
     return out + "\"";
 }
 
-enum class ActionKind { Closure, Toggle, StepBy, SetValue, DismissSheet, OpenUrl };
+enum class ActionKind { Closure, Toggle, StepBy, SetValue, DismissSheet, OpenUrl, SetText, PushLink, PopLink };
 
 struct Action {
     ActionKind kind;
@@ -1035,10 +1639,14 @@ constexpr size_t kFieldRecordBytes = 12;
 constexpr size_t kFieldRecordTypeOffset = 4;
 constexpr uint32_t kDescriptorIsGeneric = 0x80;
 constexpr const char* kLazyStateSymbol = "_$s7SwiftUI9LazyStateVMn";
+constexpr const char* kStateSymbol = "_$s7SwiftUI5StateVMn";
 
 struct StateField {
     char* location;
     size_t index;
+    char* storage;
+    void* lazy_metadata;
+    void* plain_type;
 };
 
 // Finds a view's @State storage from its reflection metadata, so state can outlive each re-evaluation of the view.
@@ -1072,9 +1680,14 @@ std::vector<StateField> state_fields(char* view, void* type) {
         const void* target = name + 1 + target_offset;
         if (static_cast<uint8_t>(name[0]) == 2) memcpy(&target, target, sizeof target);
         const char* symbol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(target));
-        if (symbol == nullptr || strcmp(symbol, kLazyStateSymbol) != 0) continue;
-        void* metadata = resolve_mangled_type(name, generics);
-        found.push_back({view + offsets[i] + lazy_state_location_offset(metadata), i});
+        if (symbol == nullptr) continue;
+        if (strcmp(symbol, kLazyStateSymbol) == 0) {
+            void* metadata = resolve_mangled_type(name, generics);
+            found.push_back({view + offsets[i] + lazy_state_location_offset(metadata), i, view + offsets[i], metadata, nullptr});
+        } else if (strcmp(symbol, kStateSymbol) == 0) {
+            void* type = generic_argument(resolve_mangled_type(name, generics));
+            found.push_back({view + offsets[i] + state_location_offset(type), i, view + offsets[i], nullptr, type});
+        }
     }
     return found;
 }
@@ -1148,6 +1761,46 @@ std::string text_properties(const std::string& title, const std::string& icon) {
     return out;
 }
 
+std::set<std::string>& pushed_links() {
+    static std::set<std::string> links;
+    return links;
+}
+
+// A pushed destination shows as a sheet over its stack, with dismissal as the back gesture.
+std::string render_navigation_link(ViewNode* node, const std::string& path, int depth) {
+    std::string label = node->children->size() > 1 ? render((*node->children)[1].value, (*node->children)[1].type, path + "/l", depth + 1) : std::string();
+    if (!node->title->empty()) label = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {});
+    const int push = add_action({ActionKind::PushLink, nullptr, nullptr, nullptr, nullptr, nullptr, 0, path});
+    std::string json = node_json("button", "\"a\":" + std::to_string(push), label);
+    if (pushed_links().count(path) != 0) {
+        const int pop = add_action({ActionKind::PopLink, nullptr, nullptr, nullptr, nullptr, nullptr, 0, path});
+        const auto& destination = (*node->children)[0];
+        json += "," + node_json("sheet", "\"d\":" + std::to_string(pop), render(destination.value, destination.type, path + "/dest", depth + 1));
+    }
+    return json;
+}
+
+// `.tabItem` names its tab with a Label or Text, which is all the tab bar shows of it.
+void find_tab_label(const Json& node, std::string& title, std::string& icon) {
+    if (const Json* text = node.member("t"); text != nullptr && title.empty()) title = text->text;
+    if (const Json* image = node.member("i"); image != nullptr && icon.empty()) icon = image->text;
+    if (const Json* children = node.member("c")) {
+        for (const Json& child : children->items) find_tab_label(child, title, icon);
+    }
+}
+
+std::string render_tab_item(ViewNode* node, const std::string& path, int depth) {
+    const std::string content = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+    const std::string label = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
+    std::string title;
+    std::string icon;
+    Json parsed;
+    if (json_parse("[" + label + "]", parsed)) {
+        for (const Json& part : parsed.items) find_tab_label(part, title, icon);
+    }
+    return node_json("tab", text_properties(title, icon), content);
+}
+
 std::string render_node(ViewNode* node, const std::string& path, int depth) {
     switch (node->kind) {
         case NodeKind::Task:
@@ -1155,8 +1808,21 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             return {};
         case NodeKind::Button: {
             const int action = add_action({ActionKind::Closure, node->action, node->action_context, nullptr, nullptr, nullptr, 0, {}});
-            return node_json("button", "\"a\":" + std::to_string(action), render_children(node, path, depth));
+            std::string children = render_children(node, path, depth);
+            if (!node->title->empty()) children = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {});
+            return node_json("button", "\"a\":" + std::to_string(action), children);
         }
+        case NodeKind::NavigationLink: return render_navigation_link(node, path, depth);
+        case NodeKind::TextField: {
+            std::string current;
+            SwiftString text{};
+            binding_read(node->binding, &text, string_metadata());
+            current = swift_string_to_utf8(text);
+            const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
+            return node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":" + json_string(*node->title) + ",\"v\":" + json_string(current) + (node->lower != 0 ? ",\"secure\":true" : ""), {});
+        }
+        case NodeKind::Stack: return node_json("v", {}, render_children(node, path, depth));
+        case NodeKind::Divider: return {};
         case NodeKind::Link: {
             const int action = add_action({ActionKind::OpenUrl, nullptr, nullptr, nullptr, nullptr, nullptr, 0, *node->detail});
             return node_json("button", "\"a\":" + std::to_string(action), render_children(node, path, depth));
@@ -1216,12 +1882,61 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             }
             return children;
         }
+        case NodeKind::RowMenu: {
+            const std::string row = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+            const std::string menu = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
+            return node_json("h", {}, menu.empty() ? row : row + "," + node_json("menu", {}, node_json("image", "\"i\":\"ellipsis\"", {}) + "," + menu));
+        }
+        case NodeKind::PresentedSheet: {
+            std::string children = render_children(node, path, depth);
+            bool presented = false;
+            binding_read(node->binding, &presented, bool_metadata());
+            if (!presented) return children;
+            const size_t size = witnesses_of(node->content_type)->size;
+            void* content = calloc(1, size == 0 ? 1 : size);
+            rt_call_witness(node->action, content, node->action_context, nullptr, nullptr);
+            bool off = false;
+            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(off), bool_metadata(), 0, {}});
+            const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), render(content, node->content_type, path + "/sheet", depth + 1));
+            return children.empty() ? json : children + "," + json;
+        }
+        case NodeKind::Alert: {
+            std::string children = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+            bool presented = false;
+            binding_read(node->binding, &presented, bool_metadata());
+            if (!presented) return children;
+            std::string body = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\",\"bold\":true", {});
+            for (size_t i = node->children->size(); i-- > 1;) {
+                const std::string part = render((*node->children)[i].value, (*node->children)[i].type, path + "/alert" + std::to_string(i), depth + 1);
+                if (!part.empty()) body += "," + part;
+            }
+            bool off = false;
+            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(off), bool_metadata(), 0, {}});
+            const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), node_json("list", {}, body));
+            return children.empty() ? json : children + "," + json;
+        }
         case NodeKind::TabView: return node_json("tabs", {}, render_children(node, path, depth));
-        case NodeKind::Tab: return node_json("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+        case NodeKind::Tab: {
+            if (node->lower != 0) return render_tab_item(node, path, depth);
+            return node_json("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+        }
         case NodeKind::NavigationStack: return node_json("nav", {}, render_children(node, path, depth));
         case NodeKind::List: return node_json("list", {}, render_children(node, path, depth));
-        case NodeKind::Section: return node_json("section", {}, render_children(node, path, depth));
-        case NodeKind::Label: return node_json("h", {}, render_children(node, path, depth));
+        case NodeKind::Section: {
+            std::string children = render_children(node, path, depth);
+            if (!node->title->empty()) {
+                const std::string header = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"caption\",\"color\":\"secondary\"", {});
+                children = children.empty() ? header : header + "," + children;
+            }
+            return node_json("section", {}, children);
+        }
+        case NodeKind::Label: {
+            if (node->children->empty()) {
+                std::string parts = node_json("image", text_properties({}, *node->system_image), {});
+                return node_json("h", {}, parts + "," + node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {}));
+            }
+            return node_json("h", {}, render_children(node, path, depth));
+        }
         case NodeKind::Menu: return node_json("menu", {}, render_children(node, path, depth));
         case NodeKind::Disclosure: return node_json("disclosure", {}, render_children(node, path, depth));
         case NodeKind::Toolbar: return node_json("toolbar", {}, render_children(node, path, depth));
@@ -1279,6 +1994,8 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
             if (name != nullptr && strcmp(name, "_$s7SwiftUI6SpacerVMn") == 0) return node_json("spacer", {}, {});
             return {};
         }
+        // Only `.onReceive`'s content is a view; its publisher reports through the app's own observers.
+        if (name != nullptr && strcmp(name, "_$s7SwiftUI16SubscriptionViewVMn") == 0) return render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
         if (name != nullptr && strcmp(name, kModifiedContentSymbol) == 0) {
             std::string content = render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
             const char* modifier = foreign_type_name(fields[1].type);
@@ -1343,7 +2060,14 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
     auto fields = state_fields(static_cast<char*>(value), type);
     for (const auto& field : fields) {
         const auto saved = preserved_states().find(path + "#" + std::to_string(field.index));
-        if (saved != preserved_states().end()) *reinterpret_cast<StateBox**>(field.location) = static_cast<StateBox*>(rt_swift_retain(saved->second));
+        if (saved != preserved_states().end()) {
+            *reinterpret_cast<StateBox**>(field.location) = static_cast<StateBox*>(rt_swift_retain(saved->second));
+        } else if (field.lazy_metadata != nullptr) {
+            // Created now, so every copy of the view the body's closures capture shares this box.
+            state_box_for(field.storage, field.lazy_metadata);
+        } else {
+            plain_state_box(field.storage, field.plain_type);
+        }
     }
     // The low bit of an associated type witness marks it as a mangled name rather than an accessor.
     const auto* body_name = reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(body_type_name) & ~static_cast<uintptr_t>(1));
@@ -1352,7 +2076,9 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
     const size_t size = witnesses_of(body_metadata)->size;
     void* output = calloc(1, size == 0 ? 1 : size);
     auto** table = static_cast<void**>(rt_swift_getWitnessTable_for_view(conformance, type));
+    g_body_path = path;
     rt_call_witness(body, output, value, type, table);
+    g_body_path.clear();
     for (const auto& field : fields) {
         auto* state = *reinterpret_cast<StateBox**>(field.location);
         if (state != nullptr) preserved_states()[path + "#" + std::to_string(field.index)] = static_cast<StateBox*>(rt_swift_retain(state));
@@ -1405,6 +2131,22 @@ void perform_action(const Action& action) {
         case ActionKind::OpenUrl:
             engine_emit("open", action.text);
             break;
+        case ActionKind::SetText:
+            break;
+        case ActionKind::PushLink:
+            pushed_links().insert(action.text);
+            break;
+        case ActionKind::PopLink: {
+            pushed_links().erase(action.text);
+            const std::string destination = action.text + "/dest";
+            for (auto it = preserved_states().begin(); it != preserved_states().end();) {
+                it = it->first.find(destination) != std::string::npos ? preserved_states().erase(it) : std::next(it);
+            }
+            for (auto it = started_tasks().begin(); it != started_tasks().end();) {
+                it = it->find(destination) != std::string::npos ? started_tasks().erase(it) : std::next(it);
+            }
+            break;
+        }
     }
 }
 
@@ -1460,6 +2202,13 @@ __asm__(
     "  b rt_registrar_mark_dirty_c\n");
 
 extern "C" void rt_registrar_mark_dirty_c() { g_tree_dirty.store(true, std::memory_order_relaxed); }
+
+// The tree the action belongs to may have been replaced since; a stale id must not touch another binding.
+void swiftui_set_text(int action, const std::string& text) {
+    if (action < 0 || static_cast<size_t>(action) >= g_actions.size() || g_actions[static_cast<size_t>(action)].kind != ActionKind::SetText) return;
+    SwiftString value = swift_string_from_utf8(text);
+    binding_write(g_actions[static_cast<size_t>(action)].binding, &value, string_metadata());
+}
 
 void swiftui_attach_image(const MachImage& image) {
     g_view_conformances = image.section("__TEXT", "__swift5_proto");
@@ -1541,6 +2290,149 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4EdgeO3SetV6bottomAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x04>)},
         {"$s7SwiftUI4EdgeO3SetV8trailingAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x08>)},
         {"$s7SwiftUI9UnitPointV6centerACvgZ", reinterpret_cast<void*>(unit_point_center)},
+        {"$s7SwiftUI4FontV10largeTitleACvgZ", reinterpret_cast<void*>(constant_getter<kFontLargeTitle>)},
+        {"$s7SwiftUI4FontV5titleACvgZ", reinterpret_cast<void*>(constant_getter<kFontTitle>)},
+        {"$s7SwiftUI4FontV6title2ACvgZ", reinterpret_cast<void*>(constant_getter<kFontTitle2>)},
+        {"$s7SwiftUI4FontV8headlineACvgZ", reinterpret_cast<void*>(constant_getter<kFontHeadline>)},
+        {"$s7SwiftUI4FontV11subheadlineACvgZ", reinterpret_cast<void*>(constant_getter<kFontSubheadline>)},
+        {"$s7SwiftUI5ColorV7primaryACvgZ", reinterpret_cast<void*>(constant_getter<kColorPrimary>)},
+        {"$s7SwiftUI5ColorV4grayACvgZ", reinterpret_cast<void*>(constant_getter<kColorGray>)},
+        {"$s7SwiftUI5ColorV4pinkACvgZ", reinterpret_cast<void*>(constant_getter<kColorPink>)},
+        {"$s7SwiftUI5ColorV5blackACvgZ", reinterpret_cast<void*>(constant_getter<kColorBlack>)},
+        {"$s7SwiftUI5ColorV5clearACvgZ", reinterpret_cast<void*>(constant_getter<kColorClear>)},
+        {"$s7SwiftUI5ColorV5whiteACvgZ", reinterpret_cast<void*>(constant_getter<kColorWhite>)},
+        {"$s7SwiftUI5ColorV6orangeACvgZ", reinterpret_cast<void*>(constant_getter<kColorOrange>)},
+        {"$s7SwiftUI5ColorV6yellowACvgZ", reinterpret_cast<void*>(constant_getter<kColorYellow>)},
+        {"$s7SwiftUI19HorizontalAlignmentV6centerACvgZ", reinterpret_cast<void*>(constant_getter<kAlignCenter>)},
+        {"$s7SwiftUI22HierarchicalShapeStyleV7primaryACvgZ", reinterpret_cast<void*>(constant_getter<kStylePrimary>)},
+        {"$s7SwiftUI4FontV6WeightV4boldAEvgZ", reinterpret_cast<void*>(constant_getter<kWeightBold>)},
+        {"$s7SwiftUI4FontV6WeightV8semiboldAEvgZ", reinterpret_cast<void*>(constant_getter<kWeightSemibold>)},
+        {"$s7SwiftUI9AlignmentV10topLeadingACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignLeading, kAlignTop>)},
+        {"$s7SwiftUI9AlignmentV13bottomLeadingACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignLeading, kAlignBottom>)},
+        {"$s7SwiftUI9AlignmentV6bottomACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignCenter, kAlignBottom>)},
+        {"$s7SwiftUI9AlignmentV7leadingACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignLeading, kAlignCenter>)},
+        {"$s7SwiftUI4EdgeO3SetV10horizontalAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x0a>)},
+        {"$s7SwiftUI4EdgeO3SetV3topAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x01>)},
+        {"$s7SwiftUI4EdgeO3SetV8verticalAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x05>)},
+        {"$s7SwiftUI4AxisO3SetV10horizontalAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x01>)},
+        {"$s7SwiftUI4AxisO3SetV8verticalAEvgZ", reinterpret_cast<void*>(edge_set_getter<0x02>)},
+        {"$s7SwiftUI9UnitPointV3topACvgZ", reinterpret_cast<void*>(unit_point_top)},
+        {"$s7SwiftUI9UnitPointV6bottomACvgZ", reinterpret_cast<void*>(unit_point_bottom)},
+        {"$s7SwiftUI14ObservedObjectV12wrappedValueACyxGx_tcfC", reinterpret_cast<void*>(observed_object_init)},
+        {"$s7SwiftUI14ObservedObjectV14projectedValueAC7WrapperVyx_Gvg", reinterpret_cast<void*>(observed_object_projected)},
+        {"$s7SwiftUI11StateObjectV12wrappedValuexvg", reinterpret_cast<void*>(state_object_wrapped)},
+        {"$s7SwiftUI11StateObjectV14projectedValueAA08ObservedD0V7WrapperVyx_Gvg", reinterpret_cast<void*>(state_object_wrapped)},
+        {"$s7SwiftUI14ObservedObjectV7WrapperV13dynamicMemberAA7BindingVyqd__Gs24ReferenceWritableKeyPathCyxqd__G_tcluig", reinterpret_cast<void*>(bindable_member)},
+        {"$s7SwiftUI4ViewPAAE08progressC5StyleyQrqd__AA08ProgresscE0Rd__lF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE10labelStyleyQrqd__AA05LabelE0Rd__lF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE03tabC5StyleyQrqd__AA03TabcE0Rd__lF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE9listStyleyQrqd__AA04ListE0Rd__lF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE23scrollDismissesKeyboardyQrAA06ScrolleF4ModeVF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE19presentationDetentsyQrShyAA18PresentationDetentVGF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE25presentationDragIndicatoryQrAA10VisibilityOF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE27textInputAutocapitalizationyQrAA04TexteF0VSgF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE4boldyQrSbF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE12labelsHiddenQryF", reinterpret_cast<void*>(modifier_passthrough<0>)},
+        {"$s7SwiftUI4ViewPAAE12keyboardTypeyQrSo010UIKeyboardE0VF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE18autocapitalizationyQrSo28UITextAutocapitalizationTypeVF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE16headerProminenceyQrAA0E0OF", reinterpret_cast<void*>(modifier_passthrough<1>)},
+        {"$s7SwiftUI4ViewPAAE10fontWeightyQrAA4FontV0E0VSgF", reinterpret_cast<void*>(modifier_passthrough<2>)},
+        {"$s7SwiftUI4ViewPAAE7paddingyQrAA4EdgeO3SetV_12CoreGraphics7CGFloatVSgtF", reinterpret_cast<void*>(view_padding)},
+        {"$s7SwiftUI4ViewPAAE4fontyQrAA4FontVSgF", reinterpret_cast<void*>(view_environment_word)},
+        {"$s7SwiftUI4ViewPAAE15foregroundColoryQrAA0E0VSgF", reinterpret_cast<void*>(view_environment_word)},
+        {"$s7SwiftUI4ViewPAAE10transitionyQrAA13AnyTransitionVF", reinterpret_cast<void*>(view_transition)},
+        {"$s7SwiftUI4ViewPAAE8onAppear7performQryycSg_tF", reinterpret_cast<void*>(view_on_appear)},
+        {"$s7SwiftUI4ViewPAAE11onDisappear7performQryycSg_tF", reinterpret_cast<void*>(view_on_disappear)},
+        {"$s7SwiftUI4ViewPAAE12onTapGesture5count7performQrSi_yyctF", reinterpret_cast<void*>(view_on_tap)},
+        {"$s7SwiftUI4ViewPAAE12onTapGesture5count15coordinateSpace7performQrSi_AA010CoordinateI0OySo7CGPointVctF", reinterpret_cast<void*>(view_on_tap_location)},
+        {"$s7SwiftUI4ViewPAAE11contextMenu9menuItemsQrqd__yXE_tAaBRd__lF", reinterpret_cast<void*>(view_row_menu)},
+        {"$s7SwiftUI4ViewPAAE12swipeActions4edge15allowsFullSwipe7contentQrAA14HorizontalEdgeO_Sbqd__yXEtAaBRd__lF", reinterpret_cast<void*>(view_swipe_actions)},
+        {"$s7SwiftUI4ViewPAAE16toolbarTitleMenu7contentQrqd__yXE_tAaBRd__lF", reinterpret_cast<void*>(view_toolbar_title_menu)},
+        {"$s7SwiftUI4ViewPAAE11refreshable6actionQryyYaYbc_tF", reinterpret_cast<void*>(view_refreshable)},
+        {"$s7SwiftUI4ViewPAAE9onOpenURL7performQry10Foundation0F0Vc_tF", reinterpret_cast<void*>(view_on_open_url)},
+        {"$s7SwiftUI4ViewPAAE7tabItemyQrqd__yXEAaBRd__lF", reinterpret_cast<void*>(view_tab_item)},
+        {"$s7SwiftUI4ViewPAAE5sheet11isPresented9onDismiss7contentQrAA7BindingVySbG_yycSgqd__yctAaBRd__lF", reinterpret_cast<void*>(view_sheet_presented)},
+        {"$s7SwiftUI4ViewPAAE15fullScreenCover11isPresented9onDismiss7contentQrAA7BindingVySbG_yycSgqd__yctAaBRd__lF", reinterpret_cast<void*>(view_sheet_presented)},
+        {"$s7SwiftUI4ViewPAAE21navigationDestination11isPresented11destinationQrAA7BindingVySbG_qd__yXEtAaBRd__lF", reinterpret_cast<void*>(view_navigation_destination)},
+        {"$s7SwiftUI4ViewPAAE5alert_11isPresented7actionsQrAA18LocalizedStringKeyV_AA7BindingVySbGqd__yXEtAaBRd__lF", reinterpret_cast<void*>(view_alert_key)},
+        {"$s7SwiftUI4ViewPAAE5alert_11isPresented7actionsQrqd___AA7BindingVySbGqd_0_yXEtSyRd__AaBRd_0_r0_lF", reinterpret_cast<void*>(view_alert_string)},
+        {"$s7SwiftUI4ViewPAAE15fullScreenCover4item9onDismiss7contentQrAA7BindingVyqd__SgG_yycSgqd_0_qd__cts12IdentifiableRd__AaBRd_0_r0_lF", reinterpret_cast<void*>(sheet_modifier)},
+        {"$s7SwiftUI13AnyTransitionV5scaleACvgZ", reinterpret_cast<void*>(transition_constant)},
+        {"$s7SwiftUI13AnyTransitionV5slideACvgZ", reinterpret_cast<void*>(transition_constant)},
+        {"$s7SwiftUI13AnyTransitionV7opacityACvgZ", reinterpret_cast<void*>(transition_constant)},
+        {"$s7SwiftUI13AnyTransitionV4move4edgeAcA4EdgeO_tFZ", reinterpret_cast<void*>(transition_with_argument)},
+        {"$s7SwiftUI13AnyTransitionV8combined4withA2C_tF", reinterpret_cast<void*>(transition_with_argument)},
+        {"$s7SwiftUI5StateV12wrappedValueACyxGx_tcfC", reinterpret_cast<void*>(state_init)},
+        {"$s7SwiftUI5StateV12wrappedValuexvg", reinterpret_cast<void*>(state_wrapped_get)},
+        {"$s7SwiftUI5StateV12wrappedValuexvs", reinterpret_cast<void*>(state_wrapped_set)},
+        {"$s7SwiftUI5StateV14projectedValueAA7BindingVyxGvg", reinterpret_cast<void*>(state_projected)},
+        {"$s7SwiftUI7BindingV8constantyACyxGxFZ", reinterpret_cast<void*>(binding_constant)},
+        {"$s7SwiftUI7BindingV14projectedValueACyxGvg", reinterpret_cast<void*>(binding_projected)},
+        {"$s7SwiftUI10AppStorageV12wrappedValue_5storeACySbGSb_SSSo14NSUserDefaultsCSgtcSbRszlufC", reinterpret_cast<void*>(app_storage_bool)},
+        {"$s7SwiftUI10AppStorageV12wrappedValue_5storeACySiGSi_SSSo14NSUserDefaultsCSgtcSiRszlufC", reinterpret_cast<void*>(app_storage_integer)},
+        {"$s7SwiftUI10AppStorageV12wrappedValue_5storeACySSGSS_SSSo14NSUserDefaultsCSgtcSSRszlufC", reinterpret_cast<void*>(app_storage_string)},
+        {"$s7SwiftUI10AppStorageV12wrappedValuexvg", reinterpret_cast<void*>(app_storage_wrapped_get)},
+        {"$s7SwiftUI10AppStorageV12wrappedValuexvs", reinterpret_cast<void*>(app_storage_wrapped_set)},
+        {"$s7SwiftUI10AppStorageV14projectedValueAA7BindingVyxGvg", reinterpret_cast<void*>(app_storage_projected)},
+        {"$s7SwiftUI6ButtonVA2A4TextVRszrlE_6actionACyAEGAA18LocalizedStringKeyV_yyctcfC", reinterpret_cast<void*>(button_key)},
+        {"$s7SwiftUI6ButtonVA2A4TextVRszrlE_4role6actionACyAEGAA18LocalizedStringKeyV_AA0C4RoleVSgyyctcfC", reinterpret_cast<void*>(button_key_role)},
+        {"$s7SwiftUI6ButtonVA2A4TextVRszrlE_6actionACyAEGqd___yyctcSyRd__lufC", reinterpret_cast<void*>(button_string)},
+        {"$s7SwiftUI5LabelVA2A4TextVRszAA5ImageVRs_rlE_06systemE0ACyAeGGAA18LocalizedStringKeyV_SStcfC", reinterpret_cast<void*>(label_key_system)},
+        {"$s7SwiftUI5LabelVA2A4TextVRszAA5ImageVRs_rlE_06systemE0ACyAeGGqd___SStcSyRd__lufC", reinterpret_cast<void*>(label_string_system)},
+        {"$s7SwiftUI5ImageV_6bundleACSS_So8NSBundleCSgtcfC", reinterpret_cast<void*>(image_named)},
+        {"$s7SwiftUI14NavigationLinkVA2A4TextVRszrlE_11destinationACyAEq_GAA18LocalizedStringKeyV_q_tcfC", reinterpret_cast<void*>(navigation_link_key)},
+        {"$s7SwiftUI14NavigationLinkV11destination5labelACyxq_Gq__xyXEtcfC", reinterpret_cast<void*>(navigation_link_label)},
+        {"$s7SwiftUI7ForEachVAA7Element_2IDQZRs_AA4ViewR0_s12IdentifiableADRpzrlE_7contentACyxq_q0_Gx_q0_AIctcfC", reinterpret_cast<void*>(for_each_init_identifiable)},
+        {"$s7SwiftUI7ForEachVA2A4ViewR0_rlE_2id7contentACyxq_q0_Gx_s7KeyPathCy7ElementQzq_Gq0_AKctcfC", reinterpret_cast<void*>(for_each_init_key_path)},
+        {"$s7SwiftUI7SectionVA2A4ViewRzAaDR_AA05EmptyD0VRs0_rlE6header7contentACyxq_AFGx_q_yXEtcfC", reinterpret_cast<void*>(section_header_view)},
+        {"$s7SwiftUI7SectionVA2A9EmptyViewVRszAA0E0R_AERs0_rlE7contentACyAEq_AEGq_yXE_tcfC", reinterpret_cast<void*>(section_content)},
+        {"$s7SwiftUI7SectionVA2A9EmptyViewVRszAA0E0R_AaFR0_rlE6footer7contentACyAEq_q0_Gq0__q_yXEtcfC", reinterpret_cast<void*>(section_footer_view)},
+        {"$s7SwiftUI7SectionVA2A4ViewRzAaDR_AaDR0_rlE6header6footer7contentACyxq_q0_Gx_q0_q_yXEtcfC", reinterpret_cast<void*>(section_header_footer)},
+        {"$s7SwiftUI7SectionVA2A4TextVRszAA4ViewR_AA05EmptyE0VRs0_rlE_7contentACyAEq_AHGqd___q_yXEtcSyRd__lufC", reinterpret_cast<void*>(section_title_string)},
+        {"$s7SwiftUI7SectionVA2A4TextVRszAA4ViewR_AA05EmptyE0VRs0_rlE_7contentACyAEq_AHGAA18LocalizedStringKeyV_q_yXEtcfC", reinterpret_cast<void*>(section_title_key)},
+        {"$s7SwiftUI5GroupVA2A4ViewRzlE7contentACyxGxyXE_tcfC", reinterpret_cast<void*>(group_init)},
+        {"$s7SwiftUI4FormV7contentACyxGxyXE_tcfC", reinterpret_cast<void*>(list_init)},
+        {"$s7SwiftUI10ScrollViewV_15showsIndicators7contentACyxGAA4AxisO3SetV_SbxyXEtcfC", reinterpret_cast<void*>(scroll_view_init)},
+        {"$s7SwiftUI6ZStackV9alignment7contentACyxGAA9AlignmentV_xyXEtcfC", reinterpret_cast<void*>(z_stack_init)},
+        {"$s7SwiftUI7DividerVACycfC", reinterpret_cast<void*>(divider_init)},
+        {"$s7SwiftUI7AnyViewVyACxcAA0D0RzlufC", reinterpret_cast<void*>(any_view_init)},
+        {"$s7SwiftUI7TabViewV9selection7contentACyxq_GAA7BindingVyxGSg_q_yXEtcfC", reinterpret_cast<void*>(tab_view_selection)},
+        {"$s7SwiftUI19_ConditionalContentVA2A4ViewRzAaDR_rlE7storageACyxq_GAC7StorageOyxq__G_tcfC", reinterpret_cast<void*>(conditional_from_storage)},
+        {"$s7SwiftUI21ToolbarContentBuilderV10buildBlockyQrxAA0cD0RzlFZ", reinterpret_cast<void*>(builder_identity)},
+        {"$s7SwiftUI19TupleToolbarContentVyACyxGxcfC", reinterpret_cast<void*>(builder_identity)},
+        {"$s7SwiftUI15withTransactionyxAA0D0V_xyKXEtKlF", reinterpret_cast<void*>(with_transaction)},
+        {"$s7SwiftUI12FetchRequestV12wrappedValueAA14FetchedResultsVyxGvg", reinterpret_cast<void*>(fetch_request_wrapped)},
+        {"$s7SwiftUI14FetchedResultsVyxSicig", reinterpret_cast<void*>(fetched_results_subscript)},
+        {"$s7SwiftUI10ButtonRoleV6cancelACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI9AnimationV6easeIn8durationACSd_tFZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI9AnimationV9easeInOut8durationACSd_tFZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI9AnimationV13repeatForever12autoreversesACSb_tF", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI9AnimationV6spring8response15dampingFraction13blendDurationACSd_S2dtFZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI11TransactionV9animationAcA9AnimationVSg_tcfC", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI8MaterialV9ultraThinACvgZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI15SafeAreaRegionsV3allACvgZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI14TintShapeStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI14PlainListStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI16GroupedListStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI17InlinePickerStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI19TitleOnlyLabelStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20SegmentedPickerStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI21BorderlessButtonStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI22TitleAndIconLabelStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI23LinearProgressViewStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI25CircularProgressViewStyleVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI10EditButtonVACycfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20SearchFieldPlacementV9automaticACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI27ScrollDismissesKeyboardModeV13interactivelyACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI27TextInputAutocapitalizationV5neverACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI18PresentationDetentV6mediumACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV18cancellationActionACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV18confirmationActionACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV20navigationBarLeadingACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV21navigationBarTrailingACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV9automaticACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20ToolbarItemPlacementV9principalACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI11TransactionV9animationAA9AnimationVSgvs", reinterpret_cast<void*>(environment_set_ignored)},
         {"$s11Observation0A9RegistrarVACycfC", reinterpret_cast<void*>(registrar_init)},
         {"$s11Observation0A9RegistrarV6access_7keyPathyx_s03KeyE0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
         {"$s11Observation0A9RegistrarV7willSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},

@@ -1,5 +1,7 @@
 #include "foundation_shim.h"
 
+#include <algorithm>
+
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,6 +42,9 @@ void* strings_object_from_json(const std::string& json);
 bool strings_json_from_object(void* object, std::string& json);
 bool date_from_object(void* object, double& seconds);
 void* new_date_object(double seconds);
+
+extern "C" void* rt_swift_retain(void*);
+extern "C" void* darwin_block_copy(const void*);
 
 namespace {
 
@@ -361,8 +366,55 @@ void* web_view_layer(void*, const char*) { return framework_singleton("CALayer")
 
 void* web_data_store_default(void*, const char*) { return framework_singleton("WKWebsiteDataStore"); }
 void* content_world_page(void*, const char*) { return framework_singleton("WKContentWorld"); }
+void* g_url_session_delegate = nullptr;
+
+void* no_object(void*, const char*) { return nullptr; }
+
+struct NotificationObserver {
+    std::string name;
+    void* block;
+};
+
+std::vector<NotificationObserver>& notification_observers() {
+    static std::vector<NotificationObserver> observers;
+    return observers;
+}
+
+void* notification_center_default(void*, const char*) { return framework_singleton("NSNotificationCenter"); }
+
+// The block runs synchronously when posted, as it would with a nil queue; the returned token is the block.
+void* notification_add_block(void*, const char*, void* name, void*, void*, void* block) {
+    void* copy = darwin_block_copy(block);
+    notification_observers().push_back({name == nullptr ? std::string() : nsstring_text(name), copy});
+    return copy;
+}
+
+void notification_remove(void*, const char*, void* token) {
+    auto& observers = notification_observers();
+    observers.erase(std::remove_if(observers.begin(), observers.end(), [token](const NotificationObserver& o) { return o.block == token; }), observers.end());
+}
+
+void notification_post_name(void*, const char*, void* name, void*) {
+    using Invoke = void (*)(void*, void*);
+    struct Literal {
+        void* isa;
+        int32_t flags, reserved;
+        Invoke invoke;
+    };
+    const std::string text = nsstring_text(name);
+    const auto observers = notification_observers();
+    for (const auto& observer : observers) {
+        if (observer.name.empty() || observer.name == text) static_cast<Literal*>(observer.block)->invoke(observer.block, framework_singleton("NSNotification"));
+    }
+}
 void* url_session_configuration_default(void*, const char*) { return framework_singleton("NSURLSessionConfiguration"); }
 void* url_session_with_configuration(void*, const char*, void*) { return framework_singleton("NSURLSession"); }
+void* url_session_with_delegate(void*, const char*, void*, void* delegate, void*) {
+    void* session = framework_singleton("NSURLSession");
+    g_url_session_delegate = delegate;
+    if (delegate != nullptr) rt_swift_retain(delegate);
+    return session;
+}
 
 // Foundation.URL is resilient, so the guest only ever holds this object through one reference.
 struct URLBox {
@@ -1835,6 +1887,27 @@ void foundation_cookies_changed() {
 
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
 
+bool foundation_defaults_lookup_bool(const std::string& key, bool fallback) {
+    void* name = new_nsstring(key);
+    const bool known = defaults_object_for_key(nullptr, nullptr, name) != nullptr;
+    return known ? defaults_bool_for_key(nullptr, nullptr, name) : fallback;
+}
+
+int64_t foundation_defaults_lookup_integer(const std::string& key, int64_t fallback) {
+    void* name = new_nsstring(key);
+    const bool known = defaults_object_for_key(nullptr, nullptr, name) != nullptr;
+    return known ? defaults_integer_for_key(nullptr, nullptr, name) : fallback;
+}
+
+std::string foundation_defaults_lookup_string(const std::string& key, const std::string& fallback) {
+    void* value = defaults_string_for_key(nullptr, nullptr, new_nsstring(key));
+    return value == nullptr ? fallback : nsstring_text(value);
+}
+
+void foundation_defaults_store_bool(const std::string& key, bool value) { defaults_set_bool(nullptr, nullptr, value, new_nsstring(key)); }
+void foundation_defaults_store_integer(const std::string& key, int64_t value) { defaults_set_integer(nullptr, nullptr, value, new_nsstring(key)); }
+void foundation_defaults_store_string(const std::string& key, const std::string& value) { defaults_set_object(nullptr, nullptr, new_nsstring(value), new_nsstring(key)); }
+
 void foundation_register_classes() {
     const auto make_record = [](AsyncFunctionRecord& record, void (*entry)()) {
         record.context_size = kUrlSessionContextBytes;
@@ -1892,6 +1965,12 @@ void foundation_register_classes() {
     objc_register_method("-[NSUserDefaults initWithSuiteName:]", reinterpret_cast<const void*>(return_self_with_argument));
     objc_register_method("+[NSProcessInfo processInfo]", reinterpret_cast<const void*>(process_info_shared));
     objc_register_method("-[NSProcessInfo operatingSystemVersion]", reinterpret_cast<const void*>(process_info_version));
+    objc_register_method("-[UIApplication keyWindow]", reinterpret_cast<const void*>(no_object));
+    objc_register_method("+[NSNotificationCenter defaultCenter]", reinterpret_cast<const void*>(notification_center_default));
+    objc_register_method("-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]", reinterpret_cast<const void*>(notification_add_block));
+    objc_register_method("-[NSNotificationCenter removeObserver:]", reinterpret_cast<const void*>(notification_remove));
+    objc_register_method("-[NSNotificationCenter postNotificationName:object:]", reinterpret_cast<const void*>(notification_post_name));
+    objc_register_method("+[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]", reinterpret_cast<const void*>(url_session_with_delegate));
     objc_register_method("+[NSBundle mainBundle]", reinterpret_cast<const void*>(main_bundle));
     objc_register_method("+[NSBundle bundleForClass:]", reinterpret_cast<const void*>(bundle_for_class));
     objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value_string));

@@ -37,3 +37,11 @@ int foundation_web_view_id(const void* object);
 void foundation_js_finished(int call, const std::string& json, bool failed);
 void foundation_web_url_changed(int web_view, const std::string& url);
 void foundation_cookies_changed();
+
+// UserDefaults values for @AppStorage, with the fallback used until a key has been stored.
+bool foundation_defaults_lookup_bool(const std::string& key, bool fallback);
+int64_t foundation_defaults_lookup_integer(const std::string& key, int64_t fallback);
+std::string foundation_defaults_lookup_string(const std::string& key, const std::string& fallback);
+void foundation_defaults_store_bool(const std::string& key, bool value);
+void foundation_defaults_store_integer(const std::string& key, int64_t value);
+void foundation_defaults_store_string(const std::string& key, const std::string& value);
