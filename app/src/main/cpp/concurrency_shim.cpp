@@ -85,7 +85,13 @@ TaskCreation task_create(size_t, void*, void* result_type, const AsyncFunctionPo
     return {task, context};
 }
 
-void* task_alloc(size_t size) { return malloc(size); }
+void* task_alloc(size_t size) {
+    void* memory = malloc(size);
+#ifdef IOSRUNNER_HOST
+    memset(memory, 0x5b, size);
+#endif
+    return memory;
+}
 void task_dealloc(void* pointer) { free(pointer); }
 bool task_is_current_executor(void*, void*) { return true; }
 void task_report_unexpected_executor(void*, void*, void*, void*, void*) {}

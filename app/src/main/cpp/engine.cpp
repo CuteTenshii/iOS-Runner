@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -98,6 +99,11 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
                static_cast<unsigned long long>(machine.regs[2]), static_cast<unsigned long long>(machine.regs[8]),
                static_cast<unsigned long long>(machine.regs[19]), static_cast<unsigned long long>(machine.regs[20]),
                static_cast<unsigned long long>(machine.regs[21]), static_cast<unsigned long long>(machine.regs[22]));
+    engine_log("  x23=%llx x24=%llx x25=%llx x26=%llx x27=%llx x28=%llx sp=%llx",
+               static_cast<unsigned long long>(machine.regs[23]), static_cast<unsigned long long>(machine.regs[24]),
+               static_cast<unsigned long long>(machine.regs[25]), static_cast<unsigned long long>(machine.regs[26]),
+               static_cast<unsigned long long>(machine.regs[27]), static_cast<unsigned long long>(machine.regs[28]),
+               static_cast<unsigned long long>(machine.sp));
     // Leaf thunks keep no frame, so return addresses on the stack are the only trace of their callers.
     const auto* stack = reinterpret_cast<const uintptr_t*>(machine.sp);
     const MachSection* code = g_image.section("__TEXT", "__text");
@@ -174,6 +180,15 @@ void* guest_thread(void* raw) {
     const char* guest_argv[] = {binary.c_str(), nullptr};
     const char* guest_envp[] = {nullptr};
     const char* guest_apple[] = {nullptr};
+#ifdef IOSRUNNER_HOST
+    // Host runs only: makes reads of uninitialized guest stack fail the same way every time.
+    {
+        constexpr size_t kPoisonBytes = 8 * 1024 * 1024;
+        constexpr size_t kPoisonMargin = 4096;
+        volatile char* below = static_cast<volatile char*>(__builtin_frame_address(0)) - kPoisonMargin;
+        for (size_t i = 0; i < kPoisonBytes; ++i) below[-static_cast<ptrdiff_t>(i)] = static_cast<char>(0x5b);
+    }
+#endif
     engine_log("ENTER: calling guest main");
     arguments->status = reinterpret_cast<GuestMain>(g_image.entry)(1, guest_argv, guest_envp, guest_apple);
     engine_log("EXIT: guest main returned %d", arguments->status);

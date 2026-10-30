@@ -145,6 +145,10 @@ void* rt_swift_getWitnessTable(const char* conformance, void* type, void* argume
 void* rt_swift_allocObject(void* metadata, size_t size, size_t alignment_mask) {
     void* memory = nullptr;
     if (posix_memalign(&memory, alignment_mask < 16 ? 16 : alignment_mask + 1, size) != 0) abort();
+#ifdef IOSRUNNER_HOST
+    // Host runs only: a field the guest expected something else to set fails the same way every time.
+    memset(memory, 0x5b, size);
+#endif
     auto* object = static_cast<HeapObject*>(memory);
     object->metadata = metadata;
     new (&object->references) std::atomic<uint64_t>(1);
