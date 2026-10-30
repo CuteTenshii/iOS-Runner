@@ -11,7 +11,11 @@ mkdir -p $OUT
 SRC=$ROOT/app/src/main/cpp
 SOURCES=($SRC/*.cpp)
 SOURCES=(${SOURCES:#*/jni_bridge.cpp})
-$CXX -std=c++20 -O1 -g -static -DIOSRUNNER_HOST ${IOSRUNNER_TRACE_HEAP:+-DIOSRUNNER_TRACE_HEAP} -Wall -Wextra -o $OUT/iosrunner-cli $SOURCES
+EXTRA=()
+if [[ -n $IOSRUNNER_EFENCE ]]; then
+    EXTRA=($ROOT/tools/efence.cpp -Wl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=realloc,--wrap=posix_memalign,--wrap=malloc_usable_size)
+fi
+$CXX -std=c++20 -O1 -g -static -DIOSRUNNER_HOST ${IOSRUNNER_TRACE_HEAP:+-DIOSRUNNER_TRACE_HEAP} -Wall -Wextra -o $OUT/iosrunner-cli $SOURCES $EXTRA
 BUNDLE=$OUT/bundle
 rm -rf $BUNDLE && mkdir -p $BUNDLE
 unzip -q -o "$1" 'Payload/*' -d $BUNDLE

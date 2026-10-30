@@ -334,8 +334,8 @@ void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row,
     }
 }
 
-// ID is not passed: it follows from Element or from the key path.
-SWIFTCC void for_each_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void* row_type) {
+// With a key path, ID follows from the key path and is not passed; here it is.
+SWIFTCC void for_each_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void*, void* row_type) {
     auto* node = new_node(NodeKind::ForEach);
     evaluate_rows(node, data, data_type, row, row_context, row_type);
     *out = node;
@@ -1040,7 +1040,10 @@ __asm__(
 
 extern "C" void rt_registrar_mark_dirty_c() { g_tree_dirty.store(true, std::memory_order_relaxed); }
 
-void swiftui_attach_image(const MachImage& image) { g_view_conformances = image.section("__TEXT", "__swift5_proto"); }
+void swiftui_attach_image(const MachImage& image) {
+    g_view_conformances = image.section("__TEXT", "__swift5_proto");
+    if (g_view_conformances != nullptr) swift_runtime_attach_conformances(reinterpret_cast<const void*>(g_view_conformances->address), g_view_conformances->size);
+}
 
 void swiftui_run_scene(void* scene) {
     auto* box = *static_cast<ViewBox**>(scene);

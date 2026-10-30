@@ -17,6 +17,7 @@
 
 #include "engine.h"
 #include "macho.h"
+#include "swift_runtime.h"
 
 extern "C" void (*storage_destroyer_for(const char* symbol))(void*);
 
@@ -38,6 +39,9 @@ constexpr uint64_t kBridgePointerMask = 0x00fffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr uint64_t kImmortal = 1ULL << 63;
 constexpr uint32_t kDescriptorGeneric = 0x80;
+constexpr uint32_t kRequirementKindMask = 0xf;
+constexpr uint32_t kRequirementKindProtocol = 0;
+constexpr uint32_t kRequirementHasKeyArgument = 0x80;
 constexpr uint8_t kMarkerAccessFunction = 0xff;
 constexpr uint8_t kSymbolicAccessFunction = 0x09;
 constexpr uint32_t kDescriptorKindMask = 0x1f;
@@ -759,6 +763,52 @@ Metadata* metadata_for_descriptor(const NominalReference& nominal, const std::ve
     return static_cast<Metadata*>(accessor(0, const_cast<void**>(arguments.data()), nullptr, nullptr));
 }
 
+constexpr uint32_t kContextKindExtension = 1;
+constexpr uint32_t kContextKindAnonymous = 2;
+constexpr uint32_t kContextKindOpaque = 4;
+constexpr uint32_t kContextKindClass = 16;
+constexpr uint32_t kContextKindStruct = 17;
+constexpr uint32_t kContextKindEnum = 18;
+constexpr size_t kExtensionGenericOffset = 12;
+constexpr size_t kAnonymousGenericOffset = 8;
+constexpr size_t kOpaqueGenericOffset = 8;
+constexpr size_t kClassGenericOffset = 44;
+constexpr size_t kValueTypeGenericOffset = 28;
+constexpr size_t kContextParentOffset = 4;
+
+// From the outermost generic context in, the running parameter count at each generic depth.
+std::vector<uint64_t> generic_depth_bases(const void* descriptor) {
+    std::vector<uint64_t> bases;
+    const auto* context = static_cast<const char*>(descriptor);
+    while (context != nullptr && unresolved_symbol_at(reinterpret_cast<uintptr_t>(context)) == nullptr) {
+        uint32_t flags;
+        memcpy(&flags, context, sizeof flags);
+        size_t header = 0;
+        switch (flags & kDescriptorKindMask) {
+            case kContextKindExtension: header = kExtensionGenericOffset; break;
+            case kContextKindAnonymous: header = kAnonymousGenericOffset; break;
+            case kContextKindOpaque: header = kOpaqueGenericOffset; break;
+            case kContextKindClass: header = kClassGenericOffset; break;
+            case kContextKindStruct:
+            case kContextKindEnum: header = kValueTypeGenericOffset; break;
+            default: break;
+        }
+        if (header != 0 && (flags & kDescriptorGeneric)) {
+            uint16_t params;
+            memcpy(&params, context + header, sizeof params);
+            bases.insert(bases.begin(), params);
+        }
+        int32_t offset;
+        memcpy(&offset, context + kContextParentOffset, sizeof offset);
+        if (offset == 0) break;
+        const char* field = context + kContextParentOffset + (offset & ~1);
+        const char* parent = field;
+        if (offset & 1) memcpy(&parent, field, sizeof parent);
+        context = parent;
+    }
+    return bases;
+}
+
 class MangledName {
 public:
     MangledName(const char* text, size_t length, void* const* generics) : cursor_(text), end_(text + length), generics_(generics) {}
@@ -770,6 +820,10 @@ public:
         return as_type(stack_.back());
     }
     const std::string& failure() const { return failure_; }
+
+    // Parameters are stored flat: these are the cumulative counts of each enclosing generic context.
+    void use_context(const void* descriptor) { depth_bases_ = generic_depth_bases(descriptor); }
+    void limit_generics(size_t count) { generic_limit_ = count; }
 
 private:
     void fail(const std::string& reason) {
@@ -963,6 +1017,36 @@ private:
         push_type(tuple_of(elements));
     }
 
+    // A generic argument buffer also holds the witness tables that the requirements make key arguments.
+    void append_key_witnesses(const char* requirements, uint16_t count, std::vector<void*>& arguments) {
+        const std::vector<void*> types = arguments;
+        for (uint16_t i = 0; i < count; ++i) {
+            const char* requirement = requirements + i * kGenericRequirementSize;
+            uint32_t flags;
+            memcpy(&flags, requirement, sizeof flags);
+            if ((flags & kRequirementKindMask) != kRequirementKindProtocol || !(flags & kRequirementHasKeyArgument)) continue;
+            int32_t param_offset, protocol_offset;
+            memcpy(&param_offset, requirement + 4, sizeof param_offset);
+            memcpy(&protocol_offset, requirement + 8, sizeof protocol_offset);
+            // The low bit of the offset marks a mangled name.
+            const char* param_name = requirement + 4 + (param_offset & ~1);
+            size_t length = 0;
+            while (param_name[length] != 0) {
+                const auto byte = static_cast<uint8_t>(param_name[length]);
+                length += byte >= 1 && byte <= 0x17 ? 5 : 1;
+            }
+            MangledName parameter(param_name, length, types.data());
+            parameter.use_context(context_for_requirements_);
+            parameter.limit_generics(types.size());
+            // A subject fixed by a same-type constraint is not passed, and its witness is only forwarded.
+            Metadata* type = parameter.parse();
+            const char* protocol_field = requirement + 8 + (protocol_offset & ~1);
+            const void* protocol = protocol_field;
+            if (protocol_offset & 1) memcpy(&protocol, protocol_field, sizeof protocol);
+            arguments.push_back(type != nullptr ? swift_runtime_find_conformance(type, protocol) : swift_runtime_placeholder_conformance(protocol));
+        }
+    }
+
     void opaque_type() {
         if (cursor_ >= end_) { fail("truncated Q operator"); return; }
         const char variety = *cursor_++;
@@ -993,7 +1077,10 @@ private:
                 uint16_t params, requirements;
                 memcpy(&params, trailing, sizeof params);
                 memcpy(&requirements, trailing + 2, sizeof requirements);
-                trailing += kGenericHeaderSize + ((params + 3u) & ~3u) + requirements * kGenericRequirementSize;
+                const char* requirement_list = trailing + kGenericHeaderSize + ((params + 3u) & ~3u);
+                context_for_requirements_ = descriptor;
+                append_key_witnesses(requirement_list, requirements, arguments);
+                trailing = requirement_list + requirements * kGenericRequirementSize;
             }
             int32_t offset;
             memcpy(&offset, trailing + ordinal * sizeof(int32_t), sizeof offset);
@@ -1004,6 +1091,7 @@ private:
                 length += byte >= 1 && byte <= 0x17 ? 5 : 1;
             }
             MangledName nested(underlying, length, arguments.data());
+            nested.use_context(descriptor);
             node.type = nested.parse();
             if (node.type == nullptr) { fail("opaque underlying type: " + nested.failure()); return; }
         }
@@ -1147,15 +1235,23 @@ private:
     }
 
     void generic(uint64_t depth, uint64_t index) {
-        if (depth != 0) {
-            fail("nested generic parameters are not supported yet");
-            return;
-        }
         if (generics_ == nullptr) {
             fail("generic parameter without generic arguments");
             return;
         }
-        push_type(static_cast<Metadata*>(generics_[index]));
+        uint64_t base = 0;
+        if (depth != 0) {
+            if (depth > depth_bases_.size()) {
+                fail("generic parameter deeper than its context");
+                return;
+            }
+            base = depth_bases_[depth - 1];
+        }
+        if (generic_limit_ != kNoGenericLimit && base + index >= generic_limit_) {
+            fail("generic parameter is not passed");
+            return;
+        }
+        push_type(static_cast<Metadata*>(generics_[base + index]));
     }
 
     void generic_parameter() {
@@ -1205,6 +1301,10 @@ private:
     std::vector<Node> stack_;
     std::vector<Node> substitutions_;
     std::string failure_;
+    std::vector<uint64_t> depth_bases_;
+    const void* context_for_requirements_ = nullptr;
+    static constexpr uint64_t kNoGenericLimit = UINT64_MAX;
+    uint64_t generic_limit_ = kNoGenericLimit;
 };
 
 std::string printable(const char* text, size_t length) {
@@ -1228,13 +1328,14 @@ std::string printable(const char* text, size_t length) {
     return out;
 }
 
-extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t length, const void*, void* const* generics) {
+extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t length, const void* context, void* const* generics) {
     const std::lock_guard guard(g_types_lock);
     const char* outer_name = g_current_name;
     const size_t outer_length = g_current_length;
     g_current_name = name;
     g_current_length = length;
     MangledName parser(name, length, generics);
+    if (context != nullptr) parser.use_context(context);
     Metadata* result = parser.parse();
     g_current_name = outer_name;
     g_current_length = outer_length;

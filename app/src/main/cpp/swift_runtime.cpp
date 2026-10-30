@@ -494,6 +494,50 @@ extern "C" void rt_app_main(void* metadata, void** witness_table) {
 uint64_t* empty_set_singleton() { return g_empty_set; }
 uint64_t* empty_array_singleton() { return g_empty_array; }
 
+namespace {
+
+const char* g_conformance_section = nullptr;
+size_t g_conformance_section_size = 0;
+constexpr size_t kMetadataDescriptorWord = 1;
+constexpr size_t kMetadataArgumentsWord = 2;
+constexpr size_t kConformanceTypeOffset = 4;
+constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
+constexpr uint32_t kTypeReferenceIndirect = 0x1u << 3;
+constexpr uintptr_t kProtocolPointerTagMask = 3;
+
+}  // namespace
+
+void swift_runtime_attach_conformances(const void* section, size_t size) {
+    g_conformance_section = static_cast<const char*>(section);
+    g_conformance_section_size = size;
+}
+
+void* swift_runtime_find_conformance(void* type, const void* protocol) {
+    const auto wanted = reinterpret_cast<uintptr_t>(protocol) & ~kProtocolPointerTagMask;
+    const void* descriptor = static_cast<void**>(type)[kMetadataDescriptorWord];
+    for (size_t i = 0; i + sizeof(int32_t) <= g_conformance_section_size; i += sizeof(int32_t)) {
+        const auto* conformance = static_cast<const char*>(relative_direct(g_conformance_section + i));
+        if ((reinterpret_cast<uintptr_t>(relative_indirectable(conformance)) & ~kProtocolPointerTagMask) != wanted) continue;
+        uint32_t flags;
+        memcpy(&flags, conformance + 12, sizeof flags);
+        const void* conforming;
+        if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
+            int32_t offset;
+            memcpy(&offset, conformance + kConformanceTypeOffset, sizeof offset);
+            memcpy(&conforming, conformance + kConformanceTypeOffset + offset, sizeof conforming);
+        } else {
+            conforming = relative_direct(conformance + kConformanceTypeOffset);
+        }
+        if (conforming == descriptor) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
+    }
+    // A framework type's conformance only needs to be distinct; thunks and the walker supply its behaviour.
+    return rt_swift_getWitnessTable(static_cast<const char*>(protocol), type, nullptr);
+}
+
+void* swift_runtime_placeholder_conformance(const void* protocol) {
+    return rt_swift_getWitnessTable(static_cast<const char*>(protocol), const_cast<void*>(protocol), nullptr);
+}
+
 void* swift_runtime_witness_table(const char* conformance, void* type, void* arguments) { return rt_swift_getWitnessTable(conformance, type, arguments); }
 
 namespace {

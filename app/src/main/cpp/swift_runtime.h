@@ -14,3 +14,12 @@ void register_foreign_witness(const char* conformance_symbol, const char* requir
 
 // Instantiates a witness table, as swift_getWitnessTable does.
 void* swift_runtime_witness_table(const char* conformance, void* type, void* arguments);
+
+// Finds the witness table of `type` for a protocol: from the app's conformance list, else a framework table.
+void* swift_runtime_find_conformance(void* type, const void* protocol);
+
+// Gives the runtime the app's conformance list.
+void swift_runtime_attach_conformances(const void* section, size_t size);
+
+// A distinct witness table standing in for a conformance whose type is not known.
+void* swift_runtime_placeholder_conformance(const void* protocol);
