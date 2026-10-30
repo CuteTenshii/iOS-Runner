@@ -1768,26 +1768,6 @@ bool is_view_like(void* type) {
     return find_view_conformance(type) != nullptr || find_conformance(type, kToolbarContentSymbol) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
 }
 
-std::string json_string(const std::string& text) {
-    std::string out = "\"";
-    for (const char c : text) {
-        const auto byte = static_cast<unsigned char>(c);
-        if (c == '"' || c == '\\') {
-            out += '\\';
-            out += c;
-        } else if (c == '\n') {
-            out += "\\n";
-        } else if (byte < 0x20) {
-            char escaped[8];
-            snprintf(escaped, sizeof escaped, "\\u%04x", byte);
-            out += escaped;
-        } else {
-            out += c;
-        }
-    }
-    return out + "\"";
-}
-
 enum class ActionKind { Closure, Toggle, StepBy, SetValue, DismissSheet, OpenUrl, SetText, PushLink, PopLink };
 
 struct Action {
@@ -1928,36 +1908,63 @@ const char* font_name(uint64_t style) {
     }
 }
 
-std::string render(void* value, void* type, const std::string& path, int depth);
+using Nodes = std::vector<Json>;
+using Properties = std::vector<std::pair<std::string, Json>>;
 
-std::string render_children(ViewNode* node, const std::string& path, int depth) {
-    std::string out;
+Json json_text(const std::string& text) {
+    Json value;
+    value.kind = Json::Kind::String;
+    value.text = text;
+    return value;
+}
+
+Json json_number(int64_t number) {
+    Json value;
+    value.kind = Json::Kind::Integer;
+    value.integer = number;
+    return value;
+}
+
+Json json_flag(bool flag) {
+    Json value;
+    value.kind = Json::Kind::Bool;
+    value.flag = flag;
+    return value;
+}
+
+Nodes render(void* value, void* type, const std::string& path, int depth);
+
+void append_nodes(Nodes& to, Nodes from) { to.insert(to.end(), std::make_move_iterator(from.begin()), std::make_move_iterator(from.end())); }
+
+Nodes render_children(ViewNode* node, const std::string& path, int depth) {
+    Nodes out;
     size_t index = 0;
-    for (const auto& child : *node->children) {
-        const std::string rendered = render(child.value, child.type, path + "/" + std::to_string(index++), depth + 1);
-        if (rendered.empty()) continue;
-        if (!out.empty()) out += ',';
-        out += rendered;
+    for (const auto& child : *node->children) append_nodes(out, render(child.value, child.type, path + "/" + std::to_string(index++), depth + 1));
+    return out;
+}
+
+Json tree_node(const std::string& kind, Properties properties = {}, Nodes children = {}) {
+    Json out;
+    out.kind = Json::Kind::Object;
+    out.members.emplace_back("k", json_text(kind));
+    for (auto& property : properties) out.members.push_back(std::move(property));
+    if (!children.empty()) {
+        Json list;
+        list.kind = Json::Kind::Array;
+        list.items = std::move(children);
+        out.members.emplace_back("c", std::move(list));
     }
     return out;
 }
 
-std::string node_json(const std::string& kind, const std::string& properties, const std::string& children) {
-    std::string out = "{\"k\":\"" + kind + "\"";
-    if (!properties.empty()) out += "," + properties;
-    if (!children.empty()) out += ",\"c\":[" + children + "]";
-    return out + "}";
-}
-
-std::string text_properties(const std::string& title, const std::string& icon) {
-    std::string out;
-    if (!title.empty()) out += "\"t\":" + json_string(title);
-    if (!icon.empty()) {
-        if (!out.empty()) out += ',';
-        out += "\"i\":" + json_string(icon);
-    }
+Properties text_properties(const std::string& title, const std::string& icon) {
+    Properties out;
+    if (!title.empty()) out.emplace_back("t", json_text(title));
+    if (!icon.empty()) out.emplace_back("i", json_text(icon));
     return out;
 }
+
+Json plain_text(const std::string& text, const char* font = "body") { return tree_node("text", {{"t", json_text(text)}, {"font", json_text(font)}}); }
 
 std::set<std::string>& pushed_links() {
     static std::set<std::string> links;
@@ -1965,17 +1972,17 @@ std::set<std::string>& pushed_links() {
 }
 
 // A pushed destination shows as a sheet over its stack, with dismissal as the back gesture.
-std::string render_navigation_link(ViewNode* node, const std::string& path, int depth) {
-    std::string label = node->children->size() > 1 ? render((*node->children)[1].value, (*node->children)[1].type, path + "/l", depth + 1) : std::string();
-    if (!node->title->empty()) label = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {});
+Nodes render_navigation_link(ViewNode* node, const std::string& path, int depth) {
+    Nodes label = node->children->size() > 1 ? render((*node->children)[1].value, (*node->children)[1].type, path + "/l", depth + 1) : Nodes();
+    if (!node->title->empty()) label = {plain_text(*node->title)};
     const int push = add_action({ActionKind::PushLink, nullptr, nullptr, nullptr, nullptr, nullptr, 0, path});
-    std::string json = node_json("button", "\"a\":" + std::to_string(push), label);
+    Nodes out = {tree_node("button", {{"a", json_number(push)}}, std::move(label))};
     if (pushed_links().count(path) != 0) {
         const int pop = add_action({ActionKind::PopLink, nullptr, nullptr, nullptr, nullptr, nullptr, 0, path});
         const auto& destination = (*node->children)[0];
-        json += "," + node_json("sheet", "\"d\":" + std::to_string(pop), render(destination.value, destination.type, path + "/dest", depth + 1));
+        out.push_back(tree_node("sheet", {{"d", json_number(pop)}}, render(destination.value, destination.type, path + "/dest", depth + 1)));
     }
-    return json;
+    return out;
 }
 
 // `.tabItem` names its tab with a Label or Text, which is all the tab bar shows of it.
@@ -1987,71 +1994,67 @@ void find_tab_label(const Json& node, std::string& title, std::string& icon) {
     }
 }
 
-std::string render_tab_item(ViewNode* node, const std::string& path, int depth) {
-    const std::string content = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
-    const std::string label = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
+Nodes render_tab_item(ViewNode* node, const std::string& path, int depth) {
+    Nodes content = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+    const Nodes label = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
     std::string title;
     std::string icon;
-    Json parsed;
-    if (json_parse("[" + label + "]", parsed)) {
-        for (const Json& part : parsed.items) find_tab_label(part, title, icon);
-    }
-    return node_json("tab", text_properties(title, icon), content);
+    for (const Json& part : label) find_tab_label(part, title, icon);
+    return {tree_node("tab", text_properties(title, icon), std::move(content))};
 }
 
-std::string render_node(ViewNode* node, const std::string& path, int depth) {
+Nodes render_node(ViewNode* node, const std::string& path, int depth) {
     switch (node->kind) {
         case NodeKind::Task:
             if (started_tasks().insert(path).second) concurrency_start(node->action, node->action_context);
             return {};
         case NodeKind::Button: {
             const int action = add_action({ActionKind::Closure, node->action, node->action_context, nullptr, nullptr, nullptr, 0, {}});
-            std::string children = render_children(node, path, depth);
-            if (!node->title->empty()) children = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {});
-            return node_json("button", "\"a\":" + std::to_string(action), children);
+            Nodes children = node->title->empty() ? render_children(node, path, depth) : Nodes{plain_text(*node->title)};
+            return {tree_node("button", {{"a", json_number(action)}}, std::move(children))};
         }
         case NodeKind::NavigationLink: return render_navigation_link(node, path, depth);
         case NodeKind::TextField: {
-            std::string current;
             SwiftString text{};
             binding_read(node->binding, &text, string_metadata());
-            current = swift_string_to_utf8(text);
             const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
-            return node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":" + json_string(*node->title) + ",\"v\":" + json_string(current) + (node->lower != 0 ? ",\"secure\":true" : ""), {});
+            Properties properties = {{"a", json_number(action)}, {"t", json_text(*node->title)}, {"v", json_text(swift_string_to_utf8(text))}};
+            if (node->lower != 0) properties.emplace_back("secure", json_flag(true));
+            return {tree_node("field", std::move(properties))};
         }
         case NodeKind::Searchable: {
             SwiftString text{};
             binding_read(node->binding, &text, string_metadata());
             const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
-            const std::string field = node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":\"Search\",\"v\":" + json_string(swift_string_to_utf8(text)), {});
-            const std::string content = render_children(node, path, depth);
-            return node_json("v", {}, content.empty() ? field : field + "," + content);
+            Nodes children = {tree_node("field", {{"a", json_number(action)}, {"t", json_text("Search")}, {"v", json_text(swift_string_to_utf8(text))}})};
+            append_nodes(children, render_children(node, path, depth));
+            return {tree_node("v", {}, std::move(children))};
         }
-        case NodeKind::Stack: return node_json("v", {}, render_children(node, path, depth));
+        case NodeKind::Stack: return {tree_node("v", {}, render_children(node, path, depth))};
         case NodeKind::Divider: return {};
         case NodeKind::Link: {
             const int action = add_action({ActionKind::OpenUrl, nullptr, nullptr, nullptr, nullptr, nullptr, 0, *node->detail});
-            return node_json("button", "\"a\":" + std::to_string(action), render_children(node, path, depth));
+            return {tree_node("button", {{"a", json_number(action)}}, render_children(node, path, depth))};
         }
         case NodeKind::Toggle: {
             bool current = false;
             binding_read(node->binding, &current, bool_metadata());
             const int action = add_action({ActionKind::Toggle, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
-            std::string properties = "\"a\":" + std::to_string(action) + ",\"v\":" + (current ? "true" : "false");
-            if (!node->title->empty()) properties += ",\"t\":" + json_string(*node->title);
-            return node_json("toggle", properties, render_children(node, path, depth));
+            Properties properties = {{"a", json_number(action)}, {"v", json_flag(current)}};
+            if (!node->title->empty()) properties.emplace_back("t", json_text(*node->title));
+            return {tree_node("toggle", std::move(properties), render_children(node, path, depth))};
         }
         case NodeKind::Stepper: {
             int64_t current = 0;
             binding_read(node->binding, &current, int_metadata());
-            std::string properties = "\"v\":" + std::to_string(current);
+            Properties properties = {{"v", json_number(current)}};
             if (current - node->step >= node->lower) {
-                properties += ",\"d\":" + std::to_string(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, -node->step, {}}));
+                properties.emplace_back("d", json_number(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, -node->step, {}})));
             }
             if (current + node->step <= node->upper) {
-                properties += ",\"a\":" + std::to_string(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, node->step, {}}));
+                properties.emplace_back("a", json_number(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, node->step, {}})));
             }
-            return node_json("stepper", properties, render_children(node, path, depth));
+            return {tree_node("stepper", std::move(properties), render_children(node, path, depth))};
         }
         case NodeKind::Picker: {
             void* outer_value = g_selection_value;
@@ -2063,14 +2066,14 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             g_selection_value = current;
             g_selection_type = selection_type;
             g_picker_binding = node->binding;
-            const std::string children = render_children(node, path, depth);
+            Nodes children = render_children(node, path, depth);
             g_selection_value = outer_value;
             g_selection_type = outer_type;
             g_picker_binding = outer_binding;
-            return node_json("picker", node->title->empty() ? std::string() : "\"t\":" + json_string(*node->title), children);
+            return {tree_node("picker", text_properties(*node->title, {}), std::move(children))};
         }
         case NodeKind::Sheet: {
-            std::string children = render_children(node, path, depth);
+            Nodes children = render_children(node, path, depth);
             void* optional_type = optional_metadata(node->item_type);
             void* item = calloc(1, witnesses_of(optional_type)->size + 1);
             binding_read(node->binding, item, optional_type);
@@ -2082,88 +2085,84 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
                 g_presented_sheet = node->binding;
                 g_presented_sheet_type = optional_type;
                 const int action = add_action({ActionKind::DismissSheet, nullptr, nullptr, nullptr, nullptr, nullptr, 0, {}});
-                const std::string sheet = render(content, node->content_type, path + "/sheet", depth + 1);
-                const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), sheet);
-                children = children.empty() ? json : children + "," + json;
+                children.push_back(tree_node("sheet", {{"d", json_number(action)}}, render(content, node->content_type, path + "/sheet", depth + 1)));
             }
             return children;
         }
         case NodeKind::RowMenu: {
-            const std::string row = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
-            const std::string menu = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
-            return node_json("h", {}, menu.empty() ? row : row + "," + node_json("menu", {}, node_json("image", "\"i\":\"ellipsis\"", {}) + "," + menu));
+            Nodes row = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+            Nodes menu = render((*node->children)[1].value, (*node->children)[1].type, path + "/1", depth + 1);
+            if (!menu.empty()) {
+                Nodes items = {tree_node("image", {{"i", json_text("ellipsis")}})};
+                append_nodes(items, std::move(menu));
+                row.push_back(tree_node("menu", {}, std::move(items)));
+            }
+            return {tree_node("h", {}, std::move(row))};
         }
         case NodeKind::PresentedSheet: {
-            std::string children = render_children(node, path, depth);
+            Nodes children = render_children(node, path, depth);
             bool presented = false;
             binding_read(node->binding, &presented, bool_metadata());
             if (!presented) return children;
             const size_t size = witnesses_of(node->content_type)->size;
             void* content = calloc(1, size == 0 ? 1 : size);
             rt_call_witness(node->action, content, node->action_context, nullptr, nullptr);
-            bool off = false;
-            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(off), bool_metadata(), 0, {}});
-            const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), render(content, node->content_type, path + "/sheet", depth + 1));
-            return children.empty() ? json : children + "," + json;
+            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(false), bool_metadata(), 0, {}});
+            children.push_back(tree_node("sheet", {{"d", json_number(action)}}, render(content, node->content_type, path + "/sheet", depth + 1)));
+            return children;
         }
         case NodeKind::Alert: {
-            std::string children = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
+            Nodes children = render((*node->children)[0].value, (*node->children)[0].type, path + "/0", depth + 1);
             bool presented = false;
             binding_read(node->binding, &presented, bool_metadata());
             if (!presented) return children;
-            std::string body = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\",\"bold\":true", {});
+            Nodes body = {tree_node("text", {{"t", json_text(*node->title)}, {"font", json_text("body")}, {"bold", json_flag(true)}})};
             for (size_t i = node->children->size(); i-- > 1;) {
-                const std::string part = render((*node->children)[i].value, (*node->children)[i].type, path + "/alert" + std::to_string(i), depth + 1);
-                if (!part.empty()) body += "," + part;
+                append_nodes(body, render((*node->children)[i].value, (*node->children)[i].type, path + "/alert" + std::to_string(i), depth + 1));
             }
-            bool off = false;
-            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(off), bool_metadata(), 0, {}});
-            const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), node_json("list", {}, body));
-            return children.empty() ? json : children + "," + json;
+            const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(false), bool_metadata(), 0, {}});
+            children.push_back(tree_node("sheet", {{"d", json_number(action)}}, {tree_node("list", {}, std::move(body))}));
+            return children;
         }
-        case NodeKind::TabView: return node_json("tabs", {}, render_children(node, path, depth));
+        case NodeKind::TabView: return {tree_node("tabs", {}, render_children(node, path, depth))};
         case NodeKind::Tab: {
             if (node->lower != 0) return render_tab_item(node, path, depth);
-            return node_json("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+            return {tree_node("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth))};
         }
-        case NodeKind::NavigationStack: return node_json("nav", {}, render_children(node, path, depth));
-        case NodeKind::List: return node_json("list", {}, render_children(node, path, depth));
+        case NodeKind::NavigationStack: return {tree_node("nav", {}, render_children(node, path, depth))};
+        case NodeKind::List: return {tree_node("list", {}, render_children(node, path, depth))};
         case NodeKind::Section: {
-            std::string children = render_children(node, path, depth);
-            if (!node->title->empty()) {
-                const std::string header = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"caption\",\"color\":\"secondary\"", {});
-                children = children.empty() ? header : header + "," + children;
-            }
-            return node_json("section", {}, children);
+            Nodes children;
+            if (!node->title->empty()) children.push_back(tree_node("text", {{"t", json_text(*node->title)}, {"font", json_text("caption")}, {"color", json_text("secondary")}}));
+            append_nodes(children, render_children(node, path, depth));
+            return {tree_node("section", {}, std::move(children))};
         }
         case NodeKind::Label: {
-            if (node->children->empty()) {
-                std::string parts = node_json("image", text_properties({}, *node->system_image), {});
-                return node_json("h", {}, parts + "," + node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {}));
-            }
-            return node_json("h", {}, render_children(node, path, depth));
+            if (node->children->empty()) return {tree_node("h", {}, {tree_node("image", text_properties({}, *node->system_image)), plain_text(*node->title)})};
+            return {tree_node("h", {}, render_children(node, path, depth))};
         }
-        case NodeKind::Menu: return node_json("menu", {}, render_children(node, path, depth));
+        case NodeKind::Menu: return {tree_node("menu", {}, render_children(node, path, depth))};
         case NodeKind::Disclosure: {
-            std::string children = render_children(node, path, depth);
-            if (!node->title->empty()) children = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {}) + "," + children;
-            return node_json("disclosure", {}, children);
+            Nodes children;
+            if (!node->title->empty()) children.push_back(plain_text(*node->title));
+            append_nodes(children, render_children(node, path, depth));
+            return {tree_node("disclosure", {}, std::move(children))};
         }
-        case NodeKind::Toolbar: return node_json("toolbar", {}, render_children(node, path, depth));
-        case NodeKind::ToolbarItem: return node_json("toolbaritem", {}, render_children(node, path, depth));
-        case NodeKind::ProgressView: return node_json("progress", {}, {});
-        case NodeKind::AsyncImage: return node_json("image", {}, {});
-        case NodeKind::Image: return node_json("image", text_properties(*node->title, *node->system_image), {});
-        case NodeKind::LabeledContent: return node_json("labeled", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+        case NodeKind::Toolbar: return {tree_node("toolbar", {}, render_children(node, path, depth))};
+        case NodeKind::ToolbarItem: return {tree_node("toolbaritem", {}, render_children(node, path, depth))};
+        case NodeKind::ProgressView: return {tree_node("progress")};
+        case NodeKind::AsyncImage: return {tree_node("image")};
+        case NodeKind::Image: return {tree_node("image", text_properties(*node->title, *node->system_image))};
+        case NodeKind::LabeledContent: return {tree_node("labeled", text_properties(*node->title, *node->system_image), render_children(node, path, depth))};
         case NodeKind::Unavailable: {
-            std::string properties = text_properties(*node->title, *node->system_image);
-            if (!node->detail->empty()) properties += ",\"s\":" + json_string(*node->detail);
-            return node_json("unavailable", properties, {});
+            Properties properties = text_properties(*node->title, *node->system_image);
+            if (!node->detail->empty()) properties.emplace_back("s", json_text(*node->detail));
+            return {tree_node("unavailable", std::move(properties))};
         }
         case NodeKind::Modifier: {
-            const std::string children = render_children(node, path, depth);
+            Nodes children = render_children(node, path, depth);
             if (node->title->empty()) return children;
-            return node_json("titled", "\"t\":" + json_string(*node->title), children);
+            return {tree_node("titled", {{"t", json_text(*node->title)}}, std::move(children))};
         }
         case NodeKind::ForEach:
         case NodeKind::OnChange:
@@ -2174,9 +2173,9 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
 }
 
 // What a custom modifier's `content` placeholder stands for while its body renders.
-std::string g_modifier_content;
+Nodes g_modifier_content;
 
-std::string render_custom_modifier(const char* conformance, void* modifier, void* type, const std::string& content, const std::string& path, int depth) {
+Nodes render_custom_modifier(const char* conformance, void* modifier, void* type, Nodes content, const std::string& path, int depth) {
     const void* body = find_witness(conformance, &g_modifier_body_requirement);
     const void* body_type_name = find_witness(conformance, &g_modifier_body_type_requirement);
     if (body == nullptr || body_type_name == nullptr) return content;
@@ -2187,33 +2186,33 @@ std::string render_custom_modifier(const char* conformance, void* modifier, void
     auto** table = static_cast<void**>(rt_swift_getWitnessTable_for_view(conformance, type));
     char placeholder = 0;
     rt_call_modifier_body(body, output, &placeholder, modifier, type, table);
-    const std::string outer = g_modifier_content;
-    g_modifier_content = content;
-    std::string rendered = render(output, body_metadata, path + "/mod", depth + 1);
-    g_modifier_content = outer;
+    Nodes outer = std::move(g_modifier_content);
+    g_modifier_content = std::move(content);
+    Nodes rendered = render(output, body_metadata, path + "/mod", depth + 1);
+    g_modifier_content = std::move(outer);
     return rendered;
 }
 
-std::string render(void* value, void* type, const std::string& path, int depth) {
+Nodes render(void* value, void* type, const std::string& path, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
         abort();
     }
     TypeField branch;
     if (conditional_active(type, value, branch) || optional_payload(type, value, branch)) {
-        return branch.type != nullptr ? render(value, branch.type, path, depth) : std::string();
+        return branch.type != nullptr ? render(value, branch.type, path, depth) : Nodes();
     }
     const uint64_t kind_word = *static_cast<uint64_t*>(type);
     const char* name = foreign_type_name(type);
     if (name != nullptr || kind_word == kTupleKind) {
         if (name != nullptr && strcmp(name, kTextSymbol) == 0) {
             const auto* text = static_cast<const TextValue*>(value);
-            std::string properties = "\"t\":" + json_string(swift_string_to_utf8({text->text_bits, text->text_object}));
+            Properties properties = {{"t", json_text(swift_string_to_utf8({text->text_bits, text->text_object}))}};
             const std::string color = text_color_name(text->style);
-            if (!color.empty()) properties += ",\"color\":\"" + color + "\"";
-            properties += ",\"font\":\"" + std::string(font_name(text->style)) + "\"";
-            if (text->style & kFontBold) properties += ",\"bold\":true";
-            return node_json("text", properties, {});
+            if (!color.empty()) properties.emplace_back("color", json_text(color));
+            properties.emplace_back("font", json_text(font_name(text->style)));
+            if (text->style & kFontBold) properties.emplace_back("bold", json_flag(true));
+            return {tree_node("text", std::move(properties))};
         }
         const auto* witnesses = witnesses_of(type);
         if (witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0) {
@@ -2223,13 +2222,13 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         const auto fields = type_fields(type);
         if (fields.empty()) {
             if (name != nullptr && strcmp(name, "_$s7SwiftUI21_ViewModifier_ContentVMn") == 0) return g_modifier_content;
-            if (name != nullptr && strcmp(name, "_$s7SwiftUI6SpacerVMn") == 0) return node_json("spacer", {}, {});
+            if (name != nullptr && strcmp(name, "_$s7SwiftUI6SpacerVMn") == 0) return {tree_node("spacer")};
             return {};
         }
         // Only `.onReceive`'s content is a view; its publisher reports through the app's own observers.
         if (name != nullptr && strcmp(name, "_$s7SwiftUI16SubscriptionViewVMn") == 0) return render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
         if (name != nullptr && strcmp(name, kModifiedContentSymbol) == 0) {
-            std::string content = render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
+            Nodes content = render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
             const char* modifier = foreign_type_name(fields[1].type);
             auto* modifier_value = static_cast<char*>(value) + fields[1].offset;
             if (modifier != nullptr && strcmp(modifier, kTagModifierSymbol) == 0 && g_selection_value != nullptr) {
@@ -2238,7 +2237,7 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
                 witnesses_of(tag_type)->initialize_with_copy(tag, modifier_value, tag_type);
                 const bool selected = tag_type == g_selection_type && values_equal(tag, g_selection_value, tag_type);
                 const int action = add_action({ActionKind::SetValue, nullptr, nullptr, g_picker_binding, tag, tag_type, 0, {}});
-                return node_json("option", "\"a\":" + std::to_string(action) + ",\"v\":" + (selected ? "true" : "false"), content);
+                return {tree_node("option", {{"a", json_number(action)}, {"v", json_flag(selected)}}, std::move(content))};
             }
             if (modifier != nullptr && strcmp(modifier, "_$s7SwiftUI13_TaskModifierVMn") == 0) {
                 const auto* task = reinterpret_cast<const AppearanceAction*>(modifier_value);
@@ -2249,39 +2248,34 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
                 if (action->function != nullptr && started_tasks().insert(path + "#appear").second) g_pending_appear.push_back(*action);
             }
             if (const char* custom = find_conformance(fields[1].type, kViewModifierSymbol)) {
-                return render_custom_modifier(custom, modifier_value, fields[1].type, content, path, depth);
+                return render_custom_modifier(custom, modifier_value, fields[1].type, std::move(content), path, depth);
             }
             if (is_runtime_node_type(fields[1].type)) {
-                const std::string extra = render(modifier_value, fields[1].type, path + "/m", depth);
-                if (!extra.empty()) content = content.empty() ? extra : content + "," + extra;
+                append_nodes(content, render(modifier_value, fields[1].type, path + "/m", depth));
             }
             return content;
         }
-        std::string children;
+        Nodes children;
         size_t index = 0;
         for (const auto& field : fields) {
             const size_t current = index++;
             // A view builder's tuple holds only views, including Optional ones from `if let`.
             if (kind_word != kTupleKind && !is_view_like(field.type)) continue;
-            const std::string rendered = render(static_cast<char*>(value) + field.offset, field.type, path + "." + std::to_string(current), depth + 1);
-            if (rendered.empty()) continue;
-            if (!children.empty()) children += ',';
-            children += rendered;
+            append_nodes(children, render(static_cast<char*>(value) + field.offset, field.type, path + "." + std::to_string(current), depth + 1));
         }
         if (name == nullptr) return children;
         if (strcmp(name, "_$s7SwiftUI21_ViewModifier_ContentVMn") == 0) return g_modifier_content;
-        if (strcmp(name, "_$s7SwiftUI6HStackVMn") == 0) return node_json("h", {}, children);
+        if (strcmp(name, "_$s7SwiftUI6HStackVMn") == 0) return {tree_node("h", {}, std::move(children))};
         if (strcmp(name, "_$s7SwiftUI6VStackVMn") == 0) {
             // A stack around one view adds nothing, and would stop a tab bar or list from filling the screen.
-            Json parsed;
-            if (json_parse("[" + children + "]", parsed) && parsed.items.size() == 1) return children;
-            return node_json("v", {}, children);
+            if (children.size() == 1) return children;
+            return {tree_node("v", {}, std::move(children))};
         }
         return children;
     }
     if (const char* representable = find_conformance(type, kRepresentableSymbol)) {
         const void* make = swift_runtime_find_witness_named(representable, kMakeUIViewRequirement);
-        if (make == nullptr) return node_json("native", {}, {});
+        if (make == nullptr) return {tree_node("native")};
         // The context is opaque to the view; this app's implementation only returns a stored view.
         void* context = calloc(1, kRepresentableContextBytes);
         auto** table = static_cast<void**>(swift_runtime_witness_table(representable, type, static_cast<void**>(type) + kMetadataArgumentsWord));
@@ -2290,7 +2284,7 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         free(context);
         const int web_view = foundation_web_view_id(view);
         rt_swift_release(view);
-        return node_json("native", "\"w\":" + std::to_string(web_view), {});
+        return {tree_node("native", {{"w", json_number(web_view)}})};
     }
     const char* conformance = find_view_conformance(type);
     const bool is_toolbar_content = conformance == nullptr;
@@ -2404,8 +2398,10 @@ void render_tree() {
     g_actions.clear();
     g_presented_sheet = nullptr;
     g_tree_dirty.store(false, std::memory_order_relaxed);
-    const std::string tree = render(g_root_content, g_root_type, "r", 0);
-    engine_emit("tree", "[" + tree + "]");
+    Json tree;
+    tree.kind = Json::Kind::Array;
+    tree.items = render(g_root_content, g_root_type, "r", 0);
+    engine_emit("tree", json_write(tree));
     std::vector<AppearanceAction> appeared;
     appeared.swap(g_pending_appear);
     for (const auto& action : appeared) {
