@@ -717,6 +717,48 @@ SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) 
     *stream = swift_string_from_utf8(swift_string_to_utf8(*stream) + text);
 }
 
+// Array<AnyObject> entry points the compiler specialized: elements are single retained references.
+extern "C" void* rt_swift_retain(void*);
+extern "C" void rt_swift_release(void*);
+
+void object_array_grow(void** self, int64_t minimum_capacity) {
+    auto* old = static_cast<HashedHeader*>(*self);
+    const int64_t old_capacity = old->capacity >> 1;
+    int64_t capacity = old_capacity * 2;
+    if (capacity < minimum_capacity) capacity = minimum_capacity;
+    if (capacity < 1) capacity = 1;
+    char* elements;
+    auto* raw = make_array_storage(any_object_metadata(), static_cast<size_t>(capacity), &elements);
+    auto* header = static_cast<HashedHeader*>(raw);
+    header->count = old->count;
+    char* old_elements;
+    array_storage_contents(old, any_object_metadata(), &old_elements);
+    for (int64_t i = 0; i < old->count; ++i) {
+        void* element;
+        memcpy(&element, old_elements + static_cast<size_t>(i) * sizeof element, sizeof element);
+        rt_swift_retain(element);
+        memcpy(elements + static_cast<size_t>(i) * sizeof element, &element, sizeof element);
+    }
+    rt_swift_release(old);
+    *self = raw;
+}
+
+SWIFTCC void object_array_make_unique(SWIFT_SELF void** self) {
+    auto* header = static_cast<HashedHeader*>(*self);
+    const int64_t capacity = header->capacity >> 1;
+    if (header->references.load(std::memory_order_relaxed) != 1 || header->count >= capacity) object_array_grow(self, header->count + 1);
+}
+
+SWIFTCC void object_array_create_new_buffer(bool, int64_t minimum_capacity, bool, SWIFT_SELF void** self) { object_array_grow(self, minimum_capacity); }
+
+SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_SELF void** self) {
+    auto* header = static_cast<HashedHeader*>(*self);
+    char* elements;
+    array_storage_contents(header, any_object_metadata(), &elements);
+    memcpy(elements + static_cast<size_t>(old_count) * sizeof element, &element, sizeof element);
+    header->count = old_count + 1;
+}
+
 // Equatable's dispatch thunk; framework types only reach it as String or URL.
 SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, void* table) {
     if (type == type_system_symbol("$sSSN")) return swift_string_to_utf8(*static_cast<const SwiftString*>(left)) == swift_string_to_utf8(*static_cast<const SwiftString*>(right));
@@ -756,6 +798,9 @@ void* stdlib_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sSa034_makeUniqueAndReserveCapacityIfNotB0yyFyXl_Ts5", reinterpret_cast<void*>(object_array_make_unique)},
+        {"$sSa16_createNewBuffer14bufferIsUnique15minimumCapacity13growForAppendySb_SiSbtFyXl_Ts5", reinterpret_cast<void*>(object_array_create_new_buffer)},
+        {"$sSa37_appendElementAssumeUniqueAndCapacity_03newB0ySi_xntFyXl_Ts5", reinterpret_cast<void*>(object_array_append)},
         {"$sSQ2eeoiySbx_xtFZTj", reinterpret_cast<void*>(equatable_equal)},
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},

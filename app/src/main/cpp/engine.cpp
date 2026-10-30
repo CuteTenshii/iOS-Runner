@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
@@ -152,9 +153,22 @@ struct GuestArguments {
     int status = 1;
 };
 
+// A C++ exception escaping a shim otherwise shows up as a bare abort with an unwinder's garbled stack.
+void log_uncaught_exception() {
+    try {
+        if (std::current_exception()) std::rethrow_exception(std::current_exception());
+    } catch (const std::exception& error) {
+        engine_log("STOP: a runtime shim threw: %s", error.what());
+    } catch (...) {
+        engine_log("STOP: a runtime shim threw an unknown exception");
+    }
+    abort();
+}
+
 void* guest_thread(void* raw) {
     auto* arguments = static_cast<GuestArguments*>(raw);
     install_fault_handlers();
+    std::set_terminate(log_uncaught_exception);
 
     const std::string binary = arguments->bundle_dir + "/" + arguments->executable;
     std::string error;

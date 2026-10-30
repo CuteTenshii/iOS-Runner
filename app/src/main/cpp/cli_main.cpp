@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 
@@ -25,6 +27,16 @@ std::string probe_result() {
     const int phase = g_probe_phase;
     return std::string("{\"shows\":true,\"blocked\":") + flag(phase >= 3) + ",\"unavailable\":false,\"loggedOut\":false,\"overflow\":" + flag(phase == 0) +
            ",\"block\":" + flag(phase == 1) + ",\"confirm\":" + flag(phase == 2) + ",\"unblock\":false,\"gate\":false}";
+}
+
+// IOSRUNNER_DRIVE_SITE=<directory>: answers requests with the file named after the URL's last path component.
+HttpResult serve_from_directory(const std::string& url, const std::string&, const std::string&, const std::string&) {
+    std::ifstream file(std::string(getenv("IOSRUNNER_DRIVE_SITE")) + "/" + url.substr(url.rfind('/') + 1), std::ios::binary);
+    HttpResult result;
+    if (!file) return result;
+    result.status = 200;
+    result.body.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    return result;
 }
 
 // IOSRUNNER_DRIVE=<button text>: taps that button once it appears, and plays the web view's part until IOSRUNNER_DRIVE_SECONDS.
@@ -68,6 +80,7 @@ int main(int argc, char** argv) {
     }
     if (getenv("IOSRUNNER_DRIVE") != nullptr) {
         engine_set_message_sink(drive_message);
+        if (getenv("IOSRUNNER_DRIVE_SITE") != nullptr) engine_set_http_handler(serve_from_directory);
         const int seconds = atoi(getenv("IOSRUNNER_DRIVE_SECONDS") != nullptr ? getenv("IOSRUNNER_DRIVE_SECONDS") : "60");
         std::thread([seconds] {
             sleep(static_cast<unsigned>(seconds));
