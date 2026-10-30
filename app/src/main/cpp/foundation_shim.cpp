@@ -24,6 +24,9 @@
 #include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
+#define SWIFT_OUT __attribute__((swift_indirect_result))
+#define SWIFT_SELF __attribute__((swift_context))
+#define SWIFT_CTX __attribute__((swift_context))
 
 uint64_t* empty_array_singleton();
 
@@ -447,9 +450,6 @@ bool file_manager_create_directory(void*, const char*, void* url, bool, void*, v
     return make_directories(url_path(nsstring_text(url)));
 }
 
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_SELF __attribute__((swift_context))
-
 SWIFTCC void localization_value_literal(SWIFT_OUT LocalizedBox** out, SwiftString literal) { *out = new_localized_box(swift_string_to_utf8(literal)); }
 SWIFTCC void localization_interpolation_init(SWIFT_OUT LocalizedBox** out, int64_t, int64_t) { *out = new_localized_box(""); }
 SWIFTCC void localization_append_literal(SwiftString literal, SWIFT_SELF LocalizedBox** self) { *(*self)->key += swift_string_to_utf8(literal); }
@@ -662,9 +662,92 @@ SWIFTCC void data_write(URLBox** url, uint64_t, uint64_t range, uint64_t storage
     }
 }
 
-extern "C" void* rt_url_session_failure() { return make_error("Network access is not available yet.", 1); }
+// Foundation.URLRequest is resilient here too: one reference to this box.
+struct URLRequestBox {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    std::string* url;
+    std::string* method;
+    std::string* headers;
+    std::string* body;
+};
 
-extern "C" void rt_url_session_data();
+void destroy_url_request(void* raw) {
+    auto* box = static_cast<URLRequestBox*>(raw);
+    delete box->url;
+    delete box->method;
+    delete box->headers;
+    delete box->body;
+    free(box);
+}
+
+const StorageMetadata kUrlRequestMetadata = {destroy_url_request, nullptr, 0};
+
+SWIFTCC void url_request_init(SWIFT_OUT URLRequestBox** out, URLBox** url, uint64_t, double) {
+    auto* box = static_cast<URLRequestBox*>(calloc(1, sizeof(URLRequestBox)));
+    box->metadata = const_cast<uint64_t*>(&kUrlRequestMetadata.kind);
+    new (&box->references) std::atomic<uint64_t>(1);
+    box->url = new std::string(*(*url)->text);
+    box->method = new std::string("GET");
+    box->headers = new std::string();
+    box->body = new std::string();
+    *out = box;
+}
+
+SWIFTCC void url_request_set_method(SwiftString method, SWIFT_CTX URLRequestBox** self) {
+    if (method.object != 0) *(*self)->method = swift_string_to_utf8(method);
+}
+
+SWIFTCC void url_request_set_header(SwiftString value, SwiftString field, SWIFT_CTX URLRequestBox** self) {
+    if (value.object != 0) *(*self)->headers += swift_string_to_utf8(field) + ": " + swift_string_to_utf8(value) + "\n";
+}
+
+std::string data_bytes(uint64_t range, uint64_t storage) {
+    if ((storage >> 62) != (kDataSliceTag >> 62)) return {};
+    const auto* backing = reinterpret_cast<const DataStorage*>(storage & ~(3ULL << 62));
+    const auto low = static_cast<uint32_t>(range);
+    const auto high = static_cast<uint32_t>(range >> 32);
+    return std::string(reinterpret_cast<const char*>(backing->bytes) + low, high - low);
+}
+
+SWIFTCC void url_request_set_body(uint64_t range, uint64_t storage, SWIFT_CTX URLRequestBox** self) { *(*self)->body = data_bytes(range, storage); }
+SWIFTCC void url_request_get_url(SWIFT_OUT URLBox** out, SWIFT_CTX URLRequestBox** self) { *out = new_url(*(*self)->url); }
+
+// NSHTTPURLResponse: the only part the app reads is the status.
+struct HTTPResponseObject {
+    NativeObject header;
+    int64_t status;
+};
+
+void* g_http_response_class = nullptr;
+
+int64_t http_response_status(void* self, const char*) { return static_cast<HTTPResponseObject*>(self)->status; }
+
+struct AsyncDataResult {
+    DataValue data;
+    void* response;
+    void* error;
+};
+
+std::string g_session_headers;
+
+AsyncDataResult perform_request(const std::string& url, const std::string& method, const std::string& headers, const std::string& body) {
+    const HttpResult result = engine_http(url, method, g_session_headers + headers, body);
+    if (result.status < 0) return {{0, kDataEmptyTag}, nullptr, make_error("The network request could not be completed.", 1)};
+    auto* response = static_cast<HTTPResponseObject*>(calloc(1, sizeof(HTTPResponseObject)));
+    response->header.isa = g_http_response_class;
+    response->header.references = 1;
+    response->status = result.status;
+    return {make_data(result.body), response, nullptr};
+}
+
+extern "C" void rt_url_session_fetch_url(AsyncDataResult* out, URLBox** url) { *out = perform_request(*(*url)->text, "GET", "", ""); }
+extern "C" void rt_url_session_fetch_request(AsyncDataResult* out, URLRequestBox** request) {
+    *out = perform_request(*(*request)->url, *(*request)->method, *(*request)->headers, *(*request)->body);
+}
+
+extern "C" void rt_url_session_data_url();
+extern "C" void rt_url_session_data_request();
 
 // An async function pointer: a relative address, then the callee's context size.
 struct AsyncFunctionRecord {
@@ -672,7 +755,8 @@ struct AsyncFunctionRecord {
     uint32_t context_size;
 };
 
-AsyncFunctionRecord g_url_session_data_record;
+AsyncFunctionRecord g_url_session_url_record;
+AsyncFunctionRecord g_url_session_request_record;
 
 // A bridged collection only needs to stay alive until framework code uses it, so it wraps the Swift value.
 struct BridgedCollection {
@@ -697,8 +781,6 @@ SWIFTCC void* collection_bridge_to_objc(void* value) {
     wrapper->value = rt_swift_bridgeObjectRetain(value);
     return wrapper;
 }
-
-#define SWIFT_CTX __attribute__((swift_context))
 
 // Format styles are one tagged word here; the only option this app sets is compact notation.
 constexpr uint64_t kStyleWord = kLocaleImmediate;
@@ -814,23 +896,63 @@ SwiftString swift_string_from_utf8(const std::string& text) {
     return result;
 }
 
-// URLSession.data(for:delegate:): throws through x21, then returns via the context's resume word.
+// Async throwing functions return values in x0-x2 and the error in x20, through the context's resume word.
+#define URL_SESSION_ENTRY(name, fetch)         \
+    ".globl " #name "\n"                       \
+    #name ":\n"                                \
+    "  stp x29, x30, [sp, #-48]!\n"            \
+    "  mov x29, sp\n"                          \
+    "  mov x1, x0\n"                           \
+    "  add x0, sp, #16\n"                      \
+    "  bl " #fetch "\n"                        \
+    "  ldp x0, x1, [sp, #16]\n"                \
+    "  ldp x2, x20, [sp, #32]\n"               \
+    "  ldp x29, x30, [sp], #48\n"              \
+    "  ldr x3, [x22, #8]\n"                    \
+    "  br x3\n"
+
 __asm__(
     ".text\n"
-    ".globl rt_url_session_data\n"
-    "rt_url_session_data:\n"
-    "  stp x29, x30, [sp, #-16]!\n"
-    "  mov x29, sp\n"
-    "  bl rt_url_session_failure\n"
-    "  mov x21, x0\n"
-    "  ldp x29, x30, [sp], #16\n"
-    "  ldr x0, [x22, #8]\n"
-    "  br x0\n");
+    URL_SESSION_ENTRY(rt_url_session_data_url, rt_url_session_fetch_url)
+    URL_SESSION_ENTRY(rt_url_session_data_request, rt_url_session_fetch_request));
 
-std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
+constexpr size_t kDictionaryKeysOffset = 48;
+constexpr size_t kDictionaryValuesOffset = 56;
+constexpr size_t kDictionaryBitmapOffset = 64;
+constexpr size_t kDictionaryScaleOffset = 32;
+constexpr size_t kAnyHashableStride = 40;
+constexpr size_t kAnyStride = 32;
+constexpr uint64_t kCollectionPointerMask = 0x00fffffffffffff8ULL;
+constexpr size_t kBitsPerWord = 64;
+
+// The session's headers are a [AnyHashable: Any] of strings, read directly from its native storage.
+void session_set_headers(void*, const char*, void* wrapper) {
+    g_session_headers.clear();
+    if (wrapper == nullptr) return;
+    const auto bits = reinterpret_cast<uint64_t>(static_cast<BridgedCollection*>(wrapper)->value);
+    const auto* storage = reinterpret_cast<const char*>(bits & kCollectionPointerMask);
+    const int scale = static_cast<int8_t>(storage[kDictionaryScaleOffset]);
+    const char* keys;
+    const char* values;
+    memcpy(&keys, storage + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, storage + kDictionaryValuesOffset, sizeof values);
+    const char* bitmap = storage + kDictionaryBitmapOffset;
+    for (size_t bucket = 0; bucket < (1ULL << scale); ++bucket) {
+        uint64_t word;
+        memcpy(&word, bitmap + bucket / kBitsPerWord * sizeof word, sizeof word);
+        if (!((word >> (bucket % kBitsPerWord)) & 1)) continue;
+        const std::string name = swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(keys + bucket * kAnyHashableStride));
+        const std::string value = swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(values + bucket * kAnyStride));
+        g_session_headers += name + ": " + value + "\n";
+    }
+}
+
+SWIFTCC void url_error_code(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
+SWIFTCC void url_error_init(SWIFT_OUT uint64_t* out, const void*, void*) { *out = kStyleWord; }
+SWIFTCC void* url_error_ns_error(void*) { return make_error("The server's response could not be used.", 1); }
 
 // Puts an Objective-C object into an Any as its Swift value, as the runtime's bridging does.
-SWIFTCC void bridge_any_object_to_any(__attribute__((swift_indirect_result)) AnyValue* out, void* object) {
+SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     memset(out, 0, sizeof *out);
     const void* isa = object != nullptr ? static_cast<NativeObject*>(object)->isa : nullptr;
     if (isa == g_nsstring_class) {
@@ -849,13 +971,21 @@ SWIFTCC void bridge_any_object_to_any(__attribute__((swift_indirect_result)) Any
         }
     } else {
         out->buffer[0] = reinterpret_cast<uint64_t>(object);
-        out->type = type_system_symbol("$sBoWV") == nullptr ? nullptr : any_object_metadata();
+        out->type = any_object_metadata();
     }
 }
 
+std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
+
 void foundation_register_classes() {
-    g_url_session_data_record.context_size = kUrlSessionContextBytes;
-    g_url_session_data_record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(rt_url_session_data) - reinterpret_cast<intptr_t>(&g_url_session_data_record));
+    const auto make_record = [](AsyncFunctionRecord& record, void (*entry)()) {
+        record.context_size = kUrlSessionContextBytes;
+        record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(entry) - reinterpret_cast<intptr_t>(&record));
+    };
+    make_record(g_url_session_url_record, rt_url_session_data_url);
+    make_record(g_url_session_request_record, rt_url_session_data_request);
+    g_http_response_class = objc_native_class("NSHTTPURLResponse", free);
+    objc_register_method("-[NSHTTPURLResponse statusCode]", reinterpret_cast<const void*>(http_response_status));
     g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
     g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
@@ -880,7 +1010,7 @@ void foundation_register_classes() {
     objc_register_method("+[WKContentWorld pageWorld]", reinterpret_cast<const void*>(content_world_page));
     objc_register_method("+[NSURLSessionConfiguration defaultSessionConfiguration]", reinterpret_cast<const void*>(url_session_configuration_default));
     objc_register_method("-[NSURLSessionConfiguration setTimeoutIntervalForRequest:]", reinterpret_cast<const void*>(ignore_message_with_double));
-    objc_register_method("-[NSURLSessionConfiguration setHTTPAdditionalHeaders:]", reinterpret_cast<const void*>(ignore_message_with_word));
+    objc_register_method("-[NSURLSessionConfiguration setHTTPAdditionalHeaders:]", reinterpret_cast<const void*>(session_set_headers));
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
     objc_register_method("-[NSObject init]", reinterpret_cast<const void*>(return_self));
     objc_register_method("-[NSObject self]", reinterpret_cast<const void*>(return_self));
@@ -951,10 +1081,15 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation13__DataStorageC7_lengthSivg", reinterpret_cast<void*>(data_storage_length)},
         {"$s10Foundation13__DataStorageC7_offsetSivg", reinterpret_cast<void*>(data_storage_offset)},
         {"$ss5ErrorP10FoundationE20localizedDescriptionSSvg", reinterpret_cast<void*>(error_localized_description)},
-        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data)},
-        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data)},
-        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
-        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
+        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data_request)},
+        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data_url)},
+        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_request_record},
+        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_url_record},
+        {"$s10Foundation10URLRequestV3url11cachePolicy15timeoutIntervalAcA3URLV_So017NSURLRequestCacheE0VSdtcfC", reinterpret_cast<void*>(url_request_init)},
+        {"$s10Foundation10URLRequestV10httpMethodSSSgvs", reinterpret_cast<void*>(url_request_set_method)},
+        {"$s10Foundation10URLRequestV8setValue_18forHTTPHeaderFieldySSSg_SStF", reinterpret_cast<void*>(url_request_set_header)},
+        {"$s10Foundation10URLRequestV8httpBodyAA4DataVSgvs", reinterpret_cast<void*>(url_request_set_body)},
+        {"$s10Foundation10URLRequestV3urlAA3URLVSgvg", reinterpret_cast<void*>(url_request_get_url)},
         {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
@@ -969,6 +1104,10 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation4DateV11FormatStyleV04TimeD0V9shortenedAGvgZ", reinterpret_cast<void*>(date_style_word)},
         {"$s10Foundation4DateV9formatted4date4timeSSAC11FormatStyleV0bG0V_AH04TimeG0VtF", reinterpret_cast<void*>(date_formatted)},
         {"$ss018_bridgeAnyObjectToB0yypyXlSgF", reinterpret_cast<void*>(bridge_any_object_to_any)},
+        {"$s10Foundation8URLErrorV4CodeV17badServerResponseAEvgZ", reinterpret_cast<void*>(url_error_code)},
+        {"$s10Foundation8URLErrorV4CodeV19cannotParseResponseAEvgZ", reinterpret_cast<void*>(url_error_code)},
+        {"$s10Foundation21_BridgedStoredNSErrorPAAE_8userInfox4CodeQz_SDySSypGtcfC", reinterpret_cast<void*>(url_error_init)},
+        {"$s10Foundation8URLErrorV8_nsErrorSo7NSErrorCvg", reinterpret_cast<void*>(url_error_ns_error)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

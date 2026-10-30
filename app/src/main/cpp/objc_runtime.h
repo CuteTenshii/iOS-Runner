@@ -10,3 +10,6 @@ void objc_register_method(const char* description, const void* implementation);
 // Creates a class object for framework instances; its address goes in each instance's first word.
 // `destroyer` runs when an instance's last reference is released, and must free it.
 void* objc_native_class(const char* name, void (*destroyer)(void*));
+
+// True if an object's class is, or names the same framework class as, `cls`.
+bool objc_is_framework_class(const void* object, const void* cls);

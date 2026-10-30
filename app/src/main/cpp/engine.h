@@ -17,3 +17,12 @@ void engine_set_message_sink(void (*sink)(const char* kind, const char* payload)
 int engine_wait_for_action();
 void engine_post_action(int action);
 void engine_close_actions();
+
+struct HttpResult {
+    int status = -1;  // Negative when the request could not be made.
+    std::string body;
+};
+
+// Performs a blocking HTTP request through the host. Headers are "Name: value" lines.
+HttpResult engine_http(const std::string& url, const std::string& method, const std::string& headers, const std::string& body);
+void engine_set_http_handler(HttpResult (*handler)(const std::string&, const std::string&, const std::string&, const std::string&));

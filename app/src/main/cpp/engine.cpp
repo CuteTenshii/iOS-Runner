@@ -221,6 +221,16 @@ bool g_actions_closed = false;
 
 }  // namespace
 
+namespace {
+HttpResult (*g_http_handler)(const std::string&, const std::string&, const std::string&, const std::string&) = nullptr;
+}
+
+void engine_set_http_handler(HttpResult (*handler)(const std::string&, const std::string&, const std::string&, const std::string&)) { g_http_handler = handler; }
+
+HttpResult engine_http(const std::string& url, const std::string& method, const std::string& headers, const std::string& body) {
+    return g_http_handler != nullptr ? g_http_handler(url, method, headers, body) : HttpResult{};
+}
+
 void engine_set_message_sink(void (*sink)(const char*, const char*)) { g_message_sink = sink; }
 
 void engine_emit(const char* kind, const std::string& payload) {

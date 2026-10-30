@@ -29,6 +29,10 @@ import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.ByteBuffer
 import java.util.Locale
 
 /** Hosts the guest app in the isolated :engine process and draws the view tree it reports. */
@@ -609,6 +613,8 @@ class GuestActivity : Activity() {
     companion object {
         private const val EXTRA_APP = "app"
         private const val FALLBACK_LANGUAGE = "en"
+        private const val NETWORK_TIMEOUT_MS = 30_000
+        private const val HTTP_FIRST_ERROR = 400
         private const val SURFACE_ALPHA = 0x14000000
         private var current: GuestActivity? = null
 
@@ -626,6 +632,28 @@ class GuestActivity : Activity() {
         fun onEngineMessage(kind: String, payload: String) {
             val activity = current ?: return
             activity.mainThread.post { activity.receive(kind, payload) }
+        }
+
+        /** Called on the guest thread, which may block: its status comes first, as four bytes. */
+        @JvmStatic
+        fun httpFetch(url: String, method: String, headers: String, body: ByteArray): ByteArray? = try {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.requestMethod = method
+            connection.connectTimeout = NETWORK_TIMEOUT_MS
+            connection.readTimeout = NETWORK_TIMEOUT_MS
+            headers.lineSequence().filter { it.isNotBlank() }.forEach { line ->
+                connection.setRequestProperty(line.substringBefore(": "), line.substringAfter(": "))
+            }
+            if (body.isNotEmpty()) {
+                connection.doOutput = true
+                connection.outputStream.use { it.write(body) }
+            }
+            val status = connection.responseCode
+            val stream = if (status >= HTTP_FIRST_ERROR) connection.errorStream else connection.inputStream
+            val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
+            ByteBuffer.allocate(Int.SIZE_BYTES + bytes.size).putInt(status).put(bytes).array()
+        } catch (_: IOException) {
+            null
         }
 
         @JvmStatic

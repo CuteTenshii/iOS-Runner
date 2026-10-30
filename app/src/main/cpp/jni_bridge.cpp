@@ -11,6 +11,7 @@ namespace {
 JavaVM* g_vm = nullptr;
 jclass g_activity_class = nullptr;
 jmethodID g_on_message = nullptr;
+jmethodID g_http = nullptr;
 
 std::string to_string(JNIEnv* env, jstring value) {
     const char* chars = env->GetStringUTFChars(value, nullptr);
@@ -47,6 +48,39 @@ void send_message(const char* kind, const char* payload) {
     env->DeleteLocalRef(java_payload);
 }
 
+JNIEnv* guest_env() {
+    JNIEnv* env = nullptr;
+    if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) g_vm->AttachCurrentThread(&env, nullptr);
+    return env;
+}
+
+// The host returns the status as four big-endian bytes before the body, or null on failure.
+HttpResult perform_http(const std::string& url, const std::string& method, const std::string& headers, const std::string& body) {
+    JNIEnv* env = guest_env();
+    jstring java_url = to_java_string(env, url.c_str());
+    jstring java_method = to_java_string(env, method.c_str());
+    jstring java_headers = to_java_string(env, headers.c_str());
+    jbyteArray java_body = env->NewByteArray(static_cast<jsize>(body.size()));
+    env->SetByteArrayRegion(java_body, 0, static_cast<jsize>(body.size()), reinterpret_cast<const jbyte*>(body.data()));
+    auto result = static_cast<jbyteArray>(env->CallStaticObjectMethod(g_activity_class, g_http, java_url, java_method, java_headers, java_body));
+    env->DeleteLocalRef(java_url);
+    env->DeleteLocalRef(java_method);
+    env->DeleteLocalRef(java_headers);
+    env->DeleteLocalRef(java_body);
+    HttpResult out;
+    if (result == nullptr) return out;
+    const jsize length = env->GetArrayLength(result);
+    std::string bytes(static_cast<size_t>(length), '\0');
+    env->GetByteArrayRegion(result, 0, length, reinterpret_cast<jbyte*>(bytes.data()));
+    env->DeleteLocalRef(result);
+    constexpr size_t kStatusBytes = 4;
+    int status = 0;
+    for (size_t i = 0; i < kStatusBytes; ++i) status = (status << 8) | static_cast<uint8_t>(bytes[i]);
+    out.status = status;
+    out.body = bytes.substr(kStatusBytes);
+    return out;
+}
+
 }  // namespace
 
 extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeRun(
@@ -54,7 +88,9 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
     env->GetJavaVM(&g_vm);
     g_activity_class = static_cast<jclass>(env->NewGlobalRef(activity_class));
     g_on_message = env->GetStaticMethodID(activity_class, "onEngineMessage", "(Ljava/lang/String;Ljava/lang/String;)V");
+    g_http = env->GetStaticMethodID(activity_class, "httpFetch", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)[B");
     engine_set_message_sink(send_message);
+    engine_set_http_handler(perform_http);
     localization_set_language(to_string(env, language));
     return run_app_bundle(to_string(env, bundle_dir), to_string(env, executable), to_string(env, log_path));
 }

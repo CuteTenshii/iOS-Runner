@@ -224,3 +224,8 @@ void* objc_native_class(const char* name, void (*destroyer)(void*)) {
     native_classes()[cls] = name;
     return cls;
 }
+
+bool objc_is_framework_class(const void* object, const void* cls) {
+    const std::string name = framework_class_name(cls);
+    return !name.empty() && name == framework_class_name(*static_cast<void* const*>(object));
+}

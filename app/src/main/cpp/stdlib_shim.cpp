@@ -12,6 +12,7 @@
 #include "foundation_shim.h"
 #include "key_path.h"
 #include "macho.h"
+#include "objc_runtime.h"
 #include "swift_runtime.h"
 #include "type_system.h"
 
@@ -537,6 +538,7 @@ constexpr size_t kClassSuperOffset = 8;
 
 void* dynamic_cast_objc_class(void* object, void* target) {
     if (object == nullptr) return nullptr;
+    if (objc_is_framework_class(object, target)) return object;
     const char* cls = static_cast<const char*>(*static_cast<void**>(object));
     while (cls != nullptr) {
         if (cls == target) return object;
