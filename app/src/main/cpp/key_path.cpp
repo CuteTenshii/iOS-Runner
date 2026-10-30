@@ -79,9 +79,11 @@ size_t stored_offset(uint32_t payload, const char*& cursor) {
         return *global;
     }
     if (payload == kOffsetUnresolvedIndirect) {
-        const auto* slot = static_cast<const uint32_t* const*>(relative_target(cursor));
+        // Either the offset variable itself or a GOT-like pointer to it: an offset is never a valid address.
+        const auto* slot = static_cast<const uint64_t*>(relative_target(cursor));
         cursor += sizeof(uint32_t);
-        return **slot;
+        constexpr uint64_t kLargestFieldOffset = 1ULL << 20;
+        return *slot < kLargestFieldOffset ? *slot : *reinterpret_cast<const uint32_t*>(*slot);
     }
     return payload;
 }
