@@ -111,15 +111,18 @@ struct ExecutorReference {
 
 ExecutorReference main_actor_executor() { return {0, 0}; }
 
+constexpr uint8_t kTaskPriorityUserInitiated = 25;
+uint8_t task_priority_user_initiated() { return kTaskPriorityUserInitiated; }
+uint8_t task_priority_raw_value(uint8_t self) { return self; }
+
 }  // namespace
 
-// Every actor shares the one guest thread, so a hop only needs to continue at the resume function.
+// Every actor shares the one guest thread, so a hop just continues: the resume function is in x0, the context stays in x22.
 __asm__(
     ".text\n"
     ".globl rt_task_switch\n"
     "rt_task_switch:\n"
-    "  mov x22, x0\n"
-    "  br x1\n"
+    "  br x0\n"
     // Where a task's top-level function returns: back to rt_start_task's frame.
     ".globl rt_task_finished\n"
     "rt_task_finished:\n"
@@ -148,6 +151,14 @@ __asm__(
 
 extern "C" void rt_task_switch();
 
+void concurrency_start(const void* async_function, void* context) {
+    const auto* entry = static_cast<const AsyncFunctionPointer*>(async_function);
+    auto* async_context = static_cast<AsyncContextHeader*>(calloc(1, entry->context_size));
+    async_context->resume_parent = reinterpret_cast<void*>(rt_task_finished);
+    const char* base = reinterpret_cast<const char*>(&entry->function);
+    ready_tasks().push_back({base + entry->function, context, calloc(1, kMinimumResultBytes), async_context});
+}
+
 void concurrency_drain() {
     auto& queue = ready_tasks();
     while (!queue.empty()) {
@@ -165,6 +176,8 @@ void* concurrency_symbol(std::string_view name) {
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
         {"$sScM6sharedScMvgZ", reinterpret_cast<void*>(main_actor_shared)},
+        {"$sScP13userInitiatedScPvgZ", reinterpret_cast<void*>(task_priority_user_initiated)},
+        {"$sScP8rawValues5UInt8Vvg", reinterpret_cast<void*>(task_priority_raw_value)},
         {"swift_task_create", reinterpret_cast<void*>(task_create)},
         {"swift_task_switch", reinterpret_cast<void*>(rt_task_switch)},
         {"swift_task_alloc", reinterpret_cast<void*>(task_alloc)},

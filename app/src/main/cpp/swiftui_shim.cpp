@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <new>
+#include <set>
 #include <unordered_map>
 
 #include "concurrency_shim.h"
@@ -157,7 +158,7 @@ struct ChildValue {
 
 enum class NodeKind : uint32_t {
     TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
-    Sheet, Toolbar, OnChange,
+    Sheet, Toolbar, OnChange, Task,
 };
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
@@ -572,6 +573,19 @@ SWIFTCC void open_url_action_call(const void*, SWIFT_CONTEXT void*) { engine_log
 // A tab's identified view is the tab itself, kept as one reference to its node.
 SWIFTCC void tab_identified_view(SWIFT_OUT void** out, void*, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
 
+// `.task`: the action's async entry point and context; a view tree starts each task once.
+SWIFTCC void task_modifier_init(SWIFT_OUT ViewNode** out, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, const void* action, void* context) {
+    auto* node = new_node(NodeKind::Task);
+    node->action = action;
+    node->action_context = rt_swift_retain(context);
+    *out = node;
+}
+
+std::set<const void*>& started_tasks() {
+    static std::set<const void*> started;
+    return started;
+}
+
 // Optional doubles travel in integer registers, so these words hold raw bit patterns.
 struct FrameLayout {
     uint64_t width;
@@ -644,11 +658,13 @@ const char* node_kind_name(NodeKind kind) {
         case NodeKind::Sheet: return "Sheet";
         case NodeKind::Toolbar: return "Toolbar";
         case NodeKind::OnChange: return "OnChange";
+        case NodeKind::Task: return "Task";
     }
     return "?";
 }
 
 constexpr const char* kViewProtocolSymbol = "_$s7SwiftUI4ViewMp";
+constexpr const char* kRepresentableSymbol = "_$s7SwiftUI19UIViewRepresentableMp";
 constexpr size_t kConformanceTypeOffset = 4;
 constexpr size_t kConformanceFlagsOffset = 12;
 constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
@@ -670,15 +686,15 @@ const void* indirectable_pointer(const char* field) {
     return offset & 1 ? *reinterpret_cast<const void* const*>(target) : target;
 }
 
-// Finds an app type's View conformance in the app's own conformance list.
-const char* find_view_conformance(const void* type) {
+// Finds an app type's conformance to a framework protocol in the app's own conformance list.
+const char* find_conformance(const void* type, const char* protocol_symbol) {
     const void* descriptor = static_cast<void* const*>(type)[kMetadataDescriptorWord];
     const MachSection* section = g_view_conformances;
     if (section == nullptr) return nullptr;
     for (size_t i = 0; i + sizeof(int32_t) <= section->size; i += sizeof(int32_t)) {
         const auto* conformance = static_cast<const char*>(relative_pointer(reinterpret_cast<const char*>(section->address + i)));
         const char* protocol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(indirectable_pointer(conformance)));
-        if (protocol == nullptr || strcmp(protocol, kViewProtocolSymbol) != 0) continue;
+        if (protocol == nullptr || strcmp(protocol, protocol_symbol) != 0) continue;
         uint32_t flags;
         memcpy(&flags, conformance + kConformanceFlagsOffset, sizeof flags);
         const void* conforming;
@@ -696,23 +712,76 @@ const char* find_view_conformance(const void* type) {
     return nullptr;
 }
 
+const char* find_view_conformance(const void* type) { return find_conformance(type, kViewProtocolSymbol); }
+
+constexpr uint64_t kTupleKind = 0x301;
+constexpr const char* kTextSymbol = "_$s7SwiftUI4TextVMn";
+constexpr const char* kModifiedContentSymbol = "_$s7SwiftUI15ModifiedContentVMn";
+
+bool is_runtime_node_type(void* type) {
+    const auto* witnesses = witnesses_of(type);
+    return foreign_type_name(type) != nullptr && witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0;
+}
+
+// Only fields with their own metadata can be views: plain bytes in a modifier or stack have none worth walking.
+bool is_view_like(void* type) {
+    const uint64_t kind = *static_cast<uint64_t*>(type);
+    if (kind == kTupleKind) return true;
+    if (foreign_type_name(type) != nullptr) return true;
+    return find_view_conformance(type) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
+}
+
 void walk_view(void* value, void* type, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
         abort();
     }
-    if (const char* name = foreign_type_name(type)) {
+    const uint64_t kind_word = *static_cast<uint64_t*>(type);
+    const char* name = foreign_type_name(type);
+    if (name != nullptr || kind_word == kTupleKind) {
+        if (name != nullptr && strcmp(name, kTextSymbol) == 0) {
+            const auto* text = static_cast<const TextValue*>(value);
+            engine_log("VIEW: %*sText \"%s\"", depth * 2, "", swift_string_to_utf8({text->text_bits, text->text_object}).c_str());
+            return;
+        }
         const auto* witnesses = witnesses_of(type);
         const bool reference_node = witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0;
         if (reference_node) {
             auto* node = *static_cast<ViewNode**>(value);
-            if (node != nullptr && node->header.metadata == &kNodeMetadata.kind) {
+            if (node != nullptr && reinterpret_cast<uintptr_t>(node) >> 63 == 0 && node->header.metadata == &kNodeMetadata.kind) {
+                if (node->kind == NodeKind::Task) {
+                    if (started_tasks().insert(node->action).second) {
+                        concurrency_start(node->action, node->action_context);
+                        engine_log("VIEW: %*s.task started", depth * 2, "");
+                    }
+                    return;
+                }
                 engine_log("VIEW: %*s%s \"%s\" %s", depth * 2, "", node_kind_name(node->kind), node->title->c_str(), node->system_image->c_str());
                 for (const auto& child : *node->children) walk_view(child.value, child.type, depth + 1);
                 return;
             }
         }
-        engine_log("VIEW: %*s%s (no renderer yet)", depth * 2, "", name);
+        const auto fields = type_fields(type);
+        if (!fields.empty()) {
+            if (name != nullptr && strcmp(name, kModifiedContentSymbol) == 0) {
+                // A modifier's fields are configuration; only runtime nodes such as .task need visiting.
+                walk_view(static_cast<char*>(value) + fields[0].offset, fields[0].type, depth);
+                if (fields.size() > 1 && is_runtime_node_type(fields[1].type)) walk_view(static_cast<char*>(value) + fields[1].offset, fields[1].type, depth);
+                return;
+            }
+            for (const auto& field : fields) {
+                if (is_view_like(field.type)) walk_view(static_cast<char*>(value) + field.offset, field.type, depth + (kind_word == kTupleKind ? 0 : 1));
+            }
+            return;
+        }
+        // Modifiers without a runtime node are configuration, not missing views.
+        if (name != nullptr && strstr(name, "Modifier") == nullptr && strstr(name, "TraitKey") == nullptr) {
+            engine_log("VIEW: %*s%s (no renderer yet)", depth * 2, "", name);
+        }
+        return;
+    }
+    if (find_conformance(type, kRepresentableSymbol) != nullptr) {
+        engine_log("VIEW: %*snative view (UIViewRepresentable)", depth * 2, "");
         return;
     }
     const char* conformance = find_view_conformance(type);
@@ -856,6 +925,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI17EnvironmentValuesV7openURLAA13OpenURLActionVvs", reinterpret_cast<void*>(environment_set_ignored)},
         {"$s7SwiftUI13DismissActionV14callAsFunctionyyF", reinterpret_cast<void*>(dismiss_action_call)},
         {"$s7SwiftUI13OpenURLActionV14callAsFunctionyy10Foundation3URLVF", reinterpret_cast<void*>(open_url_action_call)},
+        {"$s7SwiftUI14_TaskModifier2V4name18executorPreference8priority6actionACSS_Sch_pSgScPyyYaYAcntcfC", reinterpret_cast<void*>(task_modifier_init)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

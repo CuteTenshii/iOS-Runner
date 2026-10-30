@@ -861,7 +861,8 @@ private:
 
     void tuple() {
         std::vector<Metadata*> elements;
-        while (!stack_.empty()) {
+        // A one-element pack has no marker, and must stop at the enclosing generic list.
+        while (!stack_.empty() && stack_.back().tag != Node::Tag::ListMarker) {
             Node top = pop();
             if (top.tag == Node::Tag::FirstElement) {
                 elements.insert(elements.begin(), as_type(pop()));
@@ -879,8 +880,11 @@ private:
     void opaque_type() {
         if (cursor_ >= end_) { fail("truncated Q operator"); return; }
         const char variety = *cursor_++;
-        // A pack is carried as its tuple, whose layout is all the runtime needs from it.
-        if (variety == 'P') return;
+        // A pack gathers its elements from the stack like a tuple, and is carried as one.
+        if (variety == 'P') {
+            tuple();
+            return;
+        }
         if (variety != 'o') {
             fail(std::string("unsupported Q operator ") + variety);
             return;
@@ -1423,4 +1427,14 @@ void* make_code_stub(void* entry, const void* data) {
 void* lazy_state_metadata(void* value_type) {
     const std::lock_guard guard(g_types_lock);
     return lazy_state_of(static_cast<Metadata*>(value_type));
+}
+
+std::vector<TypeField> type_fields(const void* metadata) {
+    std::vector<TypeField> result;
+    const std::lock_guard guard(g_types_lock);
+    if (g_foreign_names.find(metadata) == g_foreign_names.end() && static_cast<const Metadata*>(metadata)->kind != kKindTuple) return result;
+    const auto* layout = layout_of(metadata);
+    if (layout == nullptr) return result;
+    for (const auto& field : layout->fields) result.push_back({field.type, field.offset});
+    return result;
 }

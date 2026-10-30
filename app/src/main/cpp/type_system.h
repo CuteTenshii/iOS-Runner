@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <string_view>
+#include <vector>
 
 // Runtime type lookup: mangled-name resolution and metadata for standard library and framework types.
 void* type_system_symbol(std::string_view name);
@@ -19,3 +20,11 @@ void* make_code_stub(void* entry, const void* data);
 
 // Metadata of LazyState<T>, which the app stores inline: a Storage<T> followed by a location word.
 void* lazy_state_metadata(void* value_type);
+
+struct TypeField {
+    void* type;
+    size_t offset;
+};
+
+// Stored fields of a tuple or frozen framework type; empty for types this runtime keeps opaque.
+std::vector<TypeField> type_fields(const void* metadata);
