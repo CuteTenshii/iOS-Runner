@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -662,7 +663,8 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI30_EnvironmentKeyWritingModifierVMn", {kReference, kFirstArgument}},
         {"_$s7SwiftUI32_EnvironmentKeyTransformModifierVMn", {kReference, kClosure}},
         {"_$s7SwiftUI21_TraitWritingModifierVMn", {kFirstArgument}},
-        {"_$s7SwiftUI24_TagTraitWritingModifierVMn", {kFirstArgument}},
+        // The value, then a byte marking it as tagged.
+        {"_$s7SwiftUI24_TagTraitWritingModifierVMn", {kFirstArgument, {1, 1, -1, false}}},
         {"_$s7SwiftUI6HStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6VStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6ZStackVMn", {kAlignment, kFirstArgument}},
@@ -739,7 +741,15 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
     // Framework classes are heap objects, so their metadata needs a destroyer where value types keep a layout.
     const bool is_class = symbol.size() > 3 && symbol.compare(symbol.size() - 3, 3, "CMn") == 0;
     if (storage_destroyer_for(symbol.c_str()) != nullptr || is_class) {
-        auto* block = static_cast<void**>(calloc(4 + (arguments.empty() ? 1 : arguments.size()), sizeof(void*)));
+        // The guest reads a class's instance size at +0x30 before calling swift_allocObject on it.
+        constexpr size_t kClassSizeWord = 8;
+        auto* block = static_cast<void**>(calloc(std::max<size_t>(kClassSizeWord + 1, 4 + arguments.size() + 1), sizeof(void*)));
+        if (is_class && arguments.size() <= kClassSizeWord - 4) {
+            const uint32_t instance_size = 2 * sizeof(void*);
+            const uint16_t alignment_mask = sizeof(void*) - 1;
+            memcpy(block + kClassSizeWord, &instance_size, sizeof instance_size);
+            memcpy(reinterpret_cast<char*>(block + kClassSizeWord) + sizeof instance_size, &alignment_mask, sizeof alignment_mask);
+        }
         auto destroyer = storage_destroyer_for(symbol.c_str());
         block[0] = reinterpret_cast<void*>(destroyer != nullptr ? destroyer : free);
         block[2] = nullptr;

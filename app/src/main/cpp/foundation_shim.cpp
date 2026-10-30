@@ -1368,6 +1368,16 @@ SWIFTCC DataValue data_bridge_from_objc(NSDataObject* object) {
 
 constexpr int64_t kCocoaPropertyListReadCorrupt = 3840;
 
+void* regular_expression_escaped_pattern(void*, const char*, void* text) {
+    static const std::string kSpecial = "\\*?+[(){}^$|./";
+    std::string out;
+    for (const char c : nsstring_text(text)) {
+        if (kSpecial.find(c) != std::string::npos) out += '\\';
+        out += c;
+    }
+    return new_nsstring(out);
+}
+
 void* json_object_with_data(void*, const char*, NSDataObject* data, uint64_t, void** error) {
     auto parsed = std::make_unique<Json>();
     if (data == nullptr || !json_parse(*data->bytes, *parsed)) {
@@ -1762,6 +1772,7 @@ void foundation_register_classes() {
     objc_register_method("+[WKContentWorld pageWorld]", reinterpret_cast<const void*>(content_world_page));
     g_nsdata_class = objc_native_class("NSData", destroy_nsdata);
     g_json_value_class = objc_native_class("__NSJSONValue", destroy_json_value);
+    objc_register_method("+[NSRegularExpression escapedPatternForString:]", reinterpret_cast<const void*>(regular_expression_escaped_pattern));
     objc_register_method("+[NSJSONSerialization JSONObjectWithData:options:error:]", reinterpret_cast<const void*>(json_object_with_data));
     objc_register_method("+[NSJSONSerialization dataWithJSONObject:options:error:]", reinterpret_cast<const void*>(json_data_with_object));
     objc_register_method("+[NSURLSessionConfiguration defaultSessionConfiguration]", reinterpret_cast<const void*>(url_session_configuration_default));

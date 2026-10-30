@@ -21,4 +21,9 @@ rm -rf $BUNDLE && mkdir -p $BUNDLE
 unzip -q -o "$1" 'Payload/*' -d $BUNDLE
 APP=$(print -l $BUNDLE/Payload/*.app(/) | head -1)
 EXE=${${APP:t}%.app}
+# IOSRUNNER_SEED_ACCOUNTS: a file placed as the app's saved list, to test without the network.
+if [[ -n $IOSRUNNER_SEED_ACCOUNTS ]]; then
+    mkdir -p "$APP/.Library/Application Support"
+    cp "$IOSRUNNER_SEED_ACCOUNTS" "$APP/.Library/Application Support/accounts.json"
+fi
 exec timeout ${IOSRUNNER_TIMEOUT:-30} qemu-aarch64 $OUT/iosrunner-cli "$APP" "$EXE"

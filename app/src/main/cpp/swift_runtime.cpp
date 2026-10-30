@@ -65,6 +65,8 @@ void release_object(void* raw) {
 }
 
 void* bridge_pointer(void* raw) {
+    // Bit 63 marks immortal strings and immediates, whose low bits are not an address to count.
+    if (reinterpret_cast<uint64_t>(raw) >> 63) return nullptr;
     const auto bits = reinterpret_cast<uint64_t>(raw);
     if (bits & kBridgeImmediateBit) return nullptr;
     return reinterpret_cast<void*>(bits & kBridgePointerMask);

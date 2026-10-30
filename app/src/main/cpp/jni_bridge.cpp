@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 #include <jni.h>
 
 #include <cstring>
@@ -63,6 +64,33 @@ void send_message(const char* kind, const char* payload) {
     env->DeleteLocalRef(java_payload);
 }
 
+// liblog's structure, from API 30; a fatal VM error otherwise reaches only logcat, which some phones turn off.
+struct LogMessage {
+    size_t struct_size;
+    int32_t buffer_id;
+    int32_t priority;
+    const char* tag;
+    const char* file;
+    uint32_t line;
+    const char* message;
+};
+
+using LogHandler = void (*)(const LogMessage*);
+LogHandler g_default_logger = nullptr;
+
+constexpr int32_t kLogPriorityError = 6;
+
+void copy_errors_to_engine_log(const LogMessage* message) {
+    if (message->priority >= kLogPriorityError) engine_log("VM: %s: %s", message->tag != nullptr ? message->tag : "", message->message);
+    if (g_default_logger != nullptr) g_default_logger(message);
+}
+
+void capture_vm_errors() {
+    const auto set_logger = reinterpret_cast<void (*)(LogHandler)>(dlsym(RTLD_DEFAULT, "__android_log_set_logger"));
+    g_default_logger = reinterpret_cast<LogHandler>(dlsym(RTLD_DEFAULT, "__android_log_logd_logger"));
+    if (set_logger != nullptr) set_logger(copy_errors_to_engine_log);
+}
+
 JNIEnv* guest_env() {
     JNIEnv* env = nullptr;
     if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) g_vm->AttachCurrentThread(&env, nullptr);
@@ -115,6 +143,7 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
     g_activity_class = static_cast<jclass>(env->NewGlobalRef(activity_class));
     g_on_message = env->GetStaticMethodID(activity_class, "onEngineMessage", "(Ljava/lang/String;Ljava/lang/String;)V");
     g_http = env->GetStaticMethodID(activity_class, "httpFetch", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)[B");
+    capture_vm_errors();
     engine_set_message_sink(send_message);
     engine_set_http_handler(perform_http);
     g_cookies = env->GetStaticMethodID(activity_class, "readCookies", "()Ljava/lang/String;");

@@ -676,6 +676,47 @@ void swift_will_throw(void*) {}
 
 }  // namespace
 
+// The case name reflection records hold for a value of an app enum, or empty for anything else.
+std::string enum_case_name(const void* value, const void* type) {
+    constexpr uint64_t kKindEnum = 0x201;
+    constexpr size_t kGetEnumTagOffset = 0x58;
+    constexpr size_t kDescriptorFieldsOffset = 16;
+    constexpr size_t kFieldHeaderBytes = 16;
+    constexpr size_t kFieldCountOffset = 12;
+    constexpr size_t kFieldRecordBytes = 12;
+    constexpr size_t kRecordNameOffset = 8;
+    const auto* words = static_cast<void* const*>(type);
+    if (reinterpret_cast<uint64_t>(words[0]) != kKindEnum) return {};
+    const auto* descriptor = static_cast<const char*>(words[1]);
+    const auto relative = [](const char* at) {
+        int32_t offset;
+        memcpy(&offset, at, sizeof offset);
+        return offset == 0 ? nullptr : at + offset;
+    };
+    const char* fields = relative(descriptor + kDescriptorFieldsOffset);
+    if (fields == nullptr) return {};
+    uint32_t count;
+    memcpy(&count, fields + kFieldCountOffset, sizeof count);
+    using GetTag = uint32_t (*)(const void*, const void*);
+    GetTag get_tag;
+    memcpy(&get_tag, reinterpret_cast<const char*>(witnesses_of(const_cast<void*>(type))) + kGetEnumTagOffset, sizeof get_tag);
+    const uint32_t tag = get_tag(value, type);
+    if (tag >= count) return {};
+    const char* name = relative(fields + kFieldHeaderBytes + tag * kFieldRecordBytes + kRecordNameOffset);
+    return name != nullptr ? name : "";
+}
+
+// _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
+SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
+    std::string text;
+    if (type == type_system_symbol("$sSSN")) text = swift_string_to_utf8(*static_cast<const SwiftString*>(value));
+    else if (type == type_system_symbol("$sSiN")) text = std::to_string(*static_cast<const int64_t*>(value));
+    else if (type == type_system_symbol("$sSbN")) text = *static_cast<const uint8_t*>(value) != 0 ? "true" : "false";
+    else text = enum_case_name(value, type);
+    if (text.empty() && type != type_system_symbol("$sSSN")) text = "(value)";
+    *stream = swift_string_from_utf8(swift_string_to_utf8(*stream) + text);
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -700,6 +741,7 @@ void* stdlib_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
         {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
         {"$ss11_StringGutsV4growyySiF", reinterpret_cast<void*>(string_guts_grow)},
