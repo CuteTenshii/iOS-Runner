@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">iOSRunner</string>
+    <string name="import_ipa">Import .ipa</string>
+    <string name="importing">Importing…</string>
+    <string name="empty_library">No apps yet. Import an .ipa file to add one.</string>
+    <string name="import_failed">Could not import this file: %1$s</string>
+    <string name="open_app">Run</string>
+    <string name="remove_app">Remove</string>
+    <string name="app_subtitle">Version %1$s, needs iOS %2$s</string>
+    <string name="status_starting">Starting the app…</string>
+    <string name="status_running">Running</string>
+    <string name="status_stopped_missing">Stopped: the app needs something the runner does not implement yet.</string>
+    <string name="status_crashed">The app crashed. The log below shows where.</string>
+    <string name="status_load_failed">This app could not be loaded.</string>
+    <string name="status_exited">The app has exited.</string>
+    <string name="run_again">Run again</string>
+    <string name="stop">Stop</string>
+</resources>
