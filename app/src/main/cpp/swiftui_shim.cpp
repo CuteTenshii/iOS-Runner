@@ -640,8 +640,8 @@ struct UnitPointValue {
 
 SWIFTCC UnitPointValue unit_point_center() { return {0.5, 0.5}; }
 
-SWIFTCC uint64_t font_bold(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontBold; }
-SWIFTCC uint64_t font_monospaced(__attribute__((swift_context)) void* font) { return reinterpret_cast<uint64_t>(font) | kFontMonospaced; }
+SWIFTCC uint64_t font_bold(uint64_t font) { return font | kFontBold; }
+SWIFTCC uint64_t font_monospaced(uint64_t font) { return font | kFontMonospaced; }
 
 std::atomic<bool> g_tree_dirty{true};
 

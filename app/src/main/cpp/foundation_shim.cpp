@@ -35,6 +35,12 @@
 
 uint64_t* empty_array_singleton();
 
+// Defaults values that are defined after the types they wrap.
+void* strings_object_from_json(const std::string& json);
+bool strings_json_from_object(void* object, std::string& json);
+bool date_from_object(void* object, double& seconds);
+void* new_date_object(double seconds);
+
 namespace {
 
 constexpr uint64_t kSmallStringBit = 1ULL << 61;
@@ -154,6 +160,13 @@ void* defaults_standard(void*, const char*) {
 constexpr char kStoredString = 's';
 constexpr char kStoredBool = 'b';
 constexpr char kStoredInteger = 'i';
+constexpr char kStoredStrings = 'a';
+constexpr char kStoredDate = 'd';
+
+// Defined with the bridged collections further down.
+bool bridged_collection_value(void* object, void*& value);
+
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
 
 struct NSNumberObject {
     NativeObject header;
@@ -189,12 +202,16 @@ void* defaults_object_for_key(void*, const char*, void* key) {
     switch ((*stored)[0]) {
         case kStoredBool: return new_nsnumber(body == "1", true);
         case kStoredInteger: return new_nsnumber(strtoll(body.c_str(), nullptr, 10), false);
+        case kStoredStrings: return strings_object_from_json(body);
+        case kStoredDate: return new_date_object(strtod(body.c_str(), nullptr));
         default: return new_nsstring(body);
     }
 }
 
-// Arrays are not persisted yet, so a missing value is the only answer this can give truthfully.
-void* defaults_string_array_for_key(void*, const char*, void*) { return nullptr; }
+void* defaults_string_array_for_key(void*, const char*, void* key) {
+    const auto* stored = stored_value(key);
+    return stored == nullptr || (*stored)[0] != kStoredStrings ? nullptr : strings_object_from_json(stored->substr(1));
+}
 
 bool defaults_bool_for_key(void*, const char*, void* key) {
     const auto* stored = stored_value(key);
@@ -226,8 +243,15 @@ void defaults_set_object(void*, const char*, void* value, void* key) {
         const auto* number = static_cast<NSNumberObject*>(value);
         defaults().values[nsstring_text(key)] = (number->is_bool ? kStoredBool : kStoredInteger) + std::to_string(number->value);
     } else {
-        // Collections are not persisted yet; the app simply finds no saved value next launch.
-        engine_log("DEFAULTS: not saving a collection for %s", nsstring_text(key).c_str());
+        std::string json;
+        double seconds;
+        if (strings_json_from_object(value, json)) {
+            defaults().values[nsstring_text(key)] = kStoredStrings + json;
+        } else if (date_from_object(value, seconds)) {
+            defaults().values[nsstring_text(key)] = kStoredDate + std::to_string(seconds);
+        } else {
+            engine_log("DEFAULTS: not saving a value of an unsupported type for %s", nsstring_text(key).c_str());
+        }
     }
     defaults().save();
 }
@@ -314,6 +338,7 @@ constexpr size_t kArrayCountOffset = 16;
 constexpr size_t kArrayCapacityOffset = 24;
 
 SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
+    if (void* value; bridged_collection_value(object, value)) return rt_swift_bridgeObjectRetain(value);
     auto* array = static_cast<NSArrayObject*>(object);
     if (array == nullptr || array->items->empty()) return empty_array_singleton();
     const size_t count = array->items->size();
@@ -850,6 +875,12 @@ SWIFTCC void* collection_bridge_to_objc(void* value) {
     return wrapper;
 }
 
+bool bridged_collection_value(void* object, void*& value) {
+    if (object == nullptr || static_cast<NativeObject*>(object)->isa != g_bridged_collection_class) return false;
+    value = static_cast<BridgedCollection*>(object)->value;
+    return true;
+}
+
 // Format styles are one tagged word here; the only option this app sets is compact notation.
 constexpr uint64_t kStyleWord = kLocaleImmediate;
 constexpr uint64_t kCompactNotationFlag = 1;
@@ -1368,6 +1399,75 @@ SWIFTCC DataValue data_bridge_from_objc(NSDataObject* object) {
 
 constexpr int64_t kCocoaPropertyListReadCorrupt = 3840;
 
+void* strings_object_from_json(const std::string& json) {
+    Json parsed;
+    json_parse(json, parsed);
+    void* element = type_system_symbol("$sSSN");
+    char* elements;
+    void* storage = make_array_storage(element, parsed.items.size(), &elements);
+    for (size_t i = 0; i < parsed.items.size(); ++i) reinterpret_cast<SwiftString*>(elements)[i] = swift_string_from_utf8(parsed.items[i].text);
+    void* object = collection_bridge_to_objc(storage);
+    rt_swift_bridgeObjectRelease(storage);
+    return object;
+}
+
+// Every collection the app stores in defaults is a [String].
+bool strings_json_from_object(void* object, std::string& json) {
+    if (static_cast<NativeObject*>(object)->isa != g_bridged_collection_class) return false;
+    json = value_to_json(&static_cast<BridgedCollection*>(object)->value, resolve_mangled_type("SaySSG", nullptr));
+    return true;
+}
+
+struct NSDateObject {
+    NativeObject header;
+    double seconds;
+};
+
+void* g_nsdate_class = nullptr;
+
+void* new_date_object(double seconds) {
+    auto* object = static_cast<NSDateObject*>(calloc(1, sizeof(NSDateObject)));
+    object->header.isa = g_nsdate_class;
+    object->header.references = 1;
+    object->seconds = seconds;
+    return object;
+}
+
+bool date_from_object(void* object, double& seconds) {
+    if (static_cast<NativeObject*>(object)->isa != g_nsdate_class) return false;
+    seconds = static_cast<NSDateObject*>(object)->seconds;
+    return true;
+}
+
+SWIFTCC void* date_bridge_to_objc(double seconds) { return new_date_object(seconds); }
+
+// Only the keys of dictionaryRepresentation are read, so stored values all surface as their text.
+void* defaults_dictionary_representation(void*, const char*) {
+    auto* value = new Json;
+    value->kind = Json::Kind::Object;
+    for (const auto& [key, stored] : defaults().values) {
+        Json member;
+        member.kind = Json::Kind::String;
+        member.text = stored.empty() ? "" : stored.substr(1);
+        value->members.emplace_back(key, std::move(member));
+    }
+    auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
+    object->header.isa = g_json_value_class;
+    object->header.references = 1;
+    object->value = value;
+    return object;
+}
+
+SWIFTCC void* dictionary_bridge_from_objc(void* object) {
+    if (void* value; bridged_collection_value(object, value)) return rt_swift_bridgeObjectRetain(value);
+    if (object != nullptr && static_cast<NativeObject*>(object)->isa == g_json_value_class) {
+        AnyValue any;
+        json_to_any(*static_cast<JSONValueObject*>(object)->value, &any);
+        return reinterpret_cast<void*>(any.buffer[0]);
+    }
+    return make_string_dictionary(any_type(), {});
+}
+
 void* regular_expression_escaped_pattern(void*, const char*, void* text) {
     static const std::string kSpecial = "\\*?+[(){}^$|./";
     std::string out;
@@ -1670,6 +1770,10 @@ SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     const void* isa = object != nullptr ? static_cast<NativeObject*>(object)->isa : nullptr;
     if (isa == g_json_value_class) {
         json_to_any(*static_cast<JSONValueObject*>(object)->value, out);
+    } else if (isa == g_nsdate_class) {
+        const double seconds = static_cast<NSDateObject*>(object)->seconds;
+        memcpy(out->buffer, &seconds, sizeof seconds);
+        out->type = resolve_mangled_type("10Foundation4DateV", nullptr);
     } else if (isa == g_nsstring_class) {
         const SwiftString text = swift_string_from_utf8(nsstring_text(object));
         memcpy(out->buffer, &text, sizeof text);
@@ -1771,6 +1875,8 @@ void foundation_register_classes() {
     objc_register_method("+[WKWebsiteDataStore defaultDataStore]", reinterpret_cast<const void*>(web_data_store_default));
     objc_register_method("+[WKContentWorld pageWorld]", reinterpret_cast<const void*>(content_world_page));
     g_nsdata_class = objc_native_class("NSData", destroy_nsdata);
+    g_nsdate_class = objc_native_class("NSDate", free);
+    objc_register_method("-[NSUserDefaults dictionaryRepresentation]", reinterpret_cast<const void*>(defaults_dictionary_representation));
     g_json_value_class = objc_native_class("__NSJSONValue", destroy_json_value);
     objc_register_method("+[NSRegularExpression escapedPatternForString:]", reinterpret_cast<const void*>(regular_expression_escaped_pattern));
     objc_register_method("+[NSJSONSerialization JSONObjectWithData:options:error:]", reinterpret_cast<const void*>(json_object_with_data));
@@ -1861,6 +1967,8 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation4UUIDVACycfC", reinterpret_cast<void*>(uuid_init)},
         {"$s10Foundation4UUIDV10uuidStringSSvg", reinterpret_cast<void*>(uuid_string)},
         {"swift_stdlib_random", reinterpret_cast<void*>(stdlib_random)},
+        {"$s10Foundation4DateV19_bridgeToObjectiveCSo6NSDateCyF", reinterpret_cast<void*>(date_bridge_to_objc)},
+        {"$sSD10FoundationE36_unconditionallyBridgeFromObjectiveCySDyxq_GSo12NSDictionaryCSgFZ", reinterpret_cast<void*>(dictionary_bridge_from_objc)},
         {"$s10Foundation13__DataStorageCMa", reinterpret_cast<void*>(data_storage_access)},
         {"$s10Foundation13__DataStorageC5bytes6lengthACSVSg_Sitcfc", reinterpret_cast<void*>(data_storage_init_bytes)},
         {"$s10Foundation13__DataStorageC6lengthACSi_tcfc", reinterpret_cast<void*>(data_storage_init_length)},

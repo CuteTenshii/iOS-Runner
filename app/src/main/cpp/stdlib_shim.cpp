@@ -717,6 +717,21 @@ SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) 
     *stream = swift_string_from_utf8(swift_string_to_utf8(*stream) + text);
 }
 
+// Equatable's dispatch thunk; framework types only reach it as String or URL.
+SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, void* table) {
+    if (type == type_system_symbol("$sSSN")) return swift_string_to_utf8(*static_cast<const SwiftString*>(left)) == swift_string_to_utf8(*static_cast<const SwiftString*>(right));
+    if (const char* name = foreign_type_name(type); name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) {
+        return foundation_url_text(*static_cast<void* const*>(left)) == foundation_url_text(*static_cast<void* const*>(right));
+    }
+    using Equal = SWIFTCC bool (*)(const void*, const void*, void*, void*, SWIFT_SELF void*);
+    const auto equal = reinterpret_cast<Equal>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSQ2eeoiySbx_xtFZTq")));
+    if (equal == nullptr) {
+        engine_log("STOP: == on a type with no witness");
+        abort();
+    }
+    return equal(left, right, type, table, type);
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -741,6 +756,7 @@ void* stdlib_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sSQ2eeoiySbx_xtFZTj", reinterpret_cast<void*>(equatable_equal)},
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
         {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
