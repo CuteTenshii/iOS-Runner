@@ -11,7 +11,7 @@ mkdir -p $OUT
 SRC=$ROOT/app/src/main/cpp
 SOURCES=($SRC/*.cpp)
 SOURCES=(${SOURCES:#*/jni_bridge.cpp})
-$CXX -std=c++20 -O1 -g -static -DIOSRUNNER_HOST -Wall -Wextra -o $OUT/iosrunner-cli $SOURCES
+$CXX -std=c++20 -O1 -g -static -DIOSRUNNER_HOST ${IOSRUNNER_TRACE_HEAP:+-DIOSRUNNER_TRACE_HEAP} -Wall -Wextra -o $OUT/iosrunner-cli $SOURCES
 BUNDLE=$OUT/bundle
 rm -rf $BUNDLE && mkdir -p $BUNDLE
 unzip -q -o "$1" 'Payload/*' -d $BUNDLE

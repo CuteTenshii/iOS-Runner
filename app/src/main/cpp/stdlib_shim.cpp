@@ -342,7 +342,13 @@ SWIFTCC SwiftString string_subscript_character(uint64_t index, SwiftString self)
     return swift_string_from_utf8(text.substr(start, next_scalar(text, start) - start));
 }
 
-SWIFTCC SubstringValue string_subscript_range(uint64_t start, uint64_t end, SwiftString self) { return {start, end, self}; }
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
+
+// `self` is borrowed but the Substring owns its guts, so it takes its own reference.
+SWIFTCC SubstringValue string_subscript_range(uint64_t start, uint64_t end, SwiftString self) {
+    rt_swift_bridgeObjectRetain(reinterpret_cast<void*>(self.object));
+    return {start, end, self};
+}
 
 SWIFTCC SwiftString string_from_substring(uint64_t start, uint64_t end, SwiftString guts) {
     const std::string text = swift_string_to_utf8(guts);
@@ -434,6 +440,17 @@ SWIFTCC int64_t any_hashable_raw_hash(int64_t seed, SWIFT_SELF const AnyHashable
 
 SWIFTCC bool any_hashable_equal(const AnyHashableValue* left, const AnyHashableValue* right) {
     return swift_string_to_utf8(any_hashable_string(left)) == swift_string_to_utf8(any_hashable_string(right));
+}
+
+// The run length of the standard library's merge sort, computed as it does.
+SWIFTCC int64_t minimum_merge_run_length(int64_t count) {
+    constexpr int kBitsToUse = 6;
+    constexpr int kWordBits = 64;
+    if (count < (1 << kBitsToUse)) return count;
+    const int offset = (kWordBits - kBitsToUse) - __builtin_clzll(static_cast<uint64_t>(count));
+    const int64_t high = count >> offset;
+    const int64_t low_mask = (1LL << offset) - 1;
+    return (count & low_mask) == 0 ? high : high + 1;
 }
 
 void* get_object_type(void* object) { return *static_cast<void**>(object); }
@@ -604,6 +621,7 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss11AnyHashableVyABxcSHRzlufC", reinterpret_cast<void*>(any_hashable_init)},
         {"$ss11AnyHashableV13_rawHashValue4seedS2i_tF", reinterpret_cast<void*>(any_hashable_raw_hash)},
         {"$ss11AnyHashableV2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(any_hashable_equal)},
+        {"$ss22_minimumMergeRunLengthyS2iF", reinterpret_cast<void*>(minimum_merge_run_length)},
         {"swift_getObjectType", reinterpret_cast<void*>(get_object_type)},
         {"swift_dynamicCastObjCClass", reinterpret_cast<void*>(dynamic_cast_objc_class)},
         {"swift_arrayDestroy", reinterpret_cast<void*>(array_destroy)},

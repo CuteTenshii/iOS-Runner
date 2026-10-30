@@ -590,6 +590,10 @@ enum ConstantId : uint64_t {
 template <uint64_t Value>
 SWIFTCC uint64_t constant_getter() { return kImmediate | Value; }
 
+// Types reached through a metadata accessor are returned indirectly.
+template <uint64_t Value>
+SWIFTCC void indirect_constant_getter(SWIFT_OUT uint64_t* out) { *out = kImmediate | Value; }
+
 struct AlignmentPair {
     uint64_t horizontal;
     uint64_t vertical;
@@ -1057,8 +1061,8 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI22HierarchicalShapeStyleV9secondaryACvgZ", reinterpret_cast<void*>(constant_getter<kStyleSecondary>)},
         {"$s7SwiftUI22HierarchicalShapeStyleV10quaternaryACvgZ", reinterpret_cast<void*>(constant_getter<kStyleQuaternary>)},
         {"$s7SwiftUI9AnimationV7defaultACvgZ", reinterpret_cast<void*>(constant_getter<kAnimationDefault>)},
-        {"$s7SwiftUI10ButtonRoleV11destructiveACvgZ", reinterpret_cast<void*>(constant_getter<kButtonRoleDestructive>)},
-        {"$s7SwiftUI20ToolbarItemPlacementV14topBarTrailingACvgZ", reinterpret_cast<void*>(constant_getter<kToolbarTopBarTrailing>)},
+        {"$s7SwiftUI10ButtonRoleV11destructiveACvgZ", reinterpret_cast<void*>(indirect_constant_getter<kButtonRoleDestructive>)},
+        {"$s7SwiftUI20ToolbarItemPlacementV14topBarTrailingACvgZ", reinterpret_cast<void*>(indirect_constant_getter<kToolbarTopBarTrailing>)},
         {"$s7SwiftUI19HorizontalAlignmentV7leadingACvgZ", reinterpret_cast<void*>(constant_getter<kAlignLeading>)},
         {"$s7SwiftUI17VerticalAlignmentV6centerACvgZ", reinterpret_cast<void*>(constant_getter<kAlignCenter>)},
         {"$s7SwiftUI9AlignmentV6centerACvgZ", reinterpret_cast<void*>(alignment_getter<kAlignCenter, kAlignCenter>)},

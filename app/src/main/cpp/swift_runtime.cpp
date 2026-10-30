@@ -57,6 +57,9 @@ void release_object(void* raw) {
     if (object->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         // Class and box metadata keep their destroyer one word before the value witnesses.
         auto** metadata = static_cast<void**>(object->metadata);
+#ifdef IOSRUNNER_TRACE_HEAP
+        engine_log("HEAP destroy %p metadata=%p destroyer=%p", static_cast<void*>(object), static_cast<void*>(metadata), metadata[-2]);
+#endif
         rt_call_destroyer(metadata[-2], object);
     }
 }
@@ -170,8 +173,19 @@ void* rt_swift_initStackObject(void* metadata, void* raw) {
     return object;
 }
 
-void rt_swift_deallocObject(void* object, size_t, size_t) { free(object); }
-void rt_swift_deallocClassInstance(void* object, size_t, size_t) { free(object); }
+void rt_swift_deallocObject(void* object, size_t, size_t) {
+#ifdef IOSRUNNER_TRACE_HEAP
+    engine_log("HEAP deallocObject %p", object);
+#endif
+    free(object);
+}
+
+void rt_swift_deallocClassInstance(void* object, size_t, size_t) {
+#ifdef IOSRUNNER_TRACE_HEAP
+    engine_log("HEAP deallocClassInstance %p", object);
+#endif
+    free(object);
+}
 void* rt_swift_setDeallocating(void* object) { return object; }
 
 void* rt_swift_retain_n(void* raw, uint32_t count) {
