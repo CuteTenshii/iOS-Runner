@@ -95,7 +95,7 @@ void continuation_resume(char* task) {
     free(task);
     if (context->state == kContinuationAwaited) {
         // The resume function loads its own frame through the context's parent word.
-        ready_tasks().push_back({context->resume, nullptr, nullptr, context, true});
+        ready_tasks().push_back({context->resume, context->error, nullptr, context, true});
     } else {
         context->state = kContinuationResumed;
     }
@@ -210,7 +210,7 @@ __asm__(
     ".globl rt_task_finished\n"
     "rt_task_finished:\n"
     "  ret\n"
-    // Awaiting a continuation not resumed yet returns to whoever is running this task.
+    // Awaiting a continuation not resumed yet returns to whoever is running this task; a resume passes its error in x20.
     ".globl rt_continuation_await\n"
     "rt_continuation_await:\n"
     "  ldr x9, [x0, #16]\n"
@@ -221,6 +221,7 @@ __asm__(
     "  ret\n"
     "1:\n"
     "  mov x22, x0\n"
+    "  ldr x20, [x0, #24]\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
     // x22 is the finished task's own context, whose parent word holds the state; a thrown error arrives in x21.
