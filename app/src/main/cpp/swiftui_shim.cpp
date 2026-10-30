@@ -12,6 +12,7 @@
 #include "concurrency_shim.h"
 #include "engine.h"
 #include "foundation_shim.h"
+#include "key_path.h"
 #include "localization.h"
 #include "macho.h"
 #include "swift_runtime.h"
@@ -19,6 +20,7 @@
 
 #define SWIFTCC __attribute__((swiftcall))
 #define SWIFT_OUT __attribute__((swift_indirect_result))
+#define SWIFT_CONTEXT __attribute__((swift_context))
 
 namespace {
 
@@ -97,6 +99,47 @@ SWIFTCC void window_group_init(SWIFT_OUT void** out, uint64_t, uint64_t, uint64_
 SWIFTCC void scene_build_block(SWIFT_OUT void* out, void* value, void* type, void*) {
     witnesses_of(type)->initialize_with_copy(out, value, type);
 }
+
+SWIFTCC void registrar_mark_dirty();
+
+enum class BindingKind : uint32_t { State, Closures, ObjectKeyPath, BindingKeyPath };
+
+// A two-way reference to a value, in whichever of SwiftUI's forms the app created it.
+struct BindingNode {
+    HeapHeader header;
+    BindingKind kind;
+    void* source;  // The state box, parent binding or observed object, retained.
+    void* key_path;
+    const void* getter;
+    void* getter_context;
+    const void* setter;
+    void* setter_context;
+};
+
+extern "C" void* rt_swift_retain(void*);
+extern "C" void rt_swift_release(void*);
+
+void destroy_binding(HeapHeader* object) {
+    auto* binding = reinterpret_cast<BindingNode*>(object);
+    rt_swift_release(binding->source);
+    rt_swift_release(binding->key_path);
+    rt_swift_release(binding->getter_context);
+    rt_swift_release(binding->setter_context);
+    free(binding);
+}
+
+const BoxMetadata kBindingMetadata = {destroy_binding, nullptr, 0};
+
+BindingNode* new_binding(BindingKind kind) {
+    auto* binding = static_cast<BindingNode*>(calloc(1, sizeof(BindingNode)));
+    binding->header.metadata = const_cast<uint64_t*>(&kBindingMetadata.kind);
+    new (&binding->header.references) std::atomic<uint64_t>(1);
+    binding->kind = kind;
+    return binding;
+}
+
+constexpr size_t kMetadataFirstArgumentWord = 2;
+void* generic_argument(void* metadata) { return static_cast<void**>(metadata)[kMetadataFirstArgumentWord]; }
 
 struct ChildValue {
     void* value;
@@ -240,6 +283,79 @@ SWIFTCC void registrar_access() {}
 SWIFTCC void registrar_mark_dirty() { g_tree_dirty.store(true, std::memory_order_relaxed); }
 
 extern "C" void rt_registrar_with_mutation();
+
+void binding_read(BindingNode* binding, void* out, void* type);
+
+void binding_read(BindingNode* binding, void* out, void* type) {
+    switch (binding->kind) {
+        case BindingKind::State: {
+            auto* state = static_cast<StateBox*>(binding->source);
+            witnesses_of(type)->initialize_with_copy(out, state_value(state), type);
+            return;
+        }
+        case BindingKind::Closures:
+            rt_call_witness(binding->getter, out, binding->getter_context, nullptr, nullptr);
+            return;
+        case BindingKind::ObjectKeyPath:
+            key_path_get(binding->key_path, &binding->source, out, type);
+            return;
+        case BindingKind::BindingKeyPath:
+            engine_log("STOP: nested binding key paths are not supported yet");
+            abort();
+    }
+}
+
+void binding_write(BindingNode* binding, void* value, void* type) {
+    switch (binding->kind) {
+        case BindingKind::State:
+            witnesses_of(type)->assign_with_copy(state_value(static_cast<StateBox*>(binding->source)), value, type);
+            break;
+        case BindingKind::Closures:
+            rt_call_witness(binding->setter, nullptr, binding->setter_context, value, nullptr);
+            break;
+        case BindingKind::ObjectKeyPath:
+            key_path_set(binding->key_path, &binding->source, value, type);
+            break;
+        case BindingKind::BindingKeyPath:
+            engine_log("STOP: nested binding key paths are not supported yet");
+            abort();
+    }
+    registrar_mark_dirty();
+}
+
+SWIFTCC void binding_wrapped_get(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT BindingNode** self) { binding_read(*self, out, generic_argument(metadata)); }
+SWIFTCC void binding_wrapped_set(void* value, void* metadata, SWIFT_CONTEXT BindingNode** self) {
+    void* type = generic_argument(metadata);
+    binding_write(*self, value, type);
+    witnesses_of(type)->destroy(value, type);
+}
+
+SWIFTCC void binding_get_set(SWIFT_OUT BindingNode** out, const void* getter, void* getter_context, const void* setter, void* setter_context, void*) {
+    auto* binding = new_binding(BindingKind::Closures);
+    binding->getter = getter;
+    binding->getter_context = getter_context;
+    binding->setter = setter;
+    binding->setter_context = setter_context;
+    *out = binding;
+}
+
+SWIFTCC void lazy_state_projected(SWIFT_OUT BindingNode** out, void*, SWIFT_CONTEXT StateBox** self) {
+    auto* binding = new_binding(BindingKind::State);
+    binding->source = rt_swift_retain(*self);
+    *out = binding;
+}
+
+// Bindable keeps the observed object itself in its single word.
+SWIFTCC void bindable_init(SWIFT_OUT void** out, void* object) { *out = object; }
+SWIFTCC void bindable_wrapped_get(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
+SWIFTCC void bindable_projected(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
+
+SWIFTCC void bindable_member(SWIFT_OUT BindingNode** out, void* key_path, void*, SWIFT_CONTEXT void** self) {
+    auto* binding = new_binding(BindingKind::ObjectKeyPath);
+    binding->source = rt_swift_retain(*self);
+    binding->key_path = rt_swift_retain(key_path);
+    *out = binding;
+}
 
 // Optional doubles travel in integer registers, so these words hold raw bit patterns.
 struct FrameLayout {
@@ -479,6 +595,14 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4TextV15foregroundStyleyACxAA05ShapeE0RzlF", reinterpret_cast<void*>(text_foreground_style)},
         {"$s7SwiftUI7TabViewV7contentACys5NeverOAA0C14ContentBuilderV0G0VyAF_qd__GGqd__yXE_tcAFRszAKRs_AA0cG0Rd__lufC", reinterpret_cast<void*>(tab_view_init)},
         {"$s7SwiftUI3TabVAAs5NeverORszAA4ViewR_AaFR0_rlE_11systemImage7contentACyAEq_AA07DefaultC5LabelVG10Foundation23LocalizedStringResourceV_SSq_yXEtcAJRs0_rlufC", reinterpret_cast<void*>(tab_init)},
+        {"$s7SwiftUI7BindingV12wrappedValuexvg", reinterpret_cast<void*>(binding_wrapped_get)},
+        {"$s7SwiftUI7BindingV12wrappedValuexvs", reinterpret_cast<void*>(binding_wrapped_set)},
+        {"$s7SwiftUI7BindingV3get3setACyxGxyc_yxctcfC", reinterpret_cast<void*>(binding_get_set)},
+        {"$s7SwiftUI9LazyStateV14projectedValueAA7BindingVyxGvg", reinterpret_cast<void*>(lazy_state_projected)},
+        {"$s7SwiftUI8BindableVAARlzC11Observation10ObservableRzlE12wrappedValueACyxGx_tcfC", reinterpret_cast<void*>(bindable_init)},
+        {"$s7SwiftUI8BindableV12wrappedValuexvg", reinterpret_cast<void*>(bindable_wrapped_get)},
+        {"$s7SwiftUI8BindableV14projectedValueACyxGvg", reinterpret_cast<void*>(bindable_projected)},
+        {"$s7SwiftUI8BindableVAARlzClE13dynamicMemberAA7BindingVyqd__Gs24ReferenceWritableKeyPathCyxqd__G_tcluig", reinterpret_cast<void*>(bindable_member)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

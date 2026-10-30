@@ -38,6 +38,8 @@ constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr uint64_t kImmortal = 1ULL << 63;
 constexpr uint32_t kDescriptorGeneric = 0x80;
+constexpr uint8_t kMarkerAccessFunction = 0xff;
+constexpr uint8_t kSymbolicAccessFunction = 0x09;
 constexpr uint32_t kDescriptorKindMask = 0x1f;
 constexpr uint32_t kDescriptorKindOpaque = 4;
 constexpr size_t kGenericHeaderSize = 8;
@@ -841,17 +843,22 @@ private:
     void step() {
         const char code = *cursor_++;
         const auto byte = static_cast<uint8_t>(code);
+        // 0xFF only announces that a metadata access function follows.
+        if (byte == kMarkerAccessFunction) return;
+        if (byte == kSymbolicAccessFunction) {
+            int32_t offset;
+            memcpy(&offset, cursor_, sizeof offset);
+            auto function = reinterpret_cast<void* (*)(void* const*)>(const_cast<char*>(cursor_ + offset));
+            cursor_ += sizeof offset;
+            push_type(static_cast<Metadata*>(function(generics_)));
+            return;
+        }
         if (byte >= 1 && byte <= 0x17) {
             if (byte != 1 && byte != 2) {
                 fail("unsupported symbolic reference kind");
                 return;
             }
             symbolic(byte);
-            return;
-        }
-        if (byte == 0xff) {
-            // Absolute pointer to a metadata-access helper, aligned in the name; not used for type values here.
-            fail("unsupported metadata-access-function reference");
             return;
         }
         switch (code) {

@@ -10,6 +10,7 @@
 
 #include "engine.h"
 #include "foundation_shim.h"
+#include "key_path.h"
 #include "macho.h"
 #include "swift_runtime.h"
 #include "type_system.h"
@@ -494,31 +495,8 @@ void store_enum_tag_single_payload_generic(char* value, uint32_t which, uint32_t
     memcpy(value, &index, size < kSmallPayloadLimit ? size : kSmallPayloadLimit);
 }
 
-struct KeyPathObject {
-    void* metadata;
-    std::atomic<uint64_t> references;
-    const void* pattern;
-    const void* arguments;
-};
-
-void destroy_key_path(void* object) { free(object); }
-
-struct KeyPathMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-const KeyPathMetadata kKeyPathMetadata = {destroy_key_path, nullptr, 0};
-
-void* get_key_path(const void* pattern, const void* arguments) {
-    auto* object = static_cast<KeyPathObject*>(calloc(1, sizeof(KeyPathObject)));
-    object->metadata = const_cast<uint64_t*>(&kKeyPathMetadata.kind);
-    new (&object->references) std::atomic<uint64_t>(1);
-    object->pattern = pattern;
-    object->arguments = arguments;
-    return object;
-}
+// swift_getAtKeyPath receives the result pointer in x8, like any indirect Swift return.
+SWIFTCC void get_at_key_path(SWIFT_OUT void* out, void* root, void* key_path, void* value_type) { key_path_get(key_path, root, out, value_type); }
 
 void swift_will_throw(void*) {}
 
@@ -557,7 +535,8 @@ void* stdlib_symbol(std::string_view name) {
         {"swift_storeEnumTagMultiPayload", reinterpret_cast<void*>(store_enum_tag_multi_payload)},
         {"swift_getEnumTagSinglePayloadGeneric", reinterpret_cast<void*>(get_enum_tag_single_payload_generic)},
         {"swift_storeEnumTagSinglePayloadGeneric", reinterpret_cast<void*>(store_enum_tag_single_payload_generic)},
-        {"swift_getKeyPath", reinterpret_cast<void*>(get_key_path)},
+        {"swift_getKeyPath", reinterpret_cast<void*>(key_path_create)},
+        {"swift_getAtKeyPath", reinterpret_cast<void*>(get_at_key_path)},
         {"swift_willThrow", reinterpret_cast<void*>(swift_will_throw)},
         {"swift_deletedMethodError", reinterpret_cast<void*>(deleted_method_error)},
         {"$sSh15minimumCapacityShyxGSi_tcfC", reinterpret_cast<void*>(set_minimum_capacity)},

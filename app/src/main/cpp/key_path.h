@@ -1,0 +1,8 @@
+#pragma once
+
+// Interprets a key path from swift_getKeyPath. `root` points at the root value, as Swift's accessors expect.
+void key_path_get(const void* key_path, void* root, void* out, void* value_type);
+void key_path_set(const void* key_path, void* root, void* new_value, void* value_type);
+
+// Creates the object swift_getKeyPath returns.
+void* key_path_create(const void* pattern, const void* arguments);

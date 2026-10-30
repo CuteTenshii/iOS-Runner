@@ -24,6 +24,11 @@ uintptr_t darwin_stack_guard = 0x5bd1e9955bd1e995ULL;
     engine_log("STOP: guest stack protector failure");
     abort();
 }
+// The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
+bool darwin_availability_version_check(uint32_t, const void*) { return true; }
+
+void* darwin_dlsym(void*, const char* name) { return resolve_symbol(name); }
+
 size_t darwin_malloc_size(void* pointer) { return malloc_usable_size(pointer); }
 void darwin_bzero(void* pointer, size_t size) { memset(pointer, 0, size); }
 }
@@ -42,6 +47,14 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"__chkstk_darwin", reinterpret_cast<void*>(darwin_chkstk)},
         {"__stack_chk_guard", &darwin_stack_guard},
         {"__stack_chk_fail", reinterpret_cast<void*>(darwin_stack_chk_fail)},
+        {"_availability_version_check", reinterpret_cast<void*>(darwin_availability_version_check)},
+        {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
+        {"fopen", reinterpret_cast<void*>(fopen)},
+        {"fclose", reinterpret_cast<void*>(fclose)},
+        {"fread", reinterpret_cast<void*>(fread)},
+        {"fseek", reinterpret_cast<void*>(fseek)},
+        {"ftell", reinterpret_cast<void*>(ftell)},
+        {"rewind", reinterpret_cast<void*>(rewind)},
         {"malloc", reinterpret_cast<void*>(malloc)},
         {"free", reinterpret_cast<void*>(free)},
         {"malloc_size", reinterpret_cast<void*>(darwin_malloc_size)},

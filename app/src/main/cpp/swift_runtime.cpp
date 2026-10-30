@@ -200,6 +200,8 @@ void rt_once(intptr_t* predicate, void (*function)(void*), void* context) {
     pthread_mutex_unlock(&lock);
 }
 
+void rt_dispatch_once(intptr_t* predicate, void* context, void (*function)(void*)) { rt_once(predicate, function, context); }
+
 void* rt_identity(void* value) { return value; }
 
 void rt_app_main(void* metadata, void** witness_table);
@@ -553,7 +555,7 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_slowDealloc", +[](void* pointer, size_t, size_t) { free(pointer); }),
         SYM("swift_getWitnessTable", rt_swift_getWitnessTable),
         SYM("swift_once", rt_once),
-        SYM("dispatch_once_f", rt_once),
+        SYM("dispatch_once_f", rt_dispatch_once),
         SYM("objc_opt_self", rt_identity),
         SYM("swift_getObjCClassMetadata", rt_identity),
         SYM("swift_getObjCClassFromMetadata", rt_identity),
