@@ -606,7 +606,7 @@ private:
                     stack_.push_back(node);
                     return;
                 }
-                if (concurrency == 'M') { push_type(two_word_type("ScM", native_type(), word_type())); return; }
+                if (concurrency == 'M') { push_type(native_type()); return; }
                 if (concurrency == 'P') { push_type(pod_type("ScP", 1)); return; }
                 fail(std::string("unknown concurrency type Sc") + concurrency);
                 return;
@@ -1075,6 +1075,23 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_getSingletonMetadata") return reinterpret_cast<void*>(rt_getSingletonMetadata);
     if (name == "swift_initStructMetadata") return reinterpret_cast<void*>(rt_initStructMetadata);
     if (name == "swift_updateClassMetadata2") return reinterpret_cast<void*>(rt_updateClassMetadata2);
+    if (name.size() > 3 && name.substr(0, 2) == "$s" && name.back() == 'N') {
+        const std::lock_guard guard(g_types_lock);
+        if (name == "$sytN") return pod_type("yt", 0);
+        if (name == "$sypN") return any_type();
+        if (name == "$sSSN" || name == "$sSS8UTF8ViewVN" || name == "$ss11_StringGutsVN" || name == "$ss26DefaultStringInterpolationVN") return string_type();
+        if (name == "$sSiN") return pod_type("Si", 8);
+        if (name == "$sSbN") return named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254);
+        if (name == "$sSJN") return two_word_type("SJ", word_type(), bridge_word_type());
+        if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
+        if (name == "$ss5NeverON" || name == "$s7SwiftUI9EmptyViewVN") return pod_type(std::string(name), 0);
+        if (name == "$s7SwiftUI22HierarchicalShapeStyleVN") return pod_type(std::string(name), 4);
+        if (name == "$s10Foundation4DataVN" || name == "$s10Foundation4DataV15_RepresentationON") return two_word_type("Data", word_type(), bridge_word_type());
+        std::string descriptor = "_" + std::string(name);
+        descriptor.back() = 'M';
+        descriptor += 'n';
+        return foreign_nominal(descriptor, {});
+    }
     if (name.size() > 4 && name.substr(0, 2) == "$s" && name.substr(name.size() - 2) == "Ma") return make_accessor_stub(std::string(name));
     return nullptr;
 }

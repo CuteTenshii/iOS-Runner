@@ -7,6 +7,7 @@
 #include <new>
 #include <unordered_map>
 
+#include "concurrency_shim.h"
 #include "engine.h"
 #include "swift_runtime.h"
 #include "type_system.h"
@@ -213,6 +214,7 @@ void swiftui_run_scene(void* scene) {
     engine_log("SCENE: running WindowGroup content");
     rt_call_witness(box->closure, content, box->closure_context, nullptr, nullptr);
     walk_view(content, box->content_type, box->content_witnesses, 0);
+    concurrency_drain();
     engine_log("SCENE: finished walking");
 }
 

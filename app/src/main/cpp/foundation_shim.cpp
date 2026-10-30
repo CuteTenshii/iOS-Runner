@@ -219,6 +219,8 @@ void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
     return self;
 }
 
+void* cookie_store(void*, const char*) { return framework_singleton("WKHTTPCookieStore"); }
+
 void* web_view_layer(void*, const char*) { return framework_singleton("CALayer"); }
 
 void* web_view_init(void* self, const char*, double, double, double, double, void*) { return self; }
@@ -288,6 +290,8 @@ void foundation_register_classes() {
     g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
     objc_register_method("-[WKWebView initWithFrame:configuration:]", reinterpret_cast<const void*>(web_view_init));
+    objc_register_method("-[WKWebsiteDataStore httpCookieStore]", reinterpret_cast<const void*>(cookie_store));
+    objc_register_method("-[WKHTTPCookieStore addObserver:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView layer]", reinterpret_cast<const void*>(web_view_layer));
     objc_register_method("-[CALayer setCornerRadius:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("-[CALayer setMasksToBounds:]", reinterpret_cast<const void*>(ignore_message_with_word));
