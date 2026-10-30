@@ -16,6 +16,7 @@
 
 #include "concurrency_shim.h"
 #include "engine.h"
+#include "objc_runtime.h"
 #include "foundation_shim.h"
 #include "key_path.h"
 #include "localization.h"
@@ -1496,6 +1497,12 @@ void swiftui_run_scene(void* scene) {
     }
 }
 
+// UIApplicationDelegateAdaptor holds the delegate object, created as UIKit would before the first scene.
+SWIFTCC void delegate_adaptor_init(SWIFT_OUT void** out, void* delegate_type) {
+    engine_log("GUEST: creating the application delegate");
+    *out = objc_alloc_init(delegate_type);
+}
+
 void* swiftui_symbol(std::string_view name) {
     static const bool registered = [] {
         register_foreign_witness("_$s7SwiftUI3TabVyxq_q0_GAA0C7ContentAASHRzAA4ViewR_AaFR0_rlMc",
@@ -1504,6 +1511,7 @@ void* swiftui_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$s7SwiftUI28UIApplicationDelegateAdaptorVyACyxGxmcfC", reinterpret_cast<void*>(delegate_adaptor_init)},
         {"$s7SwiftUI11WindowGroupV2id5title11lazyContentACyxGSSSg_AA4TextVSgxyctcfC", reinterpret_cast<void*>(window_group_init)},
         {"$s7SwiftUI12SceneBuilderV10buildBlockyxxAA0C0RzlFZ", reinterpret_cast<void*>(scene_build_block)},
         {"$s7SwiftUI9LazyStateV12wrappedValueACyxGxyXA_tcfC", reinterpret_cast<void*>(lazy_state_init)},

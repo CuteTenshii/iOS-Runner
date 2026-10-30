@@ -230,6 +230,12 @@ bool objc_is_framework_class(const void* object, const void* cls) {
     return !name.empty() && name == framework_class_name(*static_cast<void* const*>(object));
 }
 
+void* objc_alloc_init(void* cls) {
+    void* object = rt_objc_allocWithZone(cls, nullptr);
+    using Init = void* (*)(void*, const char*);
+    return reinterpret_cast<Init>(const_cast<void*>(rt_objc_lookup(object, "init")))(object, "init");
+}
+
 void objc_send(void* receiver, const char* selector, void* argument) {
     using Method = void (*)(void*, const char*, void*);
     reinterpret_cast<Method>(const_cast<void*>(rt_objc_lookup(receiver, selector)))(receiver, selector, argument);

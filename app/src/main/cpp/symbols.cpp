@@ -82,6 +82,9 @@ bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
 void* darwin_dlsym(void*, const char* name) { return resolve_symbol(name); }
 
+// The runner presents itself as a current iOS, so every availability check passes.
+int32_t platform_version_at_least(uint32_t, uint32_t, uint32_t, uint32_t) { return 1; }
+
 size_t darwin_malloc_size(void* pointer) { return malloc_usable_size(pointer); }
 void darwin_bzero(void* pointer, size_t size) { memset(pointer, 0, size); }
 }
@@ -108,6 +111,7 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"_os_log_impl", reinterpret_cast<void*>(darwin_log_impl)},
         {"_availability_version_check", reinterpret_cast<void*>(darwin_availability_version_check)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
+        {"__isPlatformVersionAtLeast", reinterpret_cast<void*>(platform_version_at_least)},
         {"fopen", reinterpret_cast<void*>(fopen)},
         {"fclose", reinterpret_cast<void*>(fclose)},
         {"fread", reinterpret_cast<void*>(fread)},
