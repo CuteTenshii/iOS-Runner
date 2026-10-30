@@ -308,7 +308,7 @@ class GuestActivity : Activity() {
         val selected = index == selectedTab
         val color = if (selected) accentColor() else secondaryColor()
         addView(TextView(context).apply {
-            text = symbol(tab.optString("i"))
+            showIcon(tab.optString("i"))
             gravity = Gravity.CENTER
             setTextColor(color)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
@@ -442,7 +442,7 @@ class GuestActivity : Activity() {
         val name = node.optString("i")
         if (name.isEmpty()) return null
         return TextView(this).apply {
-            text = symbol(name)
+            showIcon(name)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
@@ -649,7 +649,7 @@ class GuestActivity : Activity() {
         gravity = Gravity.CENTER
         setPadding(dp(24), dp(48), dp(24), dp(48))
         addView(TextView(context).apply {
-            text = symbol(node.optString("i"))
+            showIcon(node.optString("i"))
             gravity = Gravity.CENTER
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 40f)
             setTextColor(secondaryColor())
@@ -712,22 +712,78 @@ class GuestActivity : Activity() {
     }
 
     // SF Symbols are Apple's own artwork, so these are the nearest plain Unicode glyphs.
-    private fun symbol(name: String): String = when {
+    private val iconFont: Typeface by lazy { Typeface.createFromAsset(assets, "fonts/MaterialIcons-Regular.ttf") }
+
+    private fun TextView.showIcon(name: String) {
+        typeface = iconFont
+        text = materialIcon(name)
+    }
+
+    // The font draws an icon from its name through a ligature. Prefixes cover an SF Symbol's .fill and .circle variants.
+    private fun materialIcon(name: String): String = when {
         name.isEmpty() -> ""
-        name.startsWith("hand.raised") -> "✋"
-        name.startsWith("person.3") -> "👥"
-        name.startsWith("person.crop.circle") -> "👤"
-        name.startsWith("person") -> "👤"
-        name.startsWith("gear") -> "⚙"
-        name.startsWith("chevron.down") -> "⌄"
-        name.startsWith("chevron.right") -> "›"
-        name.startsWith("arrow.clockwise") -> "↻"
-        name.startsWith("line.3.horizontal.decrease") -> "≡"
-        name.startsWith("checkmark") -> "✓"
-        name.startsWith("xmark") -> "✕"
-        name.startsWith("exclamationmark") -> "⚠"
-        name.startsWith("magnifyingglass") -> "🔍"
-        else -> "•"
+        name.startsWith("hand.raised") -> "front_hand"
+        name.startsWith("person.3") -> "groups"
+        name.startsWith("person.text.rectangle") -> "badge"
+        name.startsWith("person.crop.circle") -> "account_circle"
+        name.startsWith("person") -> "person"
+        name.startsWith("gearshape") -> "settings"
+        name.startsWith("gear") -> "settings"
+        name.startsWith("chevron.down") -> "expand_more"
+        name.startsWith("chevron.up") -> "expand_less"
+        name.startsWith("chevron.right") -> "chevron_right"
+        name.startsWith("chevron.left") -> "chevron_left"
+        name.startsWith("arrow.clockwise") -> "refresh"
+        name.startsWith("arrow.counterclockwise") -> "restart_alt"
+        name.startsWith("arrow.down.circle") -> "download"
+        name.startsWith("line.3.horizontal.decrease") -> "filter_list"
+        name.startsWith("checkmark.shield") -> "verified_user"
+        name.startsWith("checkmark.circle") -> "check_circle"
+        name.startsWith("checkmark") -> "check"
+        name.startsWith("xmark") -> "close"
+        name.startsWith("exclamationmark") -> "warning"
+        name.startsWith("magnifyingglass") -> "search"
+        name.startsWith("plus") -> "add"
+        name.startsWith("minus") -> "remove"
+        name.startsWith("globe") -> "public"
+        name.startsWith("square.grid") -> "apps"
+        name.startsWith("square.and.arrow.up") -> "ios_share"
+        name.startsWith("square.and.arrow.down") -> "save_alt"
+        name.startsWith("folder.badge.gearshape") -> "folder_special"
+        name.startsWith("folder") -> "folder"
+        name.startsWith("safari") -> "explore"
+        name.startsWith("heart.text") -> "favorite_border"
+        name.startsWith("heart") -> "favorite"
+        name.startsWith("trash") -> "delete"
+        name.startsWith("doc.on.clipboard") -> "content_paste"
+        name.startsWith("doc.badge.gearshape") -> "description"
+        name.startsWith("doc") -> "description"
+        name.startsWith("paintbrush") -> "brush"
+        name.startsWith("app.badge") -> "apps"
+        name.startsWith("app") -> "apps"
+        name.startsWith("timer") -> "timer"
+        name.startsWith("clock") -> "schedule"
+        name.startsWith("ellipsis.curlybraces") -> "code"
+        name.startsWith("ellipsis") -> "more_horiz"
+        name.startsWith("questionmark") -> "help_outline"
+        name.startsWith("info") -> "info"
+        name.startsWith("lock") -> "lock"
+        name.startsWith("key") -> "key"
+        name.startsWith("link") -> "link"
+        name.startsWith("star") -> "star"
+        name.startsWith("bell") -> "notifications"
+        name.startsWith("wifi") -> "wifi"
+        name.startsWith("network") -> "lan"
+        name.startsWith("signature") -> "draw"
+        name.startsWith("wrench") -> "build"
+        name.startsWith("hammer") -> "construction"
+        name.startsWith("pencil") -> "edit"
+        name.startsWith("photo") -> "image"
+        name.startsWith("tray") -> "inbox"
+        name.startsWith("bolt") -> "bolt"
+        name.startsWith("moon") -> "dark_mode"
+        name.startsWith("sun") -> "light_mode"
+        else -> "circle"
     }
 
     companion object {
