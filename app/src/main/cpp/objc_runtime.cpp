@@ -87,6 +87,11 @@ std::unordered_map<std::string, const void*>& framework_methods() {
     return table;
 }
 
+std::unordered_map<std::string, const void* (*)(const char*)>& framework_fallbacks() {
+    static std::unordered_map<std::string, const void* (*)(const char*)> table;
+    return table;
+}
+
 [[noreturn]] void stop_unknown_message(const std::string& description) {
     engine_log("STOP: unimplemented message %s", description.c_str());
     abort();
@@ -97,6 +102,11 @@ const void* lookup_framework_method(const std::string& description) {
     const auto found = framework_methods().find(description);
     if (found != framework_methods().end()) return found->second;
     const size_t space = description.find(' ');
+    const auto fallback = framework_fallbacks().find(description.substr(2, space - 2));
+    if (fallback != framework_fallbacks().end()) {
+        const std::string selector = description.substr(space + 1, description.size() - space - 2);
+        if (const void* generated = fallback->second(selector.c_str())) return generated;
+    }
     const std::string root = description.substr(0, 2) + "NSObject" + description.substr(space);
     const auto inherited = framework_methods().find(root);
     if (inherited == framework_methods().end()) stop_unknown_message(description);
@@ -215,6 +225,12 @@ void* objc_runtime_symbol(std::string_view name) {
 void objc_register_method(const char* description, const void* implementation) {
     framework_methods()[description] = implementation;
 }
+
+void objc_register_fallback(const char* class_name, const void* (*resolve)(const char* selector)) { framework_fallbacks()[class_name] = resolve; }
+
+std::string objc_framework_class_name(const void* cls) { return framework_class_name(cls); }
+
+void* objc_framework_object(const char* class_name) { return framework_alloc(class_name); }
 
 void* objc_native_class(const char* name, void (*destroyer)(void*)) {
     // Release finds the destroyer two words before the class, as it does in Swift metadata.

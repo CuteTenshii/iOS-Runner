@@ -10,6 +10,7 @@
 #include "engine.h"
 #include "concurrency_shim.h"
 #include "codable_shim.h"
+#include "coredata_shim.h"
 #include "foundation_shim.h"
 #include "regex_shim.h"
 #include "objc_runtime.h"
@@ -139,6 +140,7 @@ void* resolve_symbol(const char* name) {
     if (void* symbol = objc_runtime_symbol(name)) return symbol;
     if (void* symbol = foundation_symbol(name)) return symbol;
     if (void* symbol = codable_symbol(name)) return symbol;
+    if (void* symbol = coredata_symbol(name)) return symbol;
     if (void* symbol = regex_symbol(name)) return symbol;
     if (void* symbol = stdlib_symbol(name)) return symbol;
     if (void* symbol = concurrency_symbol(name)) return symbol;
@@ -147,5 +149,6 @@ void* resolve_symbol(const char* name) {
 
 void runtime_attach_image(const MachImage& image) {
     foundation_register_classes();
+    coredata_register_classes();
     swiftui_attach_image(image);
 }
