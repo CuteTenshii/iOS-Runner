@@ -38,6 +38,8 @@ constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr uint64_t kImmortal = 1ULL << 63;
 constexpr uint32_t kDescriptorGeneric = 0x80;
+constexpr uint32_t kDescriptorKindMask = 0x1f;
+constexpr uint32_t kDescriptorKindOpaque = 4;
 constexpr size_t kGenericHeaderSize = 8;
 constexpr size_t kGenericRequirementSize = 12;
 
@@ -457,6 +459,10 @@ Metadata* protocol_existential(const char* protocol_name) {
     return named_type(key, kKindExistential, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
 }
 
+const char* g_current_name = nullptr;
+size_t g_current_length = 0;
+std::string printable(const char* text, size_t length);
+
 struct FrozenField {
     size_t size;      // 0 means the type comes from `argument`.
     size_t alignment;
@@ -537,7 +543,14 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
     const auto found = frozen_layouts().find(symbol);
-    return found == frozen_layouts().end() ? nullptr : struct_from_fields(key, found->second, arguments);
+    if (found == frozen_layouts().end()) return nullptr;
+    for (const auto& field : found->second) {
+        if (field.argument >= 0 && (static_cast<size_t>(field.argument) >= arguments.size() || arguments[static_cast<size_t>(field.argument)] == nullptr)) {
+            engine_log("STOP: %s is missing generic argument %d of %zu, in \"%s\"", symbol.c_str(), field.argument, arguments.size(), printable(g_current_name, g_current_length).c_str());
+            abort();
+        }
+    }
+    return struct_from_fields(key, found->second, arguments);
 }
 
 // Types whose stored layout the app's compiled code depends on; everything else from a framework is one reference.
@@ -657,7 +670,19 @@ private:
             node.tag = Node::Tag::Protocol;
         }
         stack_.push_back(node);
-        substitute(node);
+        if (!names_opaque_declaration(node.nominal)) substitute(node);
+    }
+
+    // An opaque type descriptor names a declaration rather than a type, so it takes no substitution slot.
+    static bool names_opaque_declaration(const NominalReference& nominal) {
+        if (nominal.foreign_symbol != nullptr) {
+            const std::string_view symbol(nominal.foreign_symbol);
+            return symbol.size() >= 4 && symbol.substr(symbol.size() - 4) == "QOMQ";
+        }
+        if (nominal.descriptor == nullptr) return false;
+        uint32_t flags;
+        memcpy(&flags, nominal.descriptor, sizeof flags);
+        return (flags & kDescriptorKindMask) == kDescriptorKindOpaque;
     }
 
     void standard(char code) {
@@ -969,7 +994,12 @@ std::string printable(const char* text, size_t length) {
     for (size_t i = 0; i < length; ++i) {
         const auto byte = static_cast<uint8_t>(text[i]);
         if (byte >= 1 && byte <= 0x17) {
-            out += "<ref>";
+            int32_t offset;
+            memcpy(&offset, text + i + 1, sizeof offset);
+            const void* target = text + i + 1 + offset;
+            if (byte == 2) target = *static_cast<void* const*>(target);
+            const char* symbol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(target));
+            out += symbol != nullptr ? std::string("<") + symbol + ">" : std::string("<app>");
             i += 4;
         } else if (byte >= 0x20 && byte < 0x7f) {
             out += static_cast<char>(byte);
@@ -982,8 +1012,14 @@ std::string printable(const char* text, size_t length) {
 
 extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t length, const void*, void* const* generics) {
     const std::lock_guard guard(g_types_lock);
+    const char* outer_name = g_current_name;
+    const size_t outer_length = g_current_length;
+    g_current_name = name;
+    g_current_length = length;
     MangledName parser(name, length, generics);
     Metadata* result = parser.parse();
+    g_current_name = outer_name;
+    g_current_length = outer_length;
     if (result == nullptr) {
         engine_log("STOP: cannot resolve type \"%s\": %s", printable(name, length).c_str(), parser.failure().c_str());
         abort();

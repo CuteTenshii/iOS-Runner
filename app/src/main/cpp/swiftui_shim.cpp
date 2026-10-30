@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <new>
 #include <unordered_map>
 
@@ -12,6 +13,7 @@
 #include "engine.h"
 #include "foundation_shim.h"
 #include "localization.h"
+#include "macho.h"
 #include "swift_runtime.h"
 #include "type_system.h"
 
@@ -21,6 +23,12 @@
 namespace {
 
 constexpr size_t kBodyBufferSize = 64 * 1024;
+constexpr uint32_t kFlagNonPod = 0x10000;
+const MachSection* g_view_conformances = nullptr;
+
+void* rt_swift_getWitnessTable_for_view(const char* conformance, void* type) {
+    return swift_runtime_witness_table(conformance, type, static_cast<void**>(type) + 2);
+}
 constexpr int kMaximumDepth = 64;
 
 struct ValueWitnessTable {
@@ -88,6 +96,69 @@ SWIFTCC void window_group_init(SWIFT_OUT void** out, uint64_t, uint64_t, uint64_
 
 SWIFTCC void scene_build_block(SWIFT_OUT void* out, void* value, void* type, void*) {
     witnesses_of(type)->initialize_with_copy(out, value, type);
+}
+
+struct ChildValue {
+    void* value;
+    void* type;
+};
+
+enum class NodeKind : uint32_t { TabView, Tab };
+
+// Runtime object behind a resilient view: its properties plus already-evaluated child values.
+struct ViewNode {
+    HeapHeader header;
+    NodeKind kind;
+    std::string* title;
+    std::string* system_image;
+    std::vector<ChildValue>* children;
+};
+
+void destroy_node(HeapHeader* object) {
+    auto* node = reinterpret_cast<ViewNode*>(object);
+    delete node->title;
+    delete node->system_image;
+    for (const auto& child : *node->children) {
+        witnesses_of(child.type)->destroy(child.value, child.type);
+        free(child.value);
+    }
+    delete node->children;
+    free(node);
+}
+
+const BoxMetadata kNodeMetadata = {destroy_node, nullptr, 0};
+
+ViewNode* new_node(NodeKind kind) {
+    auto* node = static_cast<ViewNode*>(calloc(1, sizeof(ViewNode)));
+    node->header.metadata = const_cast<uint64_t*>(&kNodeMetadata.kind);
+    new (&node->header.references) std::atomic<uint64_t>(1);
+    node->kind = kind;
+    node->title = new std::string();
+    node->system_image = new std::string();
+    node->children = new std::vector<ChildValue>();
+    return node;
+}
+
+// Runs a @ViewBuilder closure and keeps its result as a child of `node`.
+void evaluate_child(ViewNode* node, const void* closure, void* context, void* type) {
+    const size_t size = witnesses_of(type)->size;
+    void* value = calloc(1, size == 0 ? 1 : size);
+    rt_call_witness(closure, value, context, nullptr, nullptr);
+    node->children->push_back({value, type});
+}
+
+SWIFTCC void tab_view_init(SWIFT_OUT ViewNode** out, const void* closure, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::TabView);
+    evaluate_child(node, closure, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void tab_init(SWIFT_OUT ViewNode** out, LocalizedBox** title, SwiftString system_image, const void* closure, void* context, void* content_type, void*) {
+    auto* node = new_node(NodeKind::Tab);
+    *node->title = localized_text(*title);
+    *node->system_image = swift_string_to_utf8(system_image);
+    evaluate_child(node, closure, context, content_type);
+    *out = node;
 }
 
 // Backing store of @State: the initial value is computed on first read, as LazyState promises.
@@ -236,27 +307,102 @@ struct EdgeInsetsValue {
 
 SWIFTCC EdgeInsetsValue edge_insets_all(double value) { return {value, value, value, value}; }
 
-void walk_view(void* value, void* type, void** witnesses, int depth) {
+const char* node_kind_name(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::TabView: return "TabView";
+        case NodeKind::Tab: return "Tab";
+    }
+    return "?";
+}
+
+constexpr const char* kViewProtocolSymbol = "_$s7SwiftUI4ViewMp";
+constexpr size_t kConformanceTypeOffset = 4;
+constexpr size_t kConformanceFlagsOffset = 12;
+constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
+constexpr uint32_t kTypeReferenceIndirect = 0x1u << 3;
+constexpr size_t kMetadataDescriptorWord = 1;
+constexpr size_t kMetadataArgumentsWord = 2;
+
+const void* relative_pointer(const char* field) {
+    int32_t offset;
+    memcpy(&offset, field, sizeof offset);
+    return offset == 0 ? nullptr : field + offset;
+}
+
+const void* indirectable_pointer(const char* field) {
+    int32_t offset;
+    memcpy(&offset, field, sizeof offset);
+    if (offset == 0) return nullptr;
+    const char* target = field + (offset & ~1);
+    return offset & 1 ? *reinterpret_cast<const void* const*>(target) : target;
+}
+
+// Finds an app type's View conformance in the app's own conformance list.
+const char* find_view_conformance(const void* type) {
+    const void* descriptor = static_cast<void* const*>(type)[kMetadataDescriptorWord];
+    const MachSection* section = g_view_conformances;
+    if (section == nullptr) return nullptr;
+    for (size_t i = 0; i + sizeof(int32_t) <= section->size; i += sizeof(int32_t)) {
+        const auto* conformance = static_cast<const char*>(relative_pointer(reinterpret_cast<const char*>(section->address + i)));
+        const char* protocol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(indirectable_pointer(conformance)));
+        if (protocol == nullptr || strcmp(protocol, kViewProtocolSymbol) != 0) continue;
+        uint32_t flags;
+        memcpy(&flags, conformance + kConformanceFlagsOffset, sizeof flags);
+        const void* conforming;
+        if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
+            conforming = indirectable_pointer(conformance + kConformanceTypeOffset);
+            const char* raw = conformance + kConformanceTypeOffset;
+            int32_t offset;
+            memcpy(&offset, raw, sizeof offset);
+            conforming = *reinterpret_cast<const void* const*>(raw + offset);
+        } else {
+            conforming = relative_pointer(conformance + kConformanceTypeOffset);
+        }
+        if (conforming == descriptor) return conformance;
+    }
+    return nullptr;
+}
+
+void walk_view(void* value, void* type, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
         abort();
     }
     if (const char* name = foreign_type_name(type)) {
-        engine_log("VIEW: %*s%s", depth * 2, "", name);
+        const auto* witnesses = witnesses_of(type);
+        const bool reference_node = witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0;
+        if (reference_node) {
+            auto* node = *static_cast<ViewNode**>(value);
+            if (node != nullptr && node->header.metadata == &kNodeMetadata.kind) {
+                engine_log("VIEW: %*s%s \"%s\" %s", depth * 2, "", node_kind_name(node->kind), node->title->c_str(), node->system_image->c_str());
+                for (const auto& child : *node->children) walk_view(child.value, child.type, depth + 1);
+                return;
+            }
+        }
+        engine_log("VIEW: %*s%s (no renderer yet)", depth * 2, "", name);
         return;
     }
-    const auto* conformance = static_cast<const char*>(witnesses[0]);
+    const char* conformance = find_view_conformance(type);
+    if (conformance == nullptr) {
+        engine_log("VIEW: %*s(type %p has no View conformance, kind %llx)", depth * 2, "", type, static_cast<unsigned long long>(*static_cast<uint64_t*>(type)));
+        return;
+    }
     const void* body = find_witness(conformance, &g_view_body_requirement);
     const void* body_type_name = find_witness(conformance, &g_view_body_type_requirement);
     if (body == nullptr || body_type_name == nullptr) {
         engine_log("STOP: a view conformance has no body witness");
         abort();
     }
-    engine_log("VIEW: %*sapp view %p, calling body", depth * 2, "", type);
-    void* output = calloc(1, kBodyBufferSize);
-    rt_call_witness(body, output, value, type, witnesses);
-    void* body_metadata = resolve_mangled_type(static_cast<const char*>(body_type_name), nullptr);
-    engine_log("VIEW: %*sbody returned type %s", depth * 2, "", foreign_type_name(body_metadata) ? foreign_type_name(body_metadata) : "(app)");
+    engine_log("VIEW: %*sapp view", depth * 2, "");
+    void* const* generics = static_cast<void* const*>(type) + kMetadataArgumentsWord;
+    // The low bit of an associated type witness marks it as a mangled name rather than an accessor.
+    const auto* body_name = reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(body_type_name) & ~static_cast<uintptr_t>(1));
+    void* body_metadata = resolve_mangled_type(body_name, generics);
+    const size_t size = witnesses_of(body_metadata)->size;
+    void* output = calloc(1, size == 0 ? 1 : size);
+    auto** table = static_cast<void**>(rt_swift_getWitnessTable_for_view(conformance, type));
+    rt_call_witness(body, output, value, type, table);
+    walk_view(output, body_metadata, depth + 1);
 }
 
 }  // namespace
@@ -277,12 +423,14 @@ __asm__(
 
 extern "C" void rt_registrar_mark_dirty_c() { g_tree_dirty.store(true, std::memory_order_relaxed); }
 
+void swiftui_attach_image(const MachImage& image) { g_view_conformances = image.section("__TEXT", "__swift5_proto"); }
+
 void swiftui_run_scene(void* scene) {
     auto* box = *static_cast<ViewBox**>(scene);
     void* content = calloc(1, kBodyBufferSize);
     engine_log("SCENE: running WindowGroup content");
     rt_call_witness(box->closure, content, box->closure_context, nullptr, nullptr);
-    walk_view(content, box->content_type, box->content_witnesses, 0);
+    walk_view(content, box->content_type, 0);
     concurrency_drain();
     engine_log("SCENE: finished walking");
 }
@@ -329,6 +477,8 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4TextVyAC10Foundation23LocalizedStringResourceVcfC", reinterpret_cast<void*>(text_from_resource)},
         {"$s7SwiftUI4TextV4fontyAcA4FontVSgF", reinterpret_cast<void*>(text_font)},
         {"$s7SwiftUI4TextV15foregroundStyleyACxAA05ShapeE0RzlF", reinterpret_cast<void*>(text_foreground_style)},
+        {"$s7SwiftUI7TabViewV7contentACys5NeverOAA0C14ContentBuilderV0G0VyAF_qd__GGqd__yXE_tcAFRszAKRs_AA0cG0Rd__lufC", reinterpret_cast<void*>(tab_view_init)},
+        {"$s7SwiftUI3TabVAAs5NeverORszAA4ViewR_AaFR0_rlE_11systemImage7contentACyAEq_AA07DefaultC5LabelVG10Foundation23LocalizedStringResourceV_SSq_yXEtcAJRs0_rlufC", reinterpret_cast<void*>(tab_init)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

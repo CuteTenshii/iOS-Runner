@@ -67,4 +67,7 @@ void* resolve_symbol(const char* name) {
     return type_system_symbol(name);
 }
 
-void runtime_attach_image(const MachImage&) { foundation_register_classes(); }
+void runtime_attach_image(const MachImage& image) {
+    foundation_register_classes();
+    swiftui_attach_image(image);
+}

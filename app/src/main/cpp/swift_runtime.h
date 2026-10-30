@@ -11,3 +11,6 @@ extern "C" void* rt_call_witness(const void* function, void* out, void* self, vo
 
 // Registers the implementation a framework conformance gives for a protocol requirement.
 void register_foreign_witness(const char* conformance_symbol, const char* requirement_symbol, const void* implementation);
+
+// Instantiates a witness table, as swift_getWitnessTable does.
+void* swift_runtime_witness_table(const char* conformance, void* type, void* arguments);
