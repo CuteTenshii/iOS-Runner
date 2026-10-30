@@ -86,6 +86,7 @@ ViewBox* new_box() {
 
 constexpr uint64_t kImmediate = 1ULL << 63;
 const int32_t kStorageCaseValueTag = 0;
+const int32_t kTitleDisplayInline = 2;
 char g_view_body_requirement;
 char g_view_body_type_requirement;
 
@@ -324,14 +325,14 @@ void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row,
     }
 }
 
-// ID is not passed: it follows from Element or from the key path.
+// ID is not passed here: it follows from Element.
 SWIFTCC void for_each_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void* row_type) {
     auto* node = new_node(NodeKind::ForEach);
     evaluate_rows(node, data, data_type, row, row_context, row_type);
     *out = node;
 }
 
-SWIFTCC void for_each_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void* row_type) {
+SWIFTCC void for_each_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void*, void* row_type) {
     auto* node = new_node(NodeKind::ForEach);
     evaluate_rows(node, data, data_type, row, row_context, row_type);
     *out = node;
@@ -984,7 +985,7 @@ void walk_view(void* value, void* type, int depth) {
     }
     const char* conformance = find_view_conformance(type);
     if (conformance == nullptr) {
-        engine_log("VIEW: %*s(type %p has no View conformance, kind %llx)", depth * 2, "", type, static_cast<unsigned long long>(*static_cast<uint64_t*>(type)));
+        engine_log("VIEW: %*s(type %p has no View conformance, kind %llx, size %zu, fields %zu)", depth * 2, "", type, static_cast<unsigned long long>(*static_cast<uint64_t*>(type)), witnesses_of(type)->size, type_fields(type).size());
         return;
     }
     const void* body = find_witness(conformance, &g_view_body_requirement);
@@ -1157,6 +1158,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI4ViewPAAE18accessibilityLabelyAA15ModifiedContentVyxAA31AccessibilityAttachmentModifierVGAA4TextVF", reinterpret_cast<void*>(accessibility_label)},
         {"$s7SwiftUI4ViewPAAE22accessibilityAddTraitsyAA15ModifiedContentVyxAA31AccessibilityAttachmentModifierVGAA0iF0VF", reinterpret_cast<void*>(accessibility_traits)},
         {"$s7SwiftUI19AccessibilityTraitsV8isHeaderACvgZ", reinterpret_cast<void*>(accessibility_is_header)},
+        {"$s7SwiftUI17NavigationBarItemV16TitleDisplayModeO6inlineyA2EmFWC", const_cast<int32_t*>(&kTitleDisplayInline)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

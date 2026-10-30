@@ -1045,6 +1045,12 @@ private:
             symbolic(byte);
             return;
         }
+        // A tuple element's label: it follows the element and has no effect on layout.
+        if (code >= '1' && code <= '9') {
+            --cursor_;
+            cursor_ += read_natural();
+            return;
+        }
         switch (code) {
             case 'S':
                 if (cursor_ >= end_) { fail("truncated standard type"); return; }
