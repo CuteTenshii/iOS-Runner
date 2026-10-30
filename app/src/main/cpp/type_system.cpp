@@ -1064,28 +1064,7 @@ __asm__(
     "  b rt_foreign_access\n");
 
 void* make_accessor_stub(const std::string& symbol) {
-    static char* pool = nullptr;
-    static size_t used = 0;
-    if (pool == nullptr) {
-        pool = static_cast<char*>(mmap(nullptr, kAccessorPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-        if (pool == MAP_FAILED) {
-            pool = nullptr;
-            return nullptr;
-        }
-    }
-    if (used + kAccessorStubSize > kAccessorPoolSize) return nullptr;
-    auto* stub = reinterpret_cast<uint32_t*>(pool + used);
-    used += kAccessorStubSize;
-    stub[0] = 0x58000090;  // ldr x16, #16
-    stub[1] = 0x580000b1;  // ldr x17, #20
-    stub[2] = 0xd61f0220;  // br x17
-    stub[3] = 0xd503201f;  // nop, keeps the literals 8-byte aligned
-    const char* name = strdup(symbol.c_str());
-    void* entry = reinterpret_cast<void*>(rt_foreign_access_entry);
-    memcpy(stub + 4, &name, sizeof name);
-    memcpy(stub + 6, &entry, sizeof entry);
-    __builtin___clear_cache(reinterpret_cast<char*>(stub), reinterpret_cast<char*>(stub + 8));
-    return stub;
+    return make_code_stub(reinterpret_cast<void*>(rt_foreign_access_entry), strdup(symbol.c_str()));
 }
 
 }  // namespace
@@ -1118,4 +1097,27 @@ void* resolve_mangled_type(const char* name, void* const* generics) {
 void* storage_class_metadata(const char* symbol, void* const* arguments, size_t count) {
     const std::lock_guard guard(g_types_lock);
     return foreign_nominal(symbol, std::vector<void*>(arguments, arguments + count));
+}
+
+void* make_code_stub(void* entry, const void* data) {
+    static char* pool = nullptr;
+    static size_t used = 0;
+    if (pool == nullptr) {
+        pool = static_cast<char*>(mmap(nullptr, kAccessorPoolSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        if (pool == MAP_FAILED) {
+            pool = nullptr;
+            return nullptr;
+        }
+    }
+    if (used + kAccessorStubSize > kAccessorPoolSize) return nullptr;
+    auto* stub = reinterpret_cast<uint32_t*>(pool + used);
+    used += kAccessorStubSize;
+    stub[0] = 0x58000090;  // ldr x16, #16
+    stub[1] = 0x580000b1;  // ldr x17, #20
+    stub[2] = 0xd61f0220;  // br x17
+    stub[3] = 0xd503201f;  // nop, keeps the literals 8-byte aligned
+    memcpy(stub + 4, &data, sizeof data);
+    memcpy(stub + 6, &entry, sizeof entry);
+    __builtin___clear_cache(reinterpret_cast<char*>(stub), reinterpret_cast<char*>(stub + 8));
+    return stub;
 }

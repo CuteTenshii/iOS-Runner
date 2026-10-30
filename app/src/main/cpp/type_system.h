@@ -13,3 +13,6 @@ void* resolve_mangled_type(const char* name, void* const* generics);
 
 // Metadata of a generic standard library storage class, whose prefix holds its destroyer.
 void* storage_class_metadata(const char* symbol, void* const* arguments, size_t count);
+
+// Generates executable code that puts `data` in x16 and jumps to `entry`, preserving all argument registers.
+void* make_code_stub(void* entry, const void* data);

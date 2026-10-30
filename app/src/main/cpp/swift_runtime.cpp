@@ -9,12 +9,14 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <utility>
 
 #include "engine.h"
 #include "macho.h"
 #include "swiftui_shim.h"
+#include "type_system.h"
 
 namespace {
 
@@ -417,6 +419,104 @@ extern "C" void rt_app_main(void* metadata, void** witness_table) {
 
 uint64_t* empty_set_singleton() { return g_empty_set; }
 
+namespace {
+
+struct DispatchThunk {
+    const char* requirement;
+    size_t table_register;
+};
+
+std::map<std::string, const void*>& foreign_witnesses() {
+    static std::map<std::string, const void*> witnesses;
+    return witnesses;
+}
+
+std::map<const void*, const char*>& static_witness_tables() {
+    static std::map<const void*, const char*> tables;
+    return tables;
+}
+
+const void* find_witness_by_name(const char* conformance, const char* requirement) {
+    const auto witnesses = resilient_witnesses(conformance);
+    for (uint32_t i = 0; i < witnesses.count; ++i) {
+        const char* entry = witnesses.entries + i * 8;
+        const char* name = unresolved_symbol_at(reinterpret_cast<uintptr_t>(relative_indirectable(entry)));
+        if (name != nullptr && strcmp(name, requirement) == 0) return relative_direct(entry + 4);
+    }
+    return nullptr;
+}
+
+constexpr size_t kForeignWitnessTableBytes = kForeignWitnessTableWords * sizeof(void*);
+
+extern "C" void rt_protocol_dispatch();
+
+void* make_static_witness_table(const char* symbol) {
+    auto* table = calloc(1, kForeignWitnessTableBytes);
+    static_witness_tables()[table] = strdup(symbol);
+    return table;
+}
+
+}  // namespace
+
+extern "C" const void* rt_dispatch_lookup(const DispatchThunk* thunk, void** table) {
+    const char* conformance_name = nullptr;
+    if (const auto found = static_witness_tables().find(table); found != static_witness_tables().end()) conformance_name = found->second;
+    else conformance_name = unresolved_symbol_at(reinterpret_cast<uintptr_t>(table[0]));
+    if (conformance_name != nullptr) {
+        const std::string key = std::string(conformance_name) + "|" + thunk->requirement;
+        const auto found = foreign_witnesses().find(key);
+        if (found == foreign_witnesses().end()) {
+            engine_log("STOP: no framework witness for %s", key.c_str());
+            abort();
+        }
+        return found->second;
+    }
+    const void* witness = find_witness_by_name(static_cast<const char*>(table[0]), thunk->requirement);
+    if (witness == nullptr) {
+        engine_log("STOP: app conformance has no witness for %s", thunk->requirement);
+        abort();
+    }
+    return witness;
+}
+
+void register_foreign_witness(const char* conformance_symbol, const char* requirement_symbol, const void* implementation) {
+    foreign_witnesses()[std::string(conformance_symbol) + "|" + requirement_symbol] = implementation;
+}
+
+// x16 holds the thunk; the witness table is in whichever argument register its signature uses.
+__asm__(
+    ".text\n"
+    ".globl rt_protocol_dispatch\n"
+    "rt_protocol_dispatch:\n"
+    "  stp x29, x30, [sp, #-208]!\n"
+    "  mov x29, sp\n"
+    "  stp x0, x1, [sp, #16]\n"
+    "  stp x2, x3, [sp, #32]\n"
+    "  stp x4, x5, [sp, #48]\n"
+    "  stp x6, x7, [sp, #64]\n"
+    "  str x8, [sp, #80]\n"
+    "  stp d0, d1, [sp, #96]\n"
+    "  stp d2, d3, [sp, #112]\n"
+    "  stp d4, d5, [sp, #128]\n"
+    "  stp d6, d7, [sp, #144]\n"
+    "  mov x0, x16\n"
+    "  ldr x17, [x16, #8]\n"
+    "  add x17, sp, x17, lsl #3\n"
+    "  ldr x1, [x17, #16]\n"
+    "  bl rt_dispatch_lookup\n"
+    "  mov x16, x0\n"
+    "  ldp x0, x1, [sp, #16]\n"
+    "  ldp x2, x3, [sp, #32]\n"
+    "  ldp x4, x5, [sp, #48]\n"
+    "  ldp x6, x7, [sp, #64]\n"
+    "  ldr x8, [sp, #80]\n"
+    "  ldp d0, d1, [sp, #96]\n"
+    "  ldp d2, d3, [sp, #112]\n"
+    "  ldp d4, d5, [sp, #128]\n"
+    "  ldp d6, d7, [sp, #144]\n"
+    "  ldp x29, x30, [sp], #208\n"
+    "  br x16\n");
+
 void* swift_runtime_symbol(std::string_view name) {
 #define SYM(symbol, target) {symbol, reinterpret_cast<void*>(target)}
 #define THUNK_SYMS(reg)                                  \
@@ -473,6 +573,20 @@ void* swift_runtime_symbol(std::string_view name) {
     };
 #undef THUNK_SYMS
 #undef SYM
-    const auto found = table.find(name);
-    return found == table.end() ? nullptr : found->second;
+    if (const auto found = table.find(name); found != table.end()) return found->second;
+    // Static witness tables of framework conformances: the guest passes them around, only thunks use them.
+    if (name.size() > 2 && name.substr(name.size() - 2) == "WP") {
+        return make_static_witness_table(("_" + std::string(name)).c_str());
+    }
+    // Dispatch thunks: the witness table register follows from each requirement's signature.
+    static const std::unordered_map<std::string_view, size_t> thunks = {
+        {"$ss23CustomStringConvertibleP11descriptionSSvgTj", 1},
+    };
+    if (const auto thunk = thunks.find(name); thunk != thunks.end()) {
+        std::string requirement = "_" + std::string(name);
+        requirement.back() = 'q';
+        auto* record = new DispatchThunk{strdup(requirement.c_str()), thunk->second};
+        return make_code_stub(reinterpret_cast<void*>(rt_protocol_dispatch), record);
+    }
+    return nullptr;
 }

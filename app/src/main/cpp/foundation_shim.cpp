@@ -41,6 +41,17 @@ struct NSStringObject {
     std::string* text;
 };
 
+constexpr size_t kStorageCapacityOffset = 16;
+constexpr size_t kStorageCountOffset = 24;
+
+struct StorageMetadata {
+    void (*destroyer)(void*);
+    const void* witnesses;
+    uint64_t kind;
+};
+
+const StorageMetadata kStringStorageMetadata = {free, nullptr, 0};
+
 void* g_nsstring_class = nullptr;
 void* g_defaults_class = nullptr;
 
@@ -208,6 +219,8 @@ void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
     return self;
 }
 
+void* web_view_layer(void*, const char*) { return framework_singleton("CALayer"); }
+
 void* web_view_init(void* self, const char*, double, double, double, double, void*) { return self; }
 
 void* web_kit_child_singleton(void*, const char* selector) { return framework_singleton(selector); }
@@ -252,11 +265,21 @@ SwiftString swift_string_from_utf8(const std::string& text) {
         result.object |= kImmortalBit | kSmallStringBit | (ascii ? kSmallAsciiBit : 0) | (static_cast<uint64_t>(text.size()) << kSmallCountShift);
         return result;
     }
-    // Immortal storage: the guest never frees it, as with Swift's own string literals.
-    auto* storage = static_cast<char*>(malloc(text.size() + 1));
-    memcpy(storage, text.c_str(), text.size() + 1);
-    result.count_and_flags = text.size() | kNfcFlag | (ascii ? kAsciiFlag : 0);
-    result.object = (reinterpret_cast<uint64_t>(storage) - kNativeBias) | kImmortalBit;
+    constexpr uint64_t kNativeFlag = 1ULL << 61;
+    constexpr uint64_t kTailAllocatedFlag = 1ULL << 60;
+    constexpr size_t kMinimumCapacity = 32;
+    const size_t capacity = text.size() < kMinimumCapacity ? kMinimumCapacity : text.size();
+    auto* storage = static_cast<char*>(calloc(1, kNativeBias + capacity + 1));
+    auto* header = reinterpret_cast<NativeObject*>(storage);
+    header->isa = const_cast<uint64_t*>(&kStringStorageMetadata.kind);
+    header->references = 1;
+    const uint64_t flags = kNfcFlag | kNativeFlag | kTailAllocatedFlag | (ascii ? kAsciiFlag : 0);
+    const uint64_t count_and_flags = text.size() | flags;
+    memcpy(storage + kStorageCapacityOffset, &capacity, sizeof capacity);
+    memcpy(storage + kStorageCountOffset, &count_and_flags, sizeof count_and_flags);
+    memcpy(storage + kNativeBias, text.data(), text.size());
+    result.count_and_flags = count_and_flags;
+    result.object = reinterpret_cast<uint64_t>(storage);
     return result;
 }
 
@@ -265,6 +288,9 @@ void foundation_register_classes() {
     g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
     objc_register_method("-[WKWebView initWithFrame:configuration:]", reinterpret_cast<const void*>(web_view_init));
+    objc_register_method("-[WKWebView layer]", reinterpret_cast<const void*>(web_view_layer));
+    objc_register_method("-[CALayer setCornerRadius:]", reinterpret_cast<const void*>(ignore_message_with_double));
+    objc_register_method("-[CALayer setMasksToBounds:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView setNavigationDelegate:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView setInspectable:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebViewConfiguration userContentController]", reinterpret_cast<const void*>(web_kit_child_singleton));

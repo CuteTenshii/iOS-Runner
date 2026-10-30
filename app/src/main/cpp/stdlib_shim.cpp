@@ -11,6 +11,7 @@
 #include "engine.h"
 #include "foundation_shim.h"
 #include "macho.h"
+#include "swift_runtime.h"
 #include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
@@ -253,6 +254,124 @@ SWIFTCC bool string_equal_slow(SwiftString left, SwiftString right, uint8_t expe
 }
 
 
+constexpr uint64_t kIndexFlags = 0x7;
+constexpr unsigned kIndexOffsetShift = 16;
+constexpr size_t kMinimumGrownCapacity = 32;
+
+uint64_t make_index(size_t offset) { return (static_cast<uint64_t>(offset) << kIndexOffsetShift) | kIndexFlags; }
+size_t index_offset(uint64_t index) { return static_cast<size_t>(index >> kIndexOffsetShift); }
+
+size_t scalar_length(unsigned char lead) {
+    if (lead < 0x80) return 1;
+    if (lead < 0xe0) return 2;
+    if (lead < 0xf0) return 3;
+    return 4;
+}
+
+size_t next_scalar(const std::string& text, size_t offset) {
+    return offset >= text.size() ? text.size() : offset + scalar_length(static_cast<unsigned char>(text[offset]));
+}
+
+size_t previous_scalar(const std::string& text, size_t offset) {
+    if (offset == 0) return 0;
+    --offset;
+    while (offset > 0 && (static_cast<unsigned char>(text[offset]) & 0xc0) == 0x80) --offset;
+    return offset;
+}
+
+struct StringTriple {
+    SwiftString value;
+    uint64_t repaired;
+};
+
+struct SubstringValue {
+    uint64_t start;
+    uint64_t end;
+    SwiftString guts;
+};
+
+std::string map_ascii_case(std::string text, bool upper) {
+    for (char& c : text) {
+        if (upper && c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        if (!upper && c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return text;
+}
+
+SWIFTCC void string_append(SwiftString other, SWIFT_SELF SwiftString* self) {
+    *self = swift_string_from_utf8(swift_string_to_utf8(*self) + swift_string_to_utf8(other));
+}
+
+SWIFTCC void string_guts_grow(int64_t capacity, SWIFT_SELF SwiftString* self) {
+    // Rewrites the string into native storage with room for `capacity` bytes, as the guest's inline append expects.
+    std::string text = swift_string_to_utf8(*self);
+    const size_t requested = capacity < static_cast<int64_t>(kMinimumGrownCapacity) ? kMinimumGrownCapacity : static_cast<size_t>(capacity);
+    const size_t size = text.size();
+    text.resize(requested > kMinimumGrownCapacity ? requested : kMinimumGrownCapacity + 1);
+    SwiftString grown = swift_string_from_utf8(text);
+    constexpr uint64_t kCountMask = 0x0000ffffffffffffULL;
+    grown.count_and_flags = (grown.count_and_flags & ~kCountMask) | size;
+    constexpr size_t kStorageCountOffset = 24;
+    memcpy(reinterpret_cast<char*>(grown.object) + kStorageCountOffset, &grown.count_and_flags, sizeof grown.count_and_flags);
+    *self = grown;
+}
+
+SWIFTCC SwiftString string_lowercased(SwiftString self) { return swift_string_from_utf8(map_ascii_case(swift_string_to_utf8(self), false)); }
+SWIFTCC SwiftString string_uppercased(SwiftString self) { return swift_string_from_utf8(map_ascii_case(swift_string_to_utf8(self), true)); }
+
+SWIFTCC bool string_has_prefix(SwiftString prefix, SwiftString self) {
+    const std::string text = swift_string_to_utf8(self);
+    const std::string start = swift_string_to_utf8(prefix);
+    return text.size() >= start.size() && text.compare(0, start.size(), start) == 0;
+}
+
+SWIFTCC bool string_has_suffix(SwiftString suffix, SwiftString self) {
+    const std::string text = swift_string_to_utf8(self);
+    const std::string end = swift_string_to_utf8(suffix);
+    return text.size() >= end.size() && text.compare(text.size() - end.size(), end.size(), end) == 0;
+}
+
+SWIFTCC uint64_t string_index_after(uint64_t index, SwiftString self) { return make_index(next_scalar(swift_string_to_utf8(self), index_offset(index))); }
+SWIFTCC uint64_t string_index_before(uint64_t index, SwiftString self) { return make_index(previous_scalar(swift_string_to_utf8(self), index_offset(index))); }
+
+SWIFTCC SwiftString string_subscript_character(uint64_t index, SwiftString self) {
+    const std::string text = swift_string_to_utf8(self);
+    const size_t start = index_offset(index);
+    return swift_string_from_utf8(text.substr(start, next_scalar(text, start) - start));
+}
+
+SWIFTCC SubstringValue string_subscript_range(uint64_t start, uint64_t end, SwiftString self) { return {start, end, self}; }
+
+SWIFTCC SwiftString string_from_substring(uint64_t start, uint64_t end, SwiftString guts) {
+    const std::string text = swift_string_to_utf8(guts);
+    return swift_string_from_utf8(text.substr(index_offset(start), index_offset(end) - index_offset(start)));
+}
+
+SWIFTCC StringTriple string_from_utf8_repairing(const char* bytes, int64_t count) {
+    return {swift_string_from_utf8(std::string(bytes, static_cast<size_t>(count))), 0};
+}
+
+constexpr size_t kArrayCountOffset = 16;
+constexpr size_t kArrayStorageElements = 32;
+constexpr size_t kStaticStringStride = 24;
+
+SWIFTCC int64_t find_string_switch_case(const char* cases, SwiftString value) {
+    const std::string text = swift_string_to_utf8(value);
+    int64_t count;
+    memcpy(&count, cases + kArrayCountOffset, sizeof count);
+    for (int64_t i = 0; i < count; ++i) {
+        const char* entry = cases + kArrayStorageElements + static_cast<size_t>(i) * kStaticStringStride;
+        const char* start;
+        uint64_t length;
+        memcpy(&start, entry, sizeof start);
+        memcpy(&length, entry + sizeof start, sizeof length);
+        if (text.size() == length && memcmp(text.data(), start, length) == 0) return i;
+    }
+    return -1;
+}
+
+SWIFTCC SwiftString int_description(SWIFT_SELF const int64_t* self) { return swift_string_from_utf8(std::to_string(*self)); }
+
 void* get_object_type(void* object) { return *static_cast<void**>(object); }
 
 constexpr size_t kClassSuperOffset = 8;
@@ -411,7 +530,25 @@ void swift_will_throw(void*) {}
 }  // namespace
 
 void* stdlib_symbol(std::string_view name) {
+    static const bool registered = [] {
+        register_foreign_witness("_$sSis23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(int_description));
+        return true;
+    }();
+    (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
+        {"$ss11_StringGutsV4growyySiF", reinterpret_cast<void*>(string_guts_grow)},
+        {"$sSS10lowercasedSSyF", reinterpret_cast<void*>(string_lowercased)},
+        {"$sSS10uppercasedSSyF", reinterpret_cast<void*>(string_uppercased)},
+        {"$sSS9hasPrefixySbSSF", reinterpret_cast<void*>(string_has_prefix)},
+        {"$sSS9hasSuffixySbSSF", reinterpret_cast<void*>(string_has_suffix)},
+        {"$sSS5index5afterSS5IndexVAD_tF", reinterpret_cast<void*>(string_index_after)},
+        {"$sSS5index6beforeSS5IndexVAD_tF", reinterpret_cast<void*>(string_index_before)},
+        {"$sSSySJSS5IndexVcig", reinterpret_cast<void*>(string_subscript_character)},
+        {"$sSSySsSnySS5IndexVGcig", reinterpret_cast<void*>(string_subscript_range)},
+        {"$sSS14_fromSubstringySSSshFZ", reinterpret_cast<void*>(string_from_substring)},
+        {"$sSS18_fromUTF8RepairingySS6result_Sb11repairsMadetSRys5UInt8VGFZ", reinterpret_cast<void*>(string_from_utf8_repairing)},
+        {"$ss21_findStringSwitchCase5cases6stringSiSays06StaticB0VG_SStF", reinterpret_cast<void*>(find_string_switch_case)},
         {"swift_getObjectType", reinterpret_cast<void*>(get_object_type)},
         {"swift_dynamicCastObjCClass", reinterpret_cast<void*>(dynamic_cast_objc_class)},
         {"swift_arrayDestroy", reinterpret_cast<void*>(array_destroy)},
