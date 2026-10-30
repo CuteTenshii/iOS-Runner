@@ -549,6 +549,30 @@ struct AsyncFunctionRecord {
 
 AsyncFunctionRecord g_url_session_data_record;
 
+// A bridged collection only needs to stay alive until framework code uses it, so it wraps the Swift value.
+struct BridgedCollection {
+    NativeObject header;
+    void* value;
+};
+
+void* g_bridged_collection_class = nullptr;
+extern "C" void rt_swift_release(void*);
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
+extern "C" void rt_swift_bridgeObjectRelease(void*);
+
+void destroy_bridged_collection(void* raw) {
+    rt_swift_bridgeObjectRelease(static_cast<BridgedCollection*>(raw)->value);
+    free(raw);
+}
+
+SWIFTCC void* collection_bridge_to_objc(void* value) {
+    auto* wrapper = static_cast<BridgedCollection*>(calloc(1, sizeof(BridgedCollection)));
+    wrapper->header.isa = g_bridged_collection_class;
+    wrapper->header.references = 1;
+    wrapper->value = rt_swift_bridgeObjectRetain(value);
+    return wrapper;
+}
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -625,6 +649,7 @@ void foundation_register_classes() {
     objc_register_method("-[WKWebView initWithFrame:configuration:]", reinterpret_cast<const void*>(web_view_init));
     objc_register_method("-[WKWebsiteDataStore httpCookieStore]", reinterpret_cast<const void*>(cookie_store));
     g_nsarray_class = objc_native_class("NSArray", destroy_nsarray);
+    g_bridged_collection_class = objc_native_class("NSDictionary", destroy_bridged_collection);
     objc_register_method("-[WKHTTPCookieStore getAllCookies:]", reinterpret_cast<const void*>(cookie_store_get_all));
     objc_register_method("-[WKHTTPCookieStore addObserver:]", reinterpret_cast<const void*>(ignore_message_with_word));
     objc_register_method("-[WKWebView configuration]", reinterpret_cast<const void*>(web_view_configuration));
@@ -712,8 +737,12 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation13__DataStorageC7_lengthSivg", reinterpret_cast<void*>(data_storage_length)},
         {"$s10Foundation13__DataStorageC7_offsetSivg", reinterpret_cast<void*>(data_storage_offset)},
         {"$ss5ErrorP10FoundationE20localizedDescriptionSSvg", reinterpret_cast<void*>(error_localized_description)},
+        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data)},
+        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data)},
         {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
         {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
+        {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
+        {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

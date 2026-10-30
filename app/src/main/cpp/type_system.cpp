@@ -622,6 +622,10 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
 }
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
+    if (symbol == "_$ss11AnyHashableVMn") return named_type("AnyHashable", kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
+    if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
+    if (symbol == "_$ss5UInt8VMn") return pod_type("UInt8", 1);
+    if (symbol == "_$ss5NeverOMn") return pod_type("Never", 0);
     if (symbol == "_$s7SwiftUI9LazyStateVMn" && !arguments.empty()) return lazy_state_of(static_cast<Metadata*>(arguments[0]));
     if (symbol == "_$s7SwiftUI9LazyStateV7StorageOMn" && !arguments.empty()) return state_storage_of(static_cast<Metadata*>(arguments[0]));
     if (symbol == "_$s7SwiftUI11EnvironmentV7ContentOMn" && !arguments.empty()) return environment_content_of(static_cast<Metadata*>(arguments[0]));
@@ -1393,8 +1397,7 @@ void* type_system_symbol(std::string_view name) {
         if (name == "$sSbN") return named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254);
         if (name == "$sSJN") return two_word_type("SJ", word_type(), bridge_word_type());
         if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
-        if (name == "$ss5NeverON") return pod_type(std::string(name), 0);
-        if (name == "$ss11AnyHashableVN") return named_type("AnyHashable", kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
+        if (name == "$ss5NeverON") return pod_type("Never", 0);
         if (name == "$s7SwiftUI22HierarchicalShapeStyleVN") return pod_type(std::string(name), 4);
         if (name == "$s10Foundation4DataVN" || name == "$s10Foundation4DataV15_RepresentationON") return two_word_type("Data", word_type(), bridge_word_type());
         std::string descriptor = "_" + std::string(name);
