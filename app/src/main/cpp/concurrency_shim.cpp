@@ -220,12 +220,12 @@ __asm__(
     "  mov x22, x0\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
-    // x22 holds the state, placed in the task's parent word; a thrown error arrives in x21.
+    // x22 is the finished task's own context, whose parent word holds the state; a thrown error arrives in x21.
     ".globl rt_async_let_task_finished\n"
     "rt_async_let_task_finished:\n"
     "  stp x29, x30, [sp, #-16]!\n"
     "  mov x29, sp\n"
-    "  mov x0, x22\n"
+    "  ldr x0, [x22]\n"
     "  mov x1, x21\n"
     "  bl rt_async_let_note_finished\n"
     "  ldp x29, x30, [sp], #16\n"
@@ -233,6 +233,9 @@ __asm__(
     // get, get_throwing and finish: (let, buffer, resume function, resume context).
     ".globl rt_async_let_wait\n"
     "rt_async_let_wait:\n"
+    // The runtime links the call context to the caller, as an async call would.
+    "  str x22, [x3]\n"
+    "  str x2, [x3, #8]\n"
     "  stp x29, x30, [sp, #-48]!\n"
     "  mov x29, sp\n"
     "  stp x0, x2, [sp, #16]\n"
