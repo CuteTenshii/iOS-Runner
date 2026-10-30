@@ -28,3 +28,12 @@ struct TypeField {
 
 // Stored fields of a tuple or frozen framework type; empty for types this runtime keeps opaque.
 std::vector<TypeField> type_fields(const void* metadata);
+
+// Which branch an `if` view currently holds. Returns false if the type is not conditional.
+bool conditional_active(const void* metadata, const void* value, TypeField& out);
+
+// An Optional's payload type, or a null type when it is nil. Returns false if the type is not optional.
+bool optional_payload(const void* metadata, const void* value, TypeField& out);
+
+// The element type of an Array's metadata, or nullptr for any other type.
+void* array_element_type(const void* metadata);

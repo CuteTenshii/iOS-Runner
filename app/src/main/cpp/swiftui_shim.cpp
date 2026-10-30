@@ -84,6 +84,7 @@ ViewBox* new_box() {
     return box;
 }
 
+constexpr uint64_t kImmediate = 1ULL << 63;
 const int32_t kStorageCaseValueTag = 0;
 char g_view_body_requirement;
 char g_view_body_type_requirement;
@@ -121,6 +122,7 @@ struct BindingNode {
 
 extern "C" void* rt_swift_retain(void*);
 extern "C" void rt_swift_release(void*);
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
 
 void destroy_binding(HeapHeader* object) {
     auto* binding = reinterpret_cast<BindingNode*>(object);
@@ -151,6 +153,12 @@ struct TextValue {
     uint64_t style;
 };
 
+struct LocalizedKey {
+    SwiftString key;
+    uint64_t has_formatting;
+    LocalizedBox* interpolation;
+};
+
 struct ChildValue {
     void* value;
     void* type;
@@ -158,7 +166,8 @@ struct ChildValue {
 
 enum class NodeKind : uint32_t {
     TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
-    Sheet, Toolbar, OnChange, Task,
+    Sheet, Toolbar, OnChange, Task, Picker, ForEach, Section, ProgressView, Stepper, Image, AsyncImage,
+    Disclosure, LabeledContent, Unavailable, Menu, Link, ToolbarItem, ImageResource,
 };
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
@@ -280,6 +289,174 @@ SWIFTCC void toggle_title_init(SWIFT_OUT ViewNode** out, const SwiftString* titl
     *out = node;
 }
 
+void add_value_child(ViewNode* node, void* value_pointer, void* type) { add_self_child(node, value_pointer, type); }
+
+SWIFTCC void picker_init(SWIFT_OUT ViewNode** out, const uint64_t* selection, void* label, const void* content, void* content_context, void* label_type, void*, void* content_type) {
+    auto* node = new_node(NodeKind::Picker);
+    node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(selection[1])));
+    add_value_child(node, label, label_type);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+constexpr size_t kArrayCountOffsetBytes = 16;
+constexpr size_t kArrayElementsOffsetBytes = 32;
+constexpr uint64_t kCollectionPointerMask = 0x00fffffffffffff8ULL;
+
+// Evaluates the row closure for each element, which needs Data to be an Array.
+void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row, void* row_context, void* row_type) {
+    void* element = array_element_type(data_type);
+    if (element == nullptr) {
+        engine_log("STOP: ForEach over a collection other than Array");
+        abort();
+    }
+    const auto* elements = witnesses_of(element);
+    const auto storage = reinterpret_cast<const char*>(*static_cast<uint64_t*>(data) & kCollectionPointerMask);
+    int64_t count;
+    memcpy(&count, storage + kArrayCountOffsetBytes, sizeof count);
+    const size_t mask = elements->flags & 0xff;
+    const char* first = storage + ((kArrayElementsOffsetBytes + mask) & ~mask);
+    for (int64_t i = 0; i < count; ++i) {
+        const size_t size = witnesses_of(row_type)->size;
+        void* value = calloc(1, size == 0 ? 1 : size);
+        rt_call_witness(row, value, row_context, const_cast<char*>(first + static_cast<size_t>(i) * elements->stride), nullptr);
+        node->children->push_back({value, row_type});
+    }
+}
+
+// ID is not passed: it follows from Element or from the key path.
+SWIFTCC void for_each_identifiable(SWIFT_OUT ViewNode** out, void* data, const void* row, void* row_context, void* data_type, void* row_type) {
+    auto* node = new_node(NodeKind::ForEach);
+    evaluate_rows(node, data, data_type, row, row_context, row_type);
+    *out = node;
+}
+
+SWIFTCC void for_each_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void* row_type) {
+    auto* node = new_node(NodeKind::ForEach);
+    evaluate_rows(node, data, data_type, row, row_context, row_type);
+    *out = node;
+}
+
+SWIFTCC void section_create(SWIFT_OUT ViewNode** out, uint64_t, uint64_t, uint64_t, void* content, void* header, void* footer, void* header_type, void* content_type, void* footer_type) {
+    auto* node = new_node(NodeKind::Section);
+    add_value_child(node, header, header_type);
+    add_value_child(node, content, content_type);
+    add_value_child(node, footer, footer_type);
+    *out = node;
+}
+
+SWIFTCC void progress_view_init(SWIFT_OUT ViewNode** out) { *out = new_node(NodeKind::ProgressView); }
+
+SWIFTCC void stepper_init(SWIFT_OUT ViewNode** out, const uint64_t* value, void*, void*, uint64_t, uint64_t, const void* label, void* label_context, void* label_type) {
+    auto* node = new_node(NodeKind::Stepper);
+    node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(value[1])));
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+SWIFTCC ViewNode* image_system_name(SwiftString name) {
+    auto* node = new_node(NodeKind::Image);
+    *node->system_image = swift_string_to_utf8(name);
+    return node;
+}
+
+SWIFTCC void image_resource_init(SWIFT_OUT ViewNode** out, SwiftString name, void*) {
+    auto* node = new_node(NodeKind::ImageResource);
+    *node->title = swift_string_to_utf8(name);
+    *out = node;
+}
+
+SWIFTCC ViewNode* image_from_resource(ViewNode** resource) {
+    auto* node = new_node(NodeKind::Image);
+    *node->title = *(*resource)->title;
+    return node;
+}
+
+// A resizable image is the same picture: layout comes from its modifiers.
+SWIFTCC ViewNode* image_resizable(double, double, double, double, const void*, ViewNode* self) { return static_cast<ViewNode*>(rt_swift_retain(self)); }
+
+SWIFTCC void async_image_init(SWIFT_OUT ViewNode** out, const void*, double, void*) { *out = new_node(NodeKind::AsyncImage); }
+const int32_t kImageResizingStretch = 1;
+
+SWIFTCC void disclosure_init(SWIFT_OUT ViewNode** out, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
+    auto* node = new_node(NodeKind::Disclosure);
+    evaluate_child(node, label, label_context, label_type);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+SWIFTCC void labeled_content_view(SWIFT_OUT ViewNode** out, const SwiftString* title, const void* content, void* content_context, void* content_type) {
+    auto* node = new_node(NodeKind::LabeledContent);
+    *node->title = swift_string_to_utf8(*title);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+SWIFTCC void labeled_content_value(SWIFT_OUT ViewNode** out, LocalizedBox** title, const SwiftString* value) {
+    auto* node = new_node(NodeKind::LabeledContent);
+    *node->title = localized_text(*title);
+    *node->system_image = swift_string_to_utf8(*value);
+    *out = node;
+}
+
+SWIFTCC void unavailable_init(SWIFT_OUT ViewNode** out, const SwiftString* title, SwiftString system_image, TextValue description) {
+    auto* node = new_node(NodeKind::Unavailable);
+    *node->title = swift_string_to_utf8(*title);
+    *node->system_image = swift_string_to_utf8(system_image);
+    (void)description;
+    *out = node;
+}
+
+SWIFTCC void menu_init(SWIFT_OUT ViewNode** out, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
+    auto* node = new_node(NodeKind::Menu);
+    evaluate_child(node, label, label_context, label_type);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+SWIFTCC void link_init(SWIFT_OUT ViewNode** out, const void*, const void* label, void* label_context, void* label_type) {
+    auto* node = new_node(NodeKind::Link);
+    evaluate_child(node, label, label_context, label_type);
+    *out = node;
+}
+
+SWIFTCC void toolbar_item_init(SWIFT_OUT ViewNode** out, const void*, const void* content, void* content_context, void* content_type) {
+    auto* node = new_node(NodeKind::ToolbarItem);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+SWIFTCC void empty_style_init(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
+SWIFTCC void* any_shape_style_init(const void*, void*, void*) { return reinterpret_cast<void*>(kImmediate); }
+
+SWIFTCC void with_animation(SWIFT_OUT void* out, void*, const void* body, void* context) { rt_call_witness(body, out, context, nullptr, nullptr); }
+
+// LocalizedStringKey interpolation mirrors LocalizationValue's, boxed the same way.
+SWIFTCC void key_interpolation_init(SWIFT_OUT LocalizedBox** out, int64_t, int64_t) { *out = new_localized_box(""); }
+SWIFTCC void key_append_literal(SwiftString text, SWIFT_CONTEXT LocalizedBox** self) { *(*self)->key += swift_string_to_utf8(text); }
+SWIFTCC void key_append_string(SwiftString text, SWIFT_CONTEXT LocalizedBox** self) {
+    *(*self)->key += "%@";
+    (*self)->arguments->push_back(swift_string_to_utf8(text));
+}
+SWIFTCC void key_append_integer(const int64_t* value, SwiftString specifier, void*, void*, SWIFT_CONTEXT LocalizedBox** self) {
+    *(*self)->key += swift_string_to_utf8(specifier);
+    (*self)->arguments->push_back(std::to_string(*value));
+}
+SWIFTCC LocalizedKey key_from_interpolation(LocalizedBox** interpolation) { return {{0, 0}, 1, *interpolation}; }
+
+// These two return ModifiedContent<Self, AccessibilityAttachmentModifier>: self, then the modifier's word.
+void accessibility_write(void* out, void* self, void* type) {
+    const auto* witnesses = witnesses_of(type);
+    witnesses->initialize_with_copy(out, self, type);
+    const size_t offset = (witnesses->size + 7) & ~static_cast<size_t>(7);
+    const uint64_t modifier = kImmediate;
+    memcpy(static_cast<char*>(out) + offset, &modifier, sizeof modifier);
+}
+
+SWIFTCC void accessibility_label(SWIFT_OUT void* out, TextValue, void* self_type, void*, SWIFT_CONTEXT void* self) { accessibility_write(out, self, self_type); }
+SWIFTCC void accessibility_traits(SWIFT_OUT void* out, const void*, void* self_type, void*, SWIFT_CONTEXT void* self) { accessibility_write(out, self, self_type); }
+SWIFTCC void accessibility_is_header(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
+
 // `style` modifiers: only the wrapped content matters until rendering honours the style.
 SWIFTCC void modifier_generic_style(SWIFT_OUT ViewNode** out, const void*, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
     auto* node = new_node(NodeKind::Modifier);
@@ -399,7 +576,6 @@ SWIFTCC void lazy_state_wrapped_value_get(SWIFT_OUT void* out, void* metadata, S
 }
 
 // Framework constants are tagged immediates: the high bit makes retain and release ignore them.
-constexpr uint64_t kImmediate = 1ULL << 63;
 constexpr uint64_t kFontBold = 1ULL << 16;
 constexpr uint64_t kFontMonospaced = 1ULL << 17;
 
@@ -610,12 +786,6 @@ TextValue make_text(const std::string& text) {
     return {value.count_and_flags, value.object, 0, kImmediate};
 }
 
-struct LocalizedKey {
-    SwiftString key;
-    uint64_t has_formatting;
-    LocalizedBox* interpolation;
-};
-
 SWIFTCC LocalizedKey localized_key_literal(SwiftString literal) { return {literal, 0, nullptr}; }
 
 SWIFTCC TextValue text_from_key(SwiftString key, uint64_t, LocalizedBox* interpolation) {
@@ -626,12 +796,17 @@ SWIFTCC TextValue text_from_key(SwiftString key, uint64_t, LocalizedBox* interpo
 SWIFTCC TextValue text_from_string(const SwiftString* value, void*, void*) { return make_text(swift_string_to_utf8(*value)); }
 SWIFTCC TextValue text_from_resource(LocalizedBox** resource) { return make_text(localized_text(*resource)); }
 
+// The compiled code owns and releases the string inline, so a modified copy needs its own reference.
+void retain_text(const TextValue& text) { rt_swift_bridgeObjectRetain(reinterpret_cast<void*>(text.text_object)); }
+
 SWIFTCC TextValue text_font(uint64_t font, TextValue text) {
+    retain_text(text);
     text.style = (text.style & ~kTextFontMask) | (font & kTextFontMask);
     return text;
 }
 
 SWIFTCC TextValue text_foreground_style(const uint32_t* style, TextValue text, void*, void*) {
+    retain_text(text);
     text.style = (text.style & ~kTextColorMask) | (static_cast<uint64_t>(*style & 0xff) << kTextColorShift);
     return text;
 }
@@ -659,6 +834,20 @@ const char* node_kind_name(NodeKind kind) {
         case NodeKind::Toolbar: return "Toolbar";
         case NodeKind::OnChange: return "OnChange";
         case NodeKind::Task: return "Task";
+        case NodeKind::Picker: return "Picker";
+        case NodeKind::ForEach: return "ForEach";
+        case NodeKind::Section: return "Section";
+        case NodeKind::ProgressView: return "ProgressView";
+        case NodeKind::Stepper: return "Stepper";
+        case NodeKind::Image: return "Image";
+        case NodeKind::AsyncImage: return "AsyncImage";
+        case NodeKind::Disclosure: return "Disclosure";
+        case NodeKind::LabeledContent: return "LabeledContent";
+        case NodeKind::Unavailable: return "Unavailable";
+        case NodeKind::Menu: return "Menu";
+        case NodeKind::Link: return "Link";
+        case NodeKind::ToolbarItem: return "ToolbarItem";
+        case NodeKind::ImageResource: return "ImageResource";
     }
     return "?";
 }
@@ -735,6 +924,11 @@ void walk_view(void* value, void* type, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
         abort();
+    }
+    TypeField branch;
+    if (conditional_active(type, value, branch) || optional_payload(type, value, branch)) {
+        if (branch.type != nullptr) walk_view(value, branch.type, depth);
+        return;
     }
     const uint64_t kind_word = *static_cast<uint64_t*>(type);
     const char* name = foreign_type_name(type);
@@ -926,6 +1120,39 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI13DismissActionV14callAsFunctionyyF", reinterpret_cast<void*>(dismiss_action_call)},
         {"$s7SwiftUI13OpenURLActionV14callAsFunctionyy10Foundation3URLVF", reinterpret_cast<void*>(open_url_action_call)},
         {"$s7SwiftUI14_TaskModifier2V4name18executorPreference8priority6actionACSS_Sch_pSgScPyyYaYAcntcfC", reinterpret_cast<void*>(task_modifier_init)},
+        {"$s7SwiftUI6PickerV9selection5label7contentACyxq_q0_GAA7BindingVyq_G_xq0_yXEtcfC", reinterpret_cast<void*>(picker_init)},
+        {"$s7SwiftUI7ForEachVAA7Element_2IDQZRs_s12IdentifiableADRpzrlE6create_7contentACyxq_q0_Gx_q0_AHctFZ", reinterpret_cast<void*>(for_each_identifiable)},
+        {"$s7SwiftUI7ForEachVAAE6create_2id7contentACyxq_q0_Gx_s7KeyPathCy7ElementQzq_Gq0_AKctFZ", reinterpret_cast<void*>(for_each_key_path)},
+        {"$s7SwiftUI7SectionV6create10isExpanded7content6header6footerACyxq_q0_GAA7BindingVySbGSg_q_xq0_tFZ", reinterpret_cast<void*>(section_create)},
+        {"$s7SwiftUI12ProgressViewVA2A05EmptyD0VRs_rlEACyA2EGycAERszrlufC", reinterpret_cast<void*>(progress_view_init)},
+        {"$s7SwiftUI7StepperV5value2in4step16onEditingChanged5labelACyxGAA7BindingVyqd__G_SNyqd__G6StrideQyd__ySbcxyXEtcSxRd__lufC", reinterpret_cast<void*>(stepper_init)},
+        {"$s7SwiftUI5ImageV10systemNameACSS_tcfC", reinterpret_cast<void*>(image_system_name)},
+        {"$s21DeveloperToolsSupport13ImageResourceV4name6bundleACSS_So8NSBundleCtcfC", reinterpret_cast<void*>(image_resource_init)},
+        {"$s7SwiftUI5ImageVyAC21DeveloperToolsSupport0C8ResourceVcfC", reinterpret_cast<void*>(image_from_resource)},
+        {"$s7SwiftUI5ImageV9resizable9capInsets12resizingModeAcA04EdgeF0V_AC08ResizingH0OtF", reinterpret_cast<void*>(image_resizable)},
+        {"$s7SwiftUI5ImageV12ResizingModeO7stretchyA2EmFWC", const_cast<int32_t*>(&kImageResizingStretch)},
+        {"$s7SwiftUI10AsyncImageV3url5scale11transaction7contentACyxG10Foundation3URLVSg_12CoreGraphics7CGFloatVAA11TransactionVxAA0cD5PhaseOctcfC", reinterpret_cast<void*>(async_image_init)},
+        {"$s7SwiftUI15DisclosureGroupV7content5labelACyxq_Gq_yc_xyXEtcfC", reinterpret_cast<void*>(disclosure_init)},
+        {"$s7SwiftUI14LabeledContentVA2A4TextVRszAA4ViewR_rlE_7contentACyAEq_Gqd___q_yXEtcSyRd__lufC", reinterpret_cast<void*>(labeled_content_view)},
+        {"$s7SwiftUI14LabeledContentVA2A4TextVRszAERs_rlE_5valueACyA2EG10Foundation23LocalizedStringResourceV_qd__tcSyRd__lufC", reinterpret_cast<void*>(labeled_content_value)},
+        {"$s7SwiftUI22ContentUnavailableViewVA2A5LabelVyAA4TextVAA5ImageVGRszAGSgRs_AA05EmptyE0VRs0_rlE_06systemH011descriptionACyAjkMGqd___SSAKtcSyRd__lufC", reinterpret_cast<void*>(unavailable_init)},
+        {"$s7SwiftUI4MenuV7content5labelACyxq_Gq_yXE_xyXEtcfC", reinterpret_cast<void*>(menu_init)},
+        {"$s7SwiftUI4LinkV11destination5labelACyxG10Foundation3URLV_xyXEtcfC", reinterpret_cast<void*>(link_init)},
+        {"$s7SwiftUI11ToolbarItemVAAytRszrlE9placement7contentACyytq_GAA0cD9PlacementV_q_yXEtcfC", reinterpret_cast<void*>(toolbar_item_init)},
+        {"$s7SwiftUI15MenuPickerStyleVACycfC", reinterpret_cast<void*>(empty_style_init)},
+        {"$s7SwiftUI16PlainButtonStyleVACycfC", reinterpret_cast<void*>(empty_style_init)},
+        {"$s7SwiftUI19BorderedButtonStyleVACycfC", reinterpret_cast<void*>(empty_style_init)},
+        {"$s7SwiftUI24EnabledTextSelectabilityVACycfC", reinterpret_cast<void*>(empty_style_init)},
+        {"$s7SwiftUI13AnyShapeStyleVyACxcAA0dE0RzlufC", reinterpret_cast<void*>(any_shape_style_init)},
+        {"$s7SwiftUI13withAnimationyxAA0D0VSg_xyKXEtKlF", reinterpret_cast<void*>(with_animation)},
+        {"$s7SwiftUI18LocalizedStringKeyV0D13InterpolationV15literalCapacity18interpolationCountAESi_SitcfC", reinterpret_cast<void*>(key_interpolation_init)},
+        {"$s7SwiftUI18LocalizedStringKeyV0D13InterpolationV13appendLiteralyySSF", reinterpret_cast<void*>(key_append_literal)},
+        {"$s7SwiftUI18LocalizedStringKeyV0D13InterpolationV06appendF0yySSF", reinterpret_cast<void*>(key_append_string)},
+        {"$s7SwiftUI18LocalizedStringKeyV0D13InterpolationV06appendF0_9specifieryx_SStAA18_FormatSpecifiableRzlF", reinterpret_cast<void*>(key_append_integer)},
+        {"$s7SwiftUI18LocalizedStringKeyV19stringInterpolationA2C0dG0V_tcfC", reinterpret_cast<void*>(key_from_interpolation)},
+        {"$s7SwiftUI4ViewPAAE18accessibilityLabelyAA15ModifiedContentVyxAA31AccessibilityAttachmentModifierVGAA4TextVF", reinterpret_cast<void*>(accessibility_label)},
+        {"$s7SwiftUI4ViewPAAE22accessibilityAddTraitsyAA15ModifiedContentVyxAA31AccessibilityAttachmentModifierVGAA0iF0VF", reinterpret_cast<void*>(accessibility_traits)},
+        {"$s7SwiftUI19AccessibilityTraitsV8isHeaderACvgZ", reinterpret_cast<void*>(accessibility_is_header)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

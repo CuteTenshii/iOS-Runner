@@ -34,7 +34,7 @@ constexpr uint32_t kFlagNonInline = 0x20000;
 constexpr size_t kInlineBufferSize = 24;
 constexpr size_t kPointerSize = 8;
 constexpr uint32_t kPointerExtraInhabitants = 0x1000;
-constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
+constexpr uint64_t kBridgePointerMask = 0x00fffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr uint64_t kImmortal = 1ULL << 63;
 constexpr uint32_t kDescriptorGeneric = 0x80;
@@ -63,7 +63,7 @@ struct ValueWitnessTable {
     void (*destructive_inject_enum_tag)(void*, uint32_t, void*);
 };
 
-enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential, StateStorage };
+enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential, StateStorage, Conditional };
 
 struct Metadata;
 
@@ -109,14 +109,20 @@ struct HeapObject {
 
 using Destroyer = void (*)(HeapObject*);
 
+// Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
+inline bool is_not_object(const void* raw) {
+    constexpr uintptr_t kFirstValidAddress = 0x1000;
+    return reinterpret_cast<uintptr_t>(raw) < kFirstValidAddress || reinterpret_cast<intptr_t>(raw) < 0;
+}
+
 void retain(void* raw) {
-    if (raw == nullptr || reinterpret_cast<intptr_t>(raw) < 0) return;
+    if (is_not_object(raw)) return;
     auto* object = static_cast<HeapObject*>(raw);
     if (!(object->references.load(std::memory_order_relaxed) & kImmortal)) object->references.fetch_add(1, std::memory_order_relaxed);
 }
 
 void release(void* raw) {
-    if (raw == nullptr || reinterpret_cast<intptr_t>(raw) < 0) return;
+    if (is_not_object(raw)) return;
     auto* object = static_cast<HeapObject*>(raw);
     if (object->references.load(std::memory_order_relaxed) & kImmortal) return;
     if (object->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -157,6 +163,12 @@ void* witness_copy(void* destination, void* source, void* type) {
     auto* to = static_cast<char*>(destination);
     auto* from = static_cast<char*>(source);
     switch (layout->kind) {
+        case LayoutKind::Conditional: {
+            Metadata* active = layout->fields[state_storage_tag(source, type)].type;
+            memcpy(destination, source, witnesses_of(type)->size);
+            witnesses_of(active)->initialize_with_copy(destination, source, active);
+            break;
+        }
         case LayoutKind::StateStorage:
             memcpy(destination, source, witnesses_of(type)->size);
             if (state_storage_tag(source, type) == layout->value_case) {
@@ -206,6 +218,11 @@ void witness_destroy(void* raw, void* type) {
     const auto* layout = layout_of(type);
     auto* value = static_cast<char*>(raw);
     switch (layout->kind) {
+        case LayoutKind::Conditional: {
+            Metadata* active = layout->fields[state_storage_tag(raw, type)].type;
+            witnesses_of(active)->destroy(raw, active);
+            break;
+        }
         case LayoutKind::StateStorage:
             if (state_storage_tag(raw, type) == layout->value_case) witnesses_of(layout->payload)->destroy(raw, layout->payload);
             else release(*reinterpret_cast<void**>(value + layout->reference_offset));
@@ -274,6 +291,7 @@ uint32_t extra_inhabitant_get(const void* value, void* type) {
         }
         case LayoutKind::Pod:
         case LayoutKind::StateStorage:
+        case LayoutKind::Conditional:
             return 0;
     }
     return 0;
@@ -307,6 +325,7 @@ void extra_inhabitant_store(void* value, uint32_t tag, void* type) {
         }
         case LayoutKind::Pod:
         case LayoutKind::StateStorage:
+        case LayoutKind::Conditional:
             break;
     }
 }
@@ -359,6 +378,7 @@ void witness_store_tag(void* value, uint32_t tag, uint32_t empty_cases, void* ty
 std::recursive_mutex g_types_lock;
 std::map<std::string, Metadata*> g_named_types;
 std::map<const void*, const char*> g_foreign_names;
+std::map<const void*, void*> g_array_elements;
 
 Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector<void*>& arguments, Layout* layout,
                         size_t size, size_t alignment, uint32_t extra_inhabitants) {
@@ -381,7 +401,7 @@ Metadata* make_metadata(uint64_t kind, const void* descriptor, const std::vector
     witnesses->get_enum_tag = +[](const void* value, void*) { return static_cast<uint32_t>(*static_cast<const uint64_t*>(value)); };
     witnesses->destructive_project_enum_data = +[](void*, void*) {};
     witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void* self) {
-        if (layout_of(self)->kind == LayoutKind::StateStorage) {
+        if (layout_of(self)->kind == LayoutKind::StateStorage || layout_of(self)->kind == LayoutKind::Conditional) {
             static_cast<uint8_t*>(value)[witnesses_of(self)->size - 1] = static_cast<uint8_t>(tag);
         } else {
             *static_cast<uint64_t*>(value) = kBridgeImmediateBit | tag;
@@ -562,6 +582,16 @@ Metadata* environment_content_of(Metadata* value) {
     return named_type(key, kKindStruct, layout, payload + 1, alignment, 0, {value});
 }
 
+// _ConditionalContent: either view inline, then a case byte.
+Metadata* conditional_of(const std::string& key, Metadata* first, Metadata* second, const std::vector<void*>& arguments) {
+    const auto* a = witnesses_of(first);
+    const auto* b = witnesses_of(second);
+    const size_t payload = a->size > b->size ? a->size : b->size;
+    const size_t mask = (a->flags & 0xff) > (b->flags & 0xff) ? (a->flags & 0xff) : (b->flags & 0xff);
+    auto* layout = new Layout{LayoutKind::Conditional, {{first, 0}, {second, 0}}, nullptr};
+    return named_type(key, kKindStruct, layout, payload + 1, mask + 1, 0, arguments);
+}
+
 Metadata* lazy_state_of(Metadata* value) {
     const std::string key = "LazyState" + pointer_key(value);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
@@ -593,7 +623,7 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
     static const std::unordered_map<std::string_view, std::vector<FrozenField>> table = {
         {"_$s7SwiftUI15ModifiedContentVMn", {kFirstArgument, kSecondArgument}},
         {"_$s7SwiftUI7BindingVMn", {kWord, kReference, kFirstArgument}},
-        {"_$s7SwiftUI4TextVMn", {kWord, kWord, kWord, kReference}},
+        {"_$s7SwiftUI4TextVMn", {kWord, kReference, kWord, kReference}},
         {"_$s7SwiftUI12_FrameLayoutVMn", {kOptionalDouble, kOptionalDouble, kAlignment}},
         {"_$s7SwiftUI14_PaddingLayoutVMn", {kByte, kPadding}},
         {"_$s7SwiftUI18_AspectRatioLayoutVMn", {kOptionalDouble, kByte}},
@@ -640,6 +670,9 @@ size_t witness_word_count(const std::string& symbol) {
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
     if (symbol == "_$ss11AnyHashableVMn") return named_type("AnyHashable", kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
+    if ((symbol == "_$s7SwiftUI19_ConditionalContentVMn" || symbol == "_$s7SwiftUI19_ConditionalContentV7StorageOMn") && arguments.size() >= 2) {
+        return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
+    }
     if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
     if (symbol == "_$ss5UInt8VMn") return pod_type("UInt8", 1);
     if (symbol == "_$ss5NeverOMn") return pod_type("Never", 0);
@@ -901,6 +934,7 @@ private:
             std::string key = name;
             for (const void* argument : arguments) key += pointer_key(argument);
             node.type = bridge_type(key, arguments);
+            if (strcmp(name, "$Array") == 0 && !arguments.empty()) g_array_elements[node.type] = arguments[0];
         } else {
             node.type = metadata_for_descriptor(base.nominal, arguments);
         }
@@ -1498,4 +1532,25 @@ std::vector<TypeField> type_fields(const void* metadata) {
     if (layout == nullptr) return result;
     for (const auto& field : layout->fields) result.push_back({field.type, field.offset});
     return result;
+}
+
+bool conditional_active(const void* metadata, const void* value, TypeField& out) {
+    const auto* layout = layout_of(metadata);
+    if (g_foreign_names.find(metadata) == g_foreign_names.end() || layout->kind != LayoutKind::Conditional) return false;
+    out = {layout->fields[state_storage_tag(value, metadata)].type, 0};
+    return true;
+}
+
+bool optional_payload(const void* metadata, const void* value, TypeField& out) {
+    if (static_cast<const Metadata*>(metadata)->kind != kKindOptional) return false;
+    auto* payload = layout_of(metadata)->payload;
+    if (witnesses_of(payload)->get_enum_tag_single_payload(value, 1, payload) != 0) out = {nullptr, 0};
+    else out = {payload, 0};
+    return true;
+}
+
+void* array_element_type(const void* metadata) {
+    const std::lock_guard guard(g_types_lock);
+    const auto found = g_array_elements.find(metadata);
+    return found == g_array_elements.end() ? nullptr : found->second;
 }

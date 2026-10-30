@@ -21,8 +21,8 @@
 namespace {
 
 constexpr uint64_t kImmortal = 1ULL << 63;
-// Swift keeps its discriminator bits in the top nibble of bridged references.
-constexpr uint64_t kBridgePointerMask = 0x0ffffffffffffff8ULL;
+// Swift keeps flags and discriminators in the top byte of bridged references.
+constexpr uint64_t kBridgePointerMask = 0x00fffffffffffff8ULL;
 constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
 constexpr size_t kBodyBufferSize = 64 * 1024;
 constexpr size_t kForeignWitnessTableWords = 32;
@@ -34,8 +34,14 @@ struct HeapObject {
 
 using Destroyer = void (*)(HeapObject*);
 
+// Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
+inline bool is_not_object(const void* raw) {
+    constexpr uintptr_t kFirstValidAddress = 0x1000;
+    return reinterpret_cast<uintptr_t>(raw) < kFirstValidAddress || reinterpret_cast<intptr_t>(raw) < 0;
+}
+
 void* retain_object(void* raw) {
-    if (raw == nullptr || reinterpret_cast<intptr_t>(raw) < 0) return raw;
+    if (is_not_object(raw)) return raw;
     auto* object = static_cast<HeapObject*>(raw);
     if (!(object->references.load(std::memory_order_relaxed) & kImmortal)) {
         object->references.fetch_add(1, std::memory_order_relaxed);
@@ -44,7 +50,7 @@ void* retain_object(void* raw) {
 }
 
 void release_object(void* raw) {
-    if (raw == nullptr || reinterpret_cast<intptr_t>(raw) < 0) return;
+    if (is_not_object(raw)) return;
     auto* object = static_cast<HeapObject*>(raw);
     if (object->references.load(std::memory_order_relaxed) & kImmortal) return;
     if (object->references.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -168,7 +174,7 @@ void rt_swift_deallocClassInstance(void* object, size_t, size_t) { free(object);
 void* rt_swift_setDeallocating(void* object) { return object; }
 
 void* rt_swift_retain_n(void* raw, uint32_t count) {
-    if (raw != nullptr && reinterpret_cast<intptr_t>(raw) >= 0) {
+    if (!is_not_object(raw)) {
         auto* object = static_cast<HeapObject*>(raw);
         if (!(object->references.load(std::memory_order_relaxed) & kImmortal)) {
             object->references.fetch_add(count, std::memory_order_relaxed);
