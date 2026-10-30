@@ -37,3 +37,6 @@ bool optional_payload(const void* metadata, const void* value, TypeField& out);
 
 // The element type of an Array's metadata, or nullptr for any other type.
 void* array_element_type(const void* metadata);
+
+// Metadata of Optional<T>.
+void* optional_metadata(void* payload);

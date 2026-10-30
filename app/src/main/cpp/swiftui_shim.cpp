@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+#include <map>
 #include <new>
 #include <set>
 #include <unordered_map>
@@ -182,6 +184,12 @@ struct ViewNode {
     const void* action;
     void* action_context;
     BindingNode* binding;
+    std::string* detail;
+    void* item_type;
+    void* content_type;
+    int64_t lower;
+    int64_t upper;
+    int64_t step;
 };
 
 // Framework values can hold plain numbers in the same word as a node, so nodes are identified by registry.
@@ -195,6 +203,7 @@ void destroy_node(HeapHeader* object) {
     live_nodes().erase(node);
     delete node->title;
     delete node->system_image;
+    delete node->detail;
     for (const auto& child : *node->children) {
         witnesses_of(child.type)->destroy(child.value, child.type);
         free(child.value);
@@ -214,6 +223,7 @@ ViewNode* new_node(NodeKind kind) {
     node->kind = kind;
     node->title = new std::string();
     node->system_image = new std::string();
+    node->detail = new std::string();
     node->children = new std::vector<ChildValue>();
     live_nodes().insert(node);
     return node;
@@ -301,8 +311,9 @@ SWIFTCC void toggle_title_init(SWIFT_OUT ViewNode** out, const SwiftString* titl
 
 void add_value_child(ViewNode* node, void* value_pointer, void* type) { add_self_child(node, value_pointer, type); }
 
-SWIFTCC void picker_init(SWIFT_OUT ViewNode** out, const uint64_t* selection, void* label, const void* content, void* content_context, void* label_type, void*, void* content_type) {
+SWIFTCC void picker_init(SWIFT_OUT ViewNode** out, const uint64_t* selection, void* label, const void* content, void* content_context, void* label_type, void* selection_type, void* content_type) {
     auto* node = new_node(NodeKind::Picker);
+    node->item_type = selection_type;
     node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(selection[1])));
     add_value_child(node, label, label_type);
     evaluate_child(node, content, content_context, content_type);
@@ -357,8 +368,11 @@ SWIFTCC void section_create(SWIFT_OUT ViewNode** out, uint64_t, uint64_t, uint64
 
 SWIFTCC void progress_view_init(SWIFT_OUT ViewNode** out) { *out = new_node(NodeKind::ProgressView); }
 
-SWIFTCC void stepper_init(SWIFT_OUT ViewNode** out, const uint64_t* value, void*, void*, uint64_t, uint64_t, const void* label, void* label_context, void* label_type) {
+SWIFTCC void stepper_init(SWIFT_OUT ViewNode** out, const uint64_t* value, const int64_t* range, const int64_t* step, uint64_t, uint64_t, const void* label, void* label_context, void* label_type) {
     auto* node = new_node(NodeKind::Stepper);
+    node->lower = range[0];
+    node->upper = range[1];
+    node->step = *step;
     node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(value[1])));
     evaluate_child(node, label, label_context, label_type);
     *out = node;
@@ -413,7 +427,7 @@ SWIFTCC void unavailable_init(SWIFT_OUT ViewNode** out, const SwiftString* title
     auto* node = new_node(NodeKind::Unavailable);
     *node->title = swift_string_to_utf8(*title);
     *node->system_image = swift_string_to_utf8(system_image);
-    (void)description;
+    if (description.text_object != 0) *node->detail = swift_string_to_utf8({description.text_bits, description.text_object});
     *out = node;
 }
 
@@ -424,8 +438,9 @@ SWIFTCC void menu_init(SWIFT_OUT ViewNode** out, const void* content, void* cont
     *out = node;
 }
 
-SWIFTCC void link_init(SWIFT_OUT ViewNode** out, const void*, const void* label, void* label_context, void* label_type) {
+SWIFTCC void link_init(SWIFT_OUT ViewNode** out, void** url, const void* label, void* label_context, void* label_type) {
     auto* node = new_node(NodeKind::Link);
+    *node->detail = foundation_url_text(*url);
     evaluate_child(node, label, label_context, label_type);
     *out = node;
 }
@@ -516,8 +531,10 @@ SWIFTCC void on_change_modifier(SWIFT_OUT ViewNode** out, const void*, uint64_t,
     *out = node;
 }
 
-SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, const uint64_t* item, uint64_t, uint64_t, const void* content, void* content_context, void* self_type, void*, void*, void*, void*, void*, SWIFT_CONTEXT void* self) {
+SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, const uint64_t* item, uint64_t, uint64_t, const void* content, void* content_context, void* self_type, void* item_type, void* content_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
     auto* node = new_node(NodeKind::Sheet);
+    node->item_type = item_type;
+    node->content_type = content_type;
     node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(item[1])));
     node->action = content;
     node->action_context = rt_swift_retain(content_context);
@@ -757,8 +774,10 @@ SWIFTCC void* environment_tint(SWIFT_CONTEXT void*) { return nullptr; }
 
 SWIFTCC void environment_action_get(SWIFT_OUT uint64_t* out, SWIFT_CONTEXT void*) { *out = kImmediate; }
 
-SWIFTCC void dismiss_action_call(SWIFT_CONTEXT void*) { engine_log("ACTION: dismiss"); }
-SWIFTCC void open_url_action_call(const void*, SWIFT_CONTEXT void*) { engine_log("ACTION: open URL"); }
+void dismiss_presented_sheet();
+
+SWIFTCC void dismiss_action_call(SWIFT_CONTEXT void*) { dismiss_presented_sheet(); }
+SWIFTCC void open_url_action_call(void** url, SWIFT_CONTEXT void*) { engine_emit("open", foundation_url_text(*url)); }
 
 // A tab's identified view is the tab itself, kept as one reference to its node.
 SWIFTCC void tab_identified_view(SWIFT_OUT void** out, void*, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
@@ -771,8 +790,8 @@ SWIFTCC void task_modifier_init(SWIFT_OUT ViewNode** out, uint64_t, uint64_t, ui
     *out = node;
 }
 
-std::set<const void*>& started_tasks() {
-    static std::set<const void*> started;
+std::set<std::string>& started_tasks() {
+    static std::set<std::string> started;
     return started;
 }
 
@@ -921,6 +940,8 @@ const char* find_view_conformance(const void* type) { return find_conformance(ty
 constexpr uint64_t kTupleKind = 0x301;
 constexpr const char* kTextSymbol = "_$s7SwiftUI4TextVMn";
 constexpr const char* kModifiedContentSymbol = "_$s7SwiftUI15ModifiedContentVMn";
+constexpr const char* kTagModifierSymbol = "_$s7SwiftUI24_TagTraitWritingModifierVMn";
+BindingNode* g_picker_binding = nullptr;
 
 bool is_runtime_node_type(void* type) {
     const auto* witnesses = witnesses_of(type);
@@ -935,91 +956,425 @@ bool is_view_like(void* type) {
     return find_view_conformance(type) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
 }
 
-void walk_view(void* value, void* type, int depth) {
+std::string json_string(const std::string& text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        const auto byte = static_cast<unsigned char>(c);
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (byte < 0x20) {
+            char escaped[8];
+            snprintf(escaped, sizeof escaped, "\\u%04x", byte);
+            out += escaped;
+        } else {
+            out += c;
+        }
+    }
+    return out + "\"";
+}
+
+enum class ActionKind { Closure, Toggle, StepBy, SetValue, DismissSheet, OpenUrl };
+
+struct Action {
+    ActionKind kind;
+    const void* function;
+    void* context;
+    BindingNode* binding;
+    void* value;
+    void* type;
+    int64_t amount;
+    std::string text;
+};
+
+std::vector<Action> g_actions;
+BindingNode* g_presented_sheet = nullptr;
+void* g_presented_sheet_type = nullptr;
+
+int add_action(Action action) {
+    g_actions.push_back(std::move(action));
+    return static_cast<int>(g_actions.size()) - 1;
+}
+
+void* bool_metadata() {
+    static void* metadata = type_system_symbol("$sSbN");
+    return metadata;
+}
+
+void* int_metadata() {
+    static void* metadata = type_system_symbol("$sSiN");
+    return metadata;
+}
+
+void* string_metadata() {
+    static void* metadata = type_system_symbol("$sSSN");
+    return metadata;
+}
+
+std::map<std::string, StateBox*>& preserved_states() {
+    static std::map<std::string, StateBox*> states;
+    return states;
+}
+
+constexpr size_t kDescriptorFieldsOffset = 16;
+constexpr size_t kStructFieldOffsetVectorOffset = 24;
+constexpr size_t kFieldDescriptorHeaderBytes = 16;
+constexpr size_t kFieldRecordBytes = 12;
+constexpr size_t kFieldRecordTypeOffset = 4;
+constexpr uint32_t kDescriptorIsGeneric = 0x80;
+constexpr const char* kLazyStateSymbol = "_$s7SwiftUI9LazyStateVMn";
+
+struct StateField {
+    char* location;
+    size_t index;
+};
+
+// Finds a view's @State storage from its reflection metadata, so state can outlive each re-evaluation of the view.
+std::vector<StateField> state_fields(char* view, void* type) {
+    std::vector<StateField> found;
+    const auto* descriptor = static_cast<const char*>(static_cast<void**>(type)[kMetadataDescriptorWord]);
+    if (descriptor == nullptr) return found;
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    constexpr uint32_t kKindMask = 0x1f;
+    constexpr uint32_t kKindStruct = 17;
+    if ((flags & kKindMask) != kKindStruct) return found;
+    const auto* fields = static_cast<const char*>(relative_pointer(descriptor + kDescriptorFieldsOffset));
+    if (fields == nullptr) return found;
+    uint32_t count;
+    memcpy(&count, fields + 12, sizeof count);
+    uint32_t vector_word;
+    memcpy(&vector_word, descriptor + kStructFieldOffsetVectorOffset, sizeof vector_word);
+    const auto* offsets = reinterpret_cast<const uint32_t*>(static_cast<void**>(type) + vector_word);
+    void* const* generics = (flags & kDescriptorIsGeneric) ? static_cast<void* const*>(type) + kMetadataArgumentsWord : nullptr;
+    for (uint32_t i = 0; i < count; ++i) {
+        const char* record = fields + kFieldDescriptorHeaderBytes + i * kFieldRecordBytes;
+        int32_t name_offset;
+        memcpy(&name_offset, record + kFieldRecordTypeOffset, sizeof name_offset);
+        if (name_offset == 0) continue;
+        const char* name = record + kFieldRecordTypeOffset + name_offset;
+        // Only a symbolic reference to LazyState can name one; plain field types need no metadata lookup.
+        if (static_cast<uint8_t>(name[0]) != 1 && static_cast<uint8_t>(name[0]) != 2) continue;
+        int32_t target_offset;
+        memcpy(&target_offset, name + 1, sizeof target_offset);
+        const void* target = name + 1 + target_offset;
+        if (static_cast<uint8_t>(name[0]) == 2) memcpy(&target, target, sizeof target);
+        const char* symbol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(target));
+        if (symbol == nullptr || strcmp(symbol, kLazyStateSymbol) != 0) continue;
+        void* metadata = resolve_mangled_type(name, generics);
+        found.push_back({view + offsets[i] + lazy_state_location_offset(metadata), i});
+    }
+    return found;
+}
+
+void* g_selection_value = nullptr;
+void* g_selection_type = nullptr;
+
+bool values_equal(void* left, void* right, void* type) {
+    if (type == string_metadata()) {
+        return swift_string_to_utf8(*static_cast<SwiftString*>(left)) == swift_string_to_utf8(*static_cast<SwiftString*>(right));
+    }
+    return memcmp(left, right, witnesses_of(type)->size) == 0;
+}
+
+std::string text_color_name(uint64_t style) {
+    switch ((style & kTextColorMask) >> kTextColorShift) {
+        case kColorRed: return "red";
+        case kColorGreen: return "green";
+        case kColorAccent: return "accent";
+        case kColorSecondary:
+        case kStyleSecondary:
+        case kStyleQuaternary: return "secondary";
+        default: return "";
+    }
+}
+
+const char* font_name(uint64_t style) {
+    switch ((style & kTextFontMask) & 0xffff) {
+        case kFontCaption: return "caption";
+        case kFontCaption2: return "caption2";
+        case kFontFootnote: return "footnote";
+        default: return "body";
+    }
+}
+
+std::string render(void* value, void* type, const std::string& path, int depth);
+
+std::string render_children(ViewNode* node, const std::string& path, int depth) {
+    std::string out;
+    size_t index = 0;
+    for (const auto& child : *node->children) {
+        const std::string rendered = render(child.value, child.type, path + "/" + std::to_string(index++), depth + 1);
+        if (rendered.empty()) continue;
+        if (!out.empty()) out += ',';
+        out += rendered;
+    }
+    return out;
+}
+
+std::string node_json(const std::string& kind, const std::string& properties, const std::string& children) {
+    std::string out = "{\"k\":\"" + kind + "\"";
+    if (!properties.empty()) out += "," + properties;
+    if (!children.empty()) out += ",\"c\":[" + children + "]";
+    return out + "}";
+}
+
+std::string text_properties(const std::string& title, const std::string& icon) {
+    std::string out;
+    if (!title.empty()) out += "\"t\":" + json_string(title);
+    if (!icon.empty()) {
+        if (!out.empty()) out += ',';
+        out += "\"i\":" + json_string(icon);
+    }
+    return out;
+}
+
+std::string render_node(ViewNode* node, const std::string& path, int depth) {
+    switch (node->kind) {
+        case NodeKind::Task:
+            if (started_tasks().insert(path).second) concurrency_start(node->action, node->action_context);
+            return {};
+        case NodeKind::Button: {
+            const int action = add_action({ActionKind::Closure, node->action, node->action_context, nullptr, nullptr, nullptr, 0, {}});
+            return node_json("button", "\"a\":" + std::to_string(action), render_children(node, path, depth));
+        }
+        case NodeKind::Link: {
+            const int action = add_action({ActionKind::OpenUrl, nullptr, nullptr, nullptr, nullptr, nullptr, 0, *node->detail});
+            return node_json("button", "\"a\":" + std::to_string(action), render_children(node, path, depth));
+        }
+        case NodeKind::Toggle: {
+            bool current = false;
+            binding_read(node->binding, &current, bool_metadata());
+            const int action = add_action({ActionKind::Toggle, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
+            std::string properties = "\"a\":" + std::to_string(action) + ",\"v\":" + (current ? "true" : "false");
+            if (!node->title->empty()) properties += ",\"t\":" + json_string(*node->title);
+            return node_json("toggle", properties, render_children(node, path, depth));
+        }
+        case NodeKind::Stepper: {
+            int64_t current = 0;
+            binding_read(node->binding, &current, int_metadata());
+            std::string properties = "\"v\":" + std::to_string(current);
+            if (current - node->step >= node->lower) {
+                properties += ",\"d\":" + std::to_string(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, -node->step, {}}));
+            }
+            if (current + node->step <= node->upper) {
+                properties += ",\"a\":" + std::to_string(add_action({ActionKind::StepBy, nullptr, nullptr, node->binding, nullptr, nullptr, node->step, {}}));
+            }
+            return node_json("stepper", properties, render_children(node, path, depth));
+        }
+        case NodeKind::Picker: {
+            void* outer_value = g_selection_value;
+            void* outer_type = g_selection_type;
+            void* selection_type = node->item_type;
+            void* current = calloc(1, witnesses_of(selection_type)->size + 1);
+            binding_read(node->binding, current, selection_type);
+            BindingNode* outer_binding = g_picker_binding;
+            g_selection_value = current;
+            g_selection_type = selection_type;
+            g_picker_binding = node->binding;
+            const std::string children = render_children(node, path, depth);
+            g_selection_value = outer_value;
+            g_selection_type = outer_type;
+            g_picker_binding = outer_binding;
+            return node_json("picker", {}, children);
+        }
+        case NodeKind::Sheet: {
+            std::string children = render_children(node, path, depth);
+            void* optional_type = optional_metadata(node->item_type);
+            void* item = calloc(1, witnesses_of(optional_type)->size + 1);
+            binding_read(node->binding, item, optional_type);
+            TypeField payload;
+            if (optional_payload(optional_type, item, payload) && payload.type != nullptr) {
+                const size_t size = witnesses_of(node->content_type)->size;
+                void* content = calloc(1, size == 0 ? 1 : size);
+                rt_call_witness(node->action, content, node->action_context, item, nullptr);
+                g_presented_sheet = node->binding;
+                g_presented_sheet_type = optional_type;
+                const int action = add_action({ActionKind::DismissSheet, nullptr, nullptr, nullptr, nullptr, nullptr, 0, {}});
+                const std::string sheet = render(content, node->content_type, path + "/sheet", depth + 1);
+                const std::string json = node_json("sheet", "\"d\":" + std::to_string(action), sheet);
+                children = children.empty() ? json : children + "," + json;
+            }
+            return children;
+        }
+        case NodeKind::TabView: return node_json("tabs", {}, render_children(node, path, depth));
+        case NodeKind::Tab: return node_json("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+        case NodeKind::NavigationStack: return node_json("nav", {}, render_children(node, path, depth));
+        case NodeKind::List: return node_json("list", {}, render_children(node, path, depth));
+        case NodeKind::Section: return node_json("section", {}, render_children(node, path, depth));
+        case NodeKind::Label: return node_json("h", {}, render_children(node, path, depth));
+        case NodeKind::Menu: return node_json("menu", {}, render_children(node, path, depth));
+        case NodeKind::Disclosure: return node_json("disclosure", {}, render_children(node, path, depth));
+        case NodeKind::Toolbar: return node_json("toolbar", {}, render_children(node, path, depth));
+        case NodeKind::ToolbarItem: return node_json("toolbaritem", {}, render_children(node, path, depth));
+        case NodeKind::ProgressView: return node_json("progress", {}, {});
+        case NodeKind::AsyncImage: return node_json("image", {}, {});
+        case NodeKind::Image: return node_json("image", text_properties(*node->title, *node->system_image), {});
+        case NodeKind::LabeledContent: return node_json("labeled", text_properties(*node->title, *node->system_image), render_children(node, path, depth));
+        case NodeKind::Unavailable: {
+            std::string properties = text_properties(*node->title, *node->system_image);
+            if (!node->detail->empty()) properties += ",\"s\":" + json_string(*node->detail);
+            return node_json("unavailable", properties, {});
+        }
+        case NodeKind::Modifier: {
+            const std::string children = render_children(node, path, depth);
+            if (node->title->empty()) return children;
+            return node_json("titled", "\"t\":" + json_string(*node->title), children);
+        }
+        case NodeKind::ForEach:
+        case NodeKind::OnChange:
+        case NodeKind::ImageResource:
+            return render_children(node, path, depth);
+    }
+    return {};
+}
+
+std::string render(void* value, void* type, const std::string& path, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
         abort();
     }
     TypeField branch;
     if (conditional_active(type, value, branch) || optional_payload(type, value, branch)) {
-        if (branch.type != nullptr) walk_view(value, branch.type, depth);
-        return;
+        return branch.type != nullptr ? render(value, branch.type, path, depth) : std::string();
     }
     const uint64_t kind_word = *static_cast<uint64_t*>(type);
     const char* name = foreign_type_name(type);
     if (name != nullptr || kind_word == kTupleKind) {
         if (name != nullptr && strcmp(name, kTextSymbol) == 0) {
             const auto* text = static_cast<const TextValue*>(value);
-            engine_log("VIEW: %*sText \"%s\"", depth * 2, "", swift_string_to_utf8({text->text_bits, text->text_object}).c_str());
-            return;
+            std::string properties = "\"t\":" + json_string(swift_string_to_utf8({text->text_bits, text->text_object}));
+            const std::string color = text_color_name(text->style);
+            if (!color.empty()) properties += ",\"color\":\"" + color + "\"";
+            properties += ",\"font\":\"" + std::string(font_name(text->style)) + "\"";
+            if (text->style & kFontBold) properties += ",\"bold\":true";
+            return node_json("text", properties, {});
         }
         const auto* witnesses = witnesses_of(type);
-        const bool reference_node = witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0;
-        if (reference_node) {
+        if (witnesses->size == sizeof(void*) && (witnesses->flags & kFlagNonPod) != 0) {
             auto* node = *static_cast<ViewNode**>(value);
-            if (live_nodes().count(node) != 0) {
-                if (node->kind == NodeKind::Task) {
-                    if (started_tasks().insert(node->action).second) {
-                        concurrency_start(node->action, node->action_context);
-                        engine_log("VIEW: %*s.task started", depth * 2, "");
-                    }
-                    return;
-                }
-                engine_log("VIEW: %*s%s \"%s\" %s", depth * 2, "", node_kind_name(node->kind), node->title->c_str(), node->system_image->c_str());
-                for (const auto& child : *node->children) walk_view(child.value, child.type, depth + 1);
-                return;
-            }
+            if (live_nodes().count(node) != 0) return render_node(node, path, depth);
         }
         const auto fields = type_fields(type);
-        if (!fields.empty()) {
-            if (name != nullptr && strcmp(name, kModifiedContentSymbol) == 0) {
-                // A modifier's fields are configuration; only runtime nodes such as .task need visiting.
-                walk_view(static_cast<char*>(value) + fields[0].offset, fields[0].type, depth);
-                if (fields.size() > 1 && is_runtime_node_type(fields[1].type)) walk_view(static_cast<char*>(value) + fields[1].offset, fields[1].type, depth);
-                return;
-            }
-            for (const auto& field : fields) {
-                if (is_view_like(field.type)) walk_view(static_cast<char*>(value) + field.offset, field.type, depth + (kind_word == kTupleKind ? 0 : 1));
-            }
-            return;
+        if (fields.empty()) {
+            if (name != nullptr && strcmp(name, "_$s7SwiftUI6SpacerVMn") == 0) return node_json("spacer", {}, {});
+            return {};
         }
-        // Modifiers without a runtime node are configuration, not missing views.
-        if (name != nullptr && strstr(name, "Modifier") == nullptr && strstr(name, "TraitKey") == nullptr) {
-            engine_log("VIEW: %*s%s (no renderer yet)", depth * 2, "", name);
+        if (name != nullptr && strcmp(name, kModifiedContentSymbol) == 0) {
+            std::string content = render(static_cast<char*>(value) + fields[0].offset, fields[0].type, path, depth);
+            const char* modifier = foreign_type_name(fields[1].type);
+            auto* modifier_value = static_cast<char*>(value) + fields[1].offset;
+            if (modifier != nullptr && strcmp(modifier, kTagModifierSymbol) == 0 && g_selection_value != nullptr) {
+                void* tag_type = type_fields(fields[1].type)[0].type;
+                void* tag = calloc(1, witnesses_of(tag_type)->size + 1);
+                witnesses_of(tag_type)->initialize_with_copy(tag, modifier_value, tag_type);
+                const bool selected = tag_type == g_selection_type && values_equal(tag, g_selection_value, tag_type);
+                const int action = add_action({ActionKind::SetValue, nullptr, nullptr, g_picker_binding, tag, tag_type, 0, {}});
+                return node_json("option", "\"a\":" + std::to_string(action) + ",\"v\":" + (selected ? "true" : "false"), content);
+            }
+            if (is_runtime_node_type(fields[1].type)) {
+                const std::string extra = render(modifier_value, fields[1].type, path + "/m", depth);
+                if (!extra.empty()) content = content.empty() ? extra : content + "," + extra;
+            }
+            return content;
         }
-        return;
+        std::string children;
+        size_t index = 0;
+        for (const auto& field : fields) {
+            const size_t current = index++;
+            if (!is_view_like(field.type)) continue;
+            const std::string rendered = render(static_cast<char*>(value) + field.offset, field.type, path + "." + std::to_string(current), depth + 1);
+            if (rendered.empty()) continue;
+            if (!children.empty()) children += ',';
+            children += rendered;
+        }
+        if (name == nullptr) return children;
+        if (strcmp(name, "_$s7SwiftUI6HStackVMn") == 0) return node_json("h", {}, children);
+        if (strcmp(name, "_$s7SwiftUI6VStackVMn") == 0) return node_json("v", {}, children);
+        return children;
     }
-    if (find_conformance(type, kRepresentableSymbol) != nullptr) {
-        engine_log("VIEW: %*snative view (UIViewRepresentable)", depth * 2, "");
-        return;
-    }
+    if (find_conformance(type, kRepresentableSymbol) != nullptr) return node_json("native", {}, {});
     const char* conformance = find_view_conformance(type);
-    if (conformance == nullptr) {
-        const void* descriptor = static_cast<void**>(type)[kMetadataDescriptorWord];
-        const char* type_name = "?";
-        if (descriptor != nullptr && (reinterpret_cast<uintptr_t>(descriptor) & 3) == 0) {
-            const auto* parsed = static_cast<const char*>(relative_pointer(static_cast<const char*>(descriptor) + kDescriptorNameOffset));
-            if (parsed != nullptr) type_name = parsed;
-        }
-        engine_log("VIEW: %*s(%s has no View conformance, size %zu)", depth * 2, "", type_name, witnesses_of(type)->size);
-        return;
-    }
+    if (conformance == nullptr) return {};
     const void* body = find_witness(conformance, &g_view_body_requirement);
     const void* body_type_name = find_witness(conformance, &g_view_body_type_requirement);
     if (body == nullptr || body_type_name == nullptr) {
         engine_log("STOP: a view conformance has no body witness");
         abort();
     }
-    engine_log("VIEW: %*sapp view", depth * 2, "");
-    void* const* generics = static_cast<void* const*>(type) + kMetadataArgumentsWord;
+
+    // Structural identity: the same position in the tree keeps the same @State across re-evaluation.
+    auto fields = state_fields(static_cast<char*>(value), type);
+    for (const auto& field : fields) {
+        const auto saved = preserved_states().find(path + "#" + std::to_string(field.index));
+        if (saved != preserved_states().end()) *reinterpret_cast<StateBox**>(field.location) = static_cast<StateBox*>(rt_swift_retain(saved->second));
+    }
     // The low bit of an associated type witness marks it as a mangled name rather than an accessor.
     const auto* body_name = reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(body_type_name) & ~static_cast<uintptr_t>(1));
+    void* const* generics = static_cast<void* const*>(type) + kMetadataArgumentsWord;
     void* body_metadata = resolve_mangled_type(body_name, generics);
     const size_t size = witnesses_of(body_metadata)->size;
     void* output = calloc(1, size == 0 ? 1 : size);
     auto** table = static_cast<void**>(rt_swift_getWitnessTable_for_view(conformance, type));
     rt_call_witness(body, output, value, type, table);
-    walk_view(output, body_metadata, depth + 1);
+    for (const auto& field : fields) {
+        auto* state = *reinterpret_cast<StateBox**>(field.location);
+        if (state != nullptr) preserved_states()[path + "#" + std::to_string(field.index)] = static_cast<StateBox*>(rt_swift_retain(state));
+    }
+    return render(output, body_metadata, path + "/b", depth + 1);
+}
+
+void dismiss_presented_sheet() {
+    if (g_presented_sheet == nullptr) return;
+    const auto* witnesses = witnesses_of(g_presented_sheet_type);
+    void* nothing = calloc(1, witnesses->size + 1);
+    witnesses->store_enum_tag_single_payload(nothing, 1, 1, g_presented_sheet_type);
+    binding_write(g_presented_sheet, nothing, g_presented_sheet_type);
+    g_presented_sheet = nullptr;
+}
+
+void perform_action(const Action& action) {
+    switch (action.kind) {
+        case ActionKind::Closure:
+            rt_call_witness(action.function, nullptr, action.context, nullptr, nullptr);
+            break;
+        case ActionKind::Toggle: {
+            bool current = false;
+            binding_read(action.binding, &current, bool_metadata());
+            current = !current;
+            binding_write(action.binding, &current, bool_metadata());
+            break;
+        }
+        case ActionKind::StepBy: {
+            int64_t current = 0;
+            binding_read(action.binding, &current, int_metadata());
+            current += action.amount;
+            binding_write(action.binding, &current, int_metadata());
+            break;
+        }
+        case ActionKind::SetValue:
+            binding_write(action.binding, action.value, action.type);
+            break;
+        case ActionKind::DismissSheet:
+            dismiss_presented_sheet();
+            break;
+        case ActionKind::OpenUrl:
+            engine_emit("open", action.text);
+            break;
+    }
+}
+
+void* g_root_content = nullptr;
+void* g_root_type = nullptr;
+
+void render_tree() {
+    g_actions.clear();
+    g_presented_sheet = nullptr;
+    g_tree_dirty.store(false, std::memory_order_relaxed);
+    const std::string tree = render(g_root_content, g_root_type, "r", 0);
+    engine_emit("tree", "[" + tree + "]");
 }
 
 }  // namespace
@@ -1047,12 +1402,27 @@ void swiftui_attach_image(const MachImage& image) {
 
 void swiftui_run_scene(void* scene) {
     auto* box = *static_cast<ViewBox**>(scene);
-    void* content = calloc(1, kBodyBufferSize);
+    const size_t size = witnesses_of(box->content_type)->size;
+    g_root_content = calloc(1, size == 0 ? 1 : size);
+    g_root_type = box->content_type;
     engine_log("SCENE: running WindowGroup content");
-    rt_call_witness(box->closure, content, box->closure_context, nullptr, nullptr);
-    walk_view(content, box->content_type, 0);
-    concurrency_drain();
-    engine_log("SCENE: finished walking");
+    rt_call_witness(box->closure, g_root_content, box->closure_context, nullptr, nullptr);
+
+    // The guest thread lives here: each action runs the app's own code, then the tree is re-evaluated if needed.
+    for (;;) {
+        do {
+            render_tree();
+            concurrency_drain();
+        } while (g_tree_dirty.load(std::memory_order_relaxed));
+        const int action = engine_wait_for_action();
+        if (action < 0) return;
+        if (static_cast<size_t>(action) < g_actions.size()) {
+            const Action current = g_actions[static_cast<size_t>(action)];
+            perform_action(current);
+            concurrency_drain();
+        }
+        g_tree_dirty.store(true, std::memory_order_relaxed);
+    }
 }
 
 void* swiftui_symbol(std::string_view name) {

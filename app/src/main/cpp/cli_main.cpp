@@ -16,5 +16,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "usage: %s <bundle dir> <executable name>\n", argv[0]);
         return 2;
     }
+    // Without a UI there is nothing to act: print the first tree and let the guest finish.
+    engine_set_message_sink(+[](const char* kind, const char* payload) { fprintf(stdout, "EMIT %s %s\n", kind, payload); fflush(stdout); });
+    engine_close_actions();
     return run_app_bundle(argv[1], argv[2], "");
 }

@@ -14,3 +14,6 @@ struct SwiftString {
 
 std::string swift_string_to_utf8(SwiftString value);
 SwiftString swift_string_from_utf8(const std::string& text);
+
+// The text of a Foundation.URL held in its runtime box.
+std::string foundation_url_text(const void* url);

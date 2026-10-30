@@ -8,12 +8,15 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <map>
+#include <mutex>
 
 #include "macho.h"
 #include "symbols.h"
@@ -207,6 +210,43 @@ void engine_log(const char* format, ...) {
 }
 
 const std::string& engine_bundle_dir() { return g_bundle_dir; }
+
+namespace {
+
+void (*g_message_sink)(const char*, const char*) = nullptr;
+std::mutex g_action_lock;
+std::condition_variable g_action_ready;
+std::deque<int> g_pending_actions;
+bool g_actions_closed = false;
+
+}  // namespace
+
+void engine_set_message_sink(void (*sink)(const char*, const char*)) { g_message_sink = sink; }
+
+void engine_emit(const char* kind, const std::string& payload) {
+    if (g_message_sink != nullptr) g_message_sink(kind, payload.c_str());
+}
+
+int engine_wait_for_action() {
+    std::unique_lock lock(g_action_lock);
+    g_action_ready.wait(lock, [] { return g_actions_closed || !g_pending_actions.empty(); });
+    if (g_pending_actions.empty()) return -1;
+    const int action = g_pending_actions.front();
+    g_pending_actions.pop_front();
+    return action;
+}
+
+void engine_post_action(int action) {
+    const std::lock_guard lock(g_action_lock);
+    g_pending_actions.push_back(action);
+    g_action_ready.notify_one();
+}
+
+void engine_close_actions() {
+    const std::lock_guard lock(g_action_lock);
+    g_actions_closed = true;
+    g_action_ready.notify_one();
+}
 
 int run_app_bundle(const std::string& bundle_dir, const std::string& executable, const std::string& log_path) {
     g_bundle_dir = bundle_dir;

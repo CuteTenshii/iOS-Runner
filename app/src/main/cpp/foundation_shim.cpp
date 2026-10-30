@@ -776,6 +776,8 @@ __asm__(
     "  ldr x0, [x22, #8]\n"
     "  br x0\n");
 
+std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
+
 void foundation_register_classes() {
     g_url_session_data_record.context_size = kUrlSessionContextBytes;
     g_url_session_data_record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(rt_url_session_data) - reinterpret_cast<intptr_t>(&g_url_session_data_record));

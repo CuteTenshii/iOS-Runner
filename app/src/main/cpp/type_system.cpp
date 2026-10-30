@@ -1666,3 +1666,8 @@ void* array_element_type(const void* metadata) {
     const auto found = g_array_elements.find(metadata);
     return found == g_array_elements.end() ? nullptr : found->second;
 }
+
+void* optional_metadata(void* payload) {
+    const std::lock_guard guard(g_types_lock);
+    return optional_of(static_cast<Metadata*>(payload));
+}
