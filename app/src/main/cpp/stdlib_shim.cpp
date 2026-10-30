@@ -1,5 +1,7 @@
 #include "stdlib_shim.h"
 
+#include "symbols.h"
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -798,6 +800,16 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
 // A framework OptionSet is its raw value, whatever the type's witness table says.
 SWIFTCC void option_set_init(SWIFT_OUT void* out, const void* raw, void* type, void*) { memcpy(out, raw, witnesses_of(type)->size); }
 
+// SetAlgebra(sequence): the only framework values built this way are detents and flags, which nothing reads back.
+SWIFTCC void set_algebra_from_sequence(SWIFT_OUT void* out, void*, void* type, void*, void*, void*) {
+    const size_t size = witnesses_of(type)->size;
+    memset(out, 0, size);
+    if (foreign_type_name(type) == nullptr && size == sizeof(void*)) {
+        void* empty = resolve_symbol("_swiftEmptySetSingleton");
+        memcpy(out, &empty, sizeof empty);
+    }
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -826,6 +838,7 @@ void* stdlib_symbol(std::string_view name) {
         {"$sSa16_createNewBuffer14bufferIsUnique15minimumCapacity13growForAppendySb_SiSbtFyXl_Ts5", reinterpret_cast<void*>(object_array_create_new_buffer)},
         {"$sSa37_appendElementAssumeUniqueAndCapacity_03newB0ySi_xntFyXl_Ts5", reinterpret_cast<void*>(object_array_append)},
         {"$sSQ2eeoiySbx_xtFZTj", reinterpret_cast<void*>(equatable_equal)},
+        {"$ss10SetAlgebraPyxqd__ncSTRd__7ElementQyd__ACRtzlufCTj", reinterpret_cast<void*>(set_algebra_from_sequence)},
         {"$ss9OptionSetP8rawValuex03RawD0Qz_tcfCTj", reinterpret_cast<void*>(option_set_init)},
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},

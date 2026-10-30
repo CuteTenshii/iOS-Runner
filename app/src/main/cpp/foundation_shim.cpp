@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "dispatch_shim.h"
 #include "json.h"
 #include "localization.h"
 #include "concurrency_shim.h"
@@ -400,6 +401,12 @@ void* content_world_page(void*, const char*) { return framework_singleton("WKCon
 void* g_url_session_delegate = nullptr;
 
 void* no_object(void*, const char*) { return nullptr; }
+
+void* url_session_shared(void*, const char*) { return framework_singleton("NSURLSession"); }
+void* device_current(void*, const char*) { return framework_singleton("UIDevice"); }
+void* device_system_name(void*, const char*) { return new_nsstring("iOS"); }
+void* device_model(void*, const char*) { return new_nsstring("iPhone"); }
+int64_t device_idiom_phone(void*, const char*) { return 0; }
 
 struct NotificationObserver {
     std::string name;
@@ -2245,6 +2252,48 @@ SWIFTCC SwiftString string_format_arguments(SwiftString format, void* arguments)
 
 SWIFTCC SwiftString ns_localized_string(SwiftString key) { return swift_string_from_utf8(localization_lookup(swift_string_to_utf8(key))); }
 
+// A task from dataTask(with:completionHandler:): the request happens once resume is called.
+struct DataTask {
+    NativeObject header;
+    std::string* url;
+    std::string* method;
+    std::string* headers;
+    std::string* body;
+    void* completion;
+};
+
+void* new_data_task(std::string url, std::string method, std::string headers, std::string body, void* completion) {
+    auto* task = static_cast<DataTask*>(objc_framework_object("NSURLSessionDataTask"));
+    task->url = new std::string(std::move(url));
+    task->method = new std::string(std::move(method));
+    task->headers = new std::string(std::move(headers));
+    task->body = new std::string(std::move(body));
+    task->completion = darwin_block_copy(completion);
+    return task;
+}
+
+void* session_task_url(void*, const char*, void* url, void* completion) { return new_data_task(nsstring_text(url), "GET", "", "", completion); }
+
+void* session_task_request(void*, const char*, void* request, void* completion) {
+    auto** box = reinterpret_cast<URLRequestBox**>(static_cast<char*>(request) + sizeof(NativeObject));
+    return new_data_task(*(*box)->url, *(*box)->method, *(*box)->headers, *(*box)->body, completion);
+}
+
+void run_data_task(void* raw) {
+    auto* task = static_cast<DataTask*>(raw);
+    const AsyncDataResult result = perform_request(*task->url, *task->method, *task->headers, *task->body);
+    struct Literal {
+        void* isa;
+        int32_t flags, reserved;
+        void (*invoke)(void*, void*, void*, void*);
+    };
+    void* data = result.error == nullptr ? make_nsdata(data_bytes(result.data.range, result.data.storage)) : nullptr;
+    static_cast<Literal*>(task->completion)->invoke(task->completion, data, result.response, result.error);
+}
+
+void session_task_resume(void* self, const char*) { dispatch_enqueue(run_data_task, self); }
+void session_task_cancel(void*, const char*) {}
+
 std::string foundation_object_text(void* object) {
     const void* isa = static_cast<NativeObject*>(object)->isa;
     return isa == g_nsstring_class || isa == g_nsurl_class ? nsstring_text(object) : std::string();
@@ -2366,6 +2415,15 @@ void foundation_register_classes() {
     objc_register_method("-[NSFileManager copyItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_copy));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtPath:error:]", reinterpret_cast<const void*>(file_manager_contents_path));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:]", reinterpret_cast<const void*>(file_manager_contents_url));
+    objc_register_method("-[NSURLSession dataTaskWithURL:completionHandler:]", reinterpret_cast<const void*>(session_task_url));
+    objc_register_method("-[NSURLSession dataTaskWithRequest:completionHandler:]", reinterpret_cast<const void*>(session_task_request));
+    objc_register_method("-[NSURLSessionDataTask resume]", reinterpret_cast<const void*>(session_task_resume));
+    objc_register_method("-[NSURLSessionDataTask cancel]", reinterpret_cast<const void*>(session_task_cancel));
+    objc_register_method("+[NSURLSession sharedSession]", reinterpret_cast<const void*>(url_session_shared));
+    objc_register_method("+[UIDevice currentDevice]", reinterpret_cast<const void*>(device_current));
+    objc_register_method("-[UIDevice systemName]", reinterpret_cast<const void*>(device_system_name));
+    objc_register_method("-[UIDevice model]", reinterpret_cast<const void*>(device_model));
+    objc_register_method("-[UIDevice userInterfaceIdiom]", reinterpret_cast<const void*>(device_idiom_phone));
     objc_register_method("-[UIApplication keyWindow]", reinterpret_cast<const void*>(no_object));
     objc_register_method("+[NSNotificationCenter defaultCenter]", reinterpret_cast<const void*>(notification_center_default));
     objc_register_method("-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]", reinterpret_cast<const void*>(notification_add_block));

@@ -789,7 +789,8 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
     for (const void* argument : arguments) key += pointer_key(argument);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
     // Framework classes are heap objects, so their metadata needs a destroyer where value types keep a layout.
-    const bool is_class = symbol.size() > 3 && symbol.compare(symbol.size() - 3, 3, "CMn") == 0;
+    // CheckedContinuation is the one struct whose mangled name happens to end like a class.
+    const bool is_class = symbol != "_$sScCMn" && symbol.size() > 3 && symbol.compare(symbol.size() - 3, 3, "CMn") == 0;
     if (storage_destroyer_for(symbol.c_str()) != nullptr || is_class) {
         // The guest reads a class's instance size at +0x30 before calling swift_allocObject on it.
         constexpr size_t kClassSizeWord = 8;

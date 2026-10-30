@@ -200,6 +200,8 @@ const int32_t kFrequencyWorkItem = 1;
 
 }  // namespace
 
+void dispatch_enqueue(void (*function)(void*), void* context) { ready_work().push_back({nullptr, function, context}); }
+
 bool dispatch_run_ready() {
     const int64_t now = monotonic_now();
     auto& delayed = delayed_work();
