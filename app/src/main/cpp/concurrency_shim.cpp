@@ -64,7 +64,7 @@ struct TaskCreation {
 
 extern "C" void rt_task_finished();
 extern "C" void rt_start_task(const void* function, void* result, void* closure_context, void* async_context);
-extern "C" void rt_resume_task(const void* function, void* async_context);
+extern "C" void rt_resume_task(const void* function, void* async_context, void* error);
 
 // The ABI's ContinuationAsyncContext; its first two words are the usual parent and resume function.
 struct ContinuationContext {
@@ -102,6 +102,43 @@ void continuation_resume(char* task) {
 }
 
 constexpr size_t kMinimumResultBytes = 16;
+
+// One `async let`: the guest's storage holds a pointer to this, and its task's parent word points back here.
+struct AsyncLetState {
+    bool finished;
+    void* error;
+    const void* waiter;
+    void* waiter_context;
+};
+
+extern "C" void rt_async_let_task_finished();
+
+void async_let_begin(void** storage, void*, void*, const AsyncFunctionPointer* entry, void* closure_context, void* result) {
+    auto* state = static_cast<AsyncLetState*>(calloc(1, sizeof(AsyncLetState)));
+    *storage = state;
+    auto* context = static_cast<AsyncContextHeader*>(calloc(1, entry->context_size));
+    context->parent = state;
+    context->resume_parent = reinterpret_cast<void*>(rt_async_let_task_finished);
+    const char* base = reinterpret_cast<const char*>(&entry->function);
+    ready_tasks().push_back({base + entry->function, closure_context, result, context, false});
+}
+
+// Returns true if the task already finished, in which case the caller continues immediately.
+extern "C" bool rt_async_let_ready(void** storage, const void* resume, void* resume_context) {
+    auto* state = static_cast<AsyncLetState*>(*storage);
+    if (state->finished) return true;
+    state->waiter = resume;
+    state->waiter_context = resume_context;
+    return false;
+}
+
+extern "C" void* rt_async_let_error(void** storage) { return static_cast<AsyncLetState*>(*storage)->error; }
+
+extern "C" void rt_async_let_note_finished(AsyncLetState* state, void* error) {
+    state->finished = true;
+    state->error = error;
+    if (state->waiter != nullptr) ready_tasks().push_back({state->waiter, state->error, nullptr, state->waiter_context, true});
+}
 constexpr size_t kValueWitnessSizeOffset = 0x40;
 
 TaskCreation task_create(size_t, void*, void* result_type, const AsyncFunctionPointer* entry, void* closure_context) {
@@ -183,6 +220,37 @@ __asm__(
     "  mov x22, x0\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
+    // x22 holds the state, placed in the task's parent word; a thrown error arrives in x21.
+    ".globl rt_async_let_task_finished\n"
+    "rt_async_let_task_finished:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  mov x0, x22\n"
+    "  mov x1, x21\n"
+    "  bl rt_async_let_note_finished\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ret\n"
+    // get, get_throwing and finish: (let, buffer, resume function, resume context).
+    ".globl rt_async_let_wait\n"
+    "rt_async_let_wait:\n"
+    "  stp x29, x30, [sp, #-48]!\n"
+    "  mov x29, sp\n"
+    "  stp x0, x2, [sp, #16]\n"
+    "  str x3, [sp, #32]\n"
+    "  mov x1, x2\n"
+    "  mov x2, x3\n"
+    "  bl rt_async_let_ready\n"
+    "  cbz w0, 1f\n"
+    "  ldr x0, [sp, #16]\n"
+    "  bl rt_async_let_error\n"
+    "  mov x20, x0\n"
+    "  ldr x16, [sp, #24]\n"
+    "  ldr x22, [sp, #32]\n"
+    "  ldp x29, x30, [sp], #48\n"
+    "  br x16\n"
+    "1:\n"
+    "  ldp x29, x30, [sp], #48\n"
+    "  ret\n"
     ".globl rt_resume_task\n"
     "rt_resume_task:\n"
     "  stp x29, x30, [sp, #-112]!\n"
@@ -193,6 +261,7 @@ __asm__(
     "  stp x25, x26, [sp, #64]\n"
     "  stp x27, x28, [sp, #80]\n"
     "  mov x22, x1\n"
+    "  mov x20, x2\n"
     "  blr x0\n"
     "  ldp x19, x20, [sp, #16]\n"
     "  ldp x21, x22, [sp, #32]\n"
@@ -225,6 +294,7 @@ __asm__(
 
 extern "C" void rt_task_switch();
 extern "C" void rt_continuation_await();
+extern "C" void rt_async_let_wait();
 
 void concurrency_start(const void* async_function, void* context) {
     const auto* entry = static_cast<const AsyncFunctionPointer*>(async_function);
@@ -239,7 +309,7 @@ void concurrency_drain() {
     while (!queue.empty()) {
         const ReadyTask task = queue.front();
         queue.pop_front();
-        if (task.is_resume) rt_resume_task(task.function, task.async_context);
+        if (task.is_resume) rt_resume_task(task.function, task.async_context, task.closure_context);
         else rt_start_task(task.function, task.result, task.closure_context, task.async_context);
     }
 }
@@ -254,6 +324,10 @@ void* concurrency_symbol(std::string_view name) {
         {"$sScM6sharedScMvgZ", reinterpret_cast<void*>(main_actor_shared)},
         {"$sScP13userInitiatedScPvgZ", reinterpret_cast<void*>(task_priority_user_initiated)},
         {"$sScP8rawValues5UInt8Vvg", reinterpret_cast<void*>(task_priority_raw_value)},
+        {"swift_asyncLet_begin", reinterpret_cast<void*>(async_let_begin)},
+        {"swift_asyncLet_get", reinterpret_cast<void*>(rt_async_let_wait)},
+        {"swift_asyncLet_get_throwing", reinterpret_cast<void*>(rt_async_let_wait)},
+        {"swift_asyncLet_finish", reinterpret_cast<void*>(rt_async_let_wait)},
         {"swift_continuation_init", reinterpret_cast<void*>(continuation_init)},
         {"swift_continuation_await", reinterpret_cast<void*>(rt_continuation_await)},
         {"swift_continuation_resume", reinterpret_cast<void*>(continuation_resume)},

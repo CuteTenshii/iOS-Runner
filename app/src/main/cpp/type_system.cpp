@@ -649,9 +649,12 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
     std::string key = symbol;
     for (const void* argument : arguments) key += pointer_key(argument);
     if (const auto found = g_named_types.find(key); found != g_named_types.end()) return found->second;
-    if (storage_destroyer_for(symbol.c_str()) != nullptr) {
+    // Framework classes are heap objects, so their metadata needs a destroyer where value types keep a layout.
+    const bool is_class = symbol.size() > 3 && symbol.compare(symbol.size() - 3, 3, "CMn") == 0;
+    if (storage_destroyer_for(symbol.c_str()) != nullptr || is_class) {
         auto* block = static_cast<void**>(calloc(4 + (arguments.empty() ? 1 : arguments.size()), sizeof(void*)));
-        block[0] = reinterpret_cast<void*>(storage_destroyer_for(symbol.c_str()));
+        auto destroyer = storage_destroyer_for(symbol.c_str());
+        block[0] = reinterpret_cast<void*>(destroyer != nullptr ? destroyer : free);
         block[2] = nullptr;
         auto* metadata = reinterpret_cast<Metadata*>(block + 2);
         for (size_t i = 0; i < arguments.size(); ++i) block[4 + i] = arguments[i];
@@ -1391,6 +1394,7 @@ void* type_system_symbol(std::string_view name) {
         if (name == "$sSJN") return two_word_type("SJ", word_type(), bridge_word_type());
         if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
         if (name == "$ss5NeverON") return pod_type(std::string(name), 0);
+        if (name == "$ss11AnyHashableVN") return named_type("AnyHashable", kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
         if (name == "$s7SwiftUI22HierarchicalShapeStyleVN") return pod_type(std::string(name), 4);
         if (name == "$s10Foundation4DataVN" || name == "$s10Foundation4DataV15_RepresentationON") return two_word_type("Data", word_type(), bridge_word_type());
         std::string descriptor = "_" + std::string(name);

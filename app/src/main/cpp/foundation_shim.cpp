@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -433,6 +434,121 @@ SWIFTCC void locale_current(SWIFT_OUT uint64_t* out) { *out = kLocaleImmediate; 
 
 const int32_t kBundleDescriptionForClass = 0;
 
+constexpr uint32_t kUrlSessionContextBytes = 64;
+constexpr uint64_t kDataEmptyTag = 3ULL << 62;
+constexpr uint64_t kDataSliceTag = 1ULL << 62;
+
+// The storage behind a slice-form Data. The app only reaches its fields through imported accessors.
+struct DataStorage {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    uint8_t* bytes;
+    int64_t length;
+    int64_t capacity;
+    int64_t offset;
+};
+
+void destroy_data_storage(void* raw) {
+    auto* storage = static_cast<DataStorage*>(raw);
+    free(storage->bytes);
+    free(storage);
+}
+
+const StorageMetadata kDataStorageMetadata = {destroy_data_storage, nullptr, 0};
+
+struct DataValue {
+    uint64_t range;
+    uint64_t storage;
+};
+
+DataValue make_data(const std::string& bytes) {
+    if (bytes.empty()) return {0, kDataEmptyTag};
+    auto* storage = static_cast<DataStorage*>(calloc(1, sizeof(DataStorage)));
+    storage->metadata = const_cast<uint64_t*>(&kDataStorageMetadata.kind);
+    new (&storage->references) std::atomic<uint64_t>(1);
+    storage->bytes = static_cast<uint8_t*>(malloc(bytes.size()));
+    memcpy(storage->bytes, bytes.data(), bytes.size());
+    storage->length = static_cast<int64_t>(bytes.size());
+    storage->capacity = storage->length;
+    // Range<Int32>: lower bound in the low half, upper bound in the high half.
+    const uint64_t range = static_cast<uint64_t>(bytes.size()) << 32;
+    return {range, reinterpret_cast<uint64_t>(storage) | kDataSliceTag};
+}
+
+SWIFTCC uint8_t* data_storage_bytes(__attribute__((swift_context)) DataStorage* self) { return self->bytes; }
+SWIFTCC int64_t data_storage_length(__attribute__((swift_context)) DataStorage* self) { return self->length; }
+SWIFTCC int64_t data_storage_offset(__attribute__((swift_context)) DataStorage* self) { return self->offset; }
+
+// An Error existential is one reference to a box; this box carries a domain, a code and a message.
+struct ErrorBox {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    std::string* message;
+    int64_t code;
+};
+
+void destroy_error_box(void* raw) {
+    auto* box = static_cast<ErrorBox*>(raw);
+    delete box->message;
+    free(box);
+}
+
+const StorageMetadata kErrorBoxMetadata = {destroy_error_box, nullptr, 0};
+
+void* make_error(const std::string& message, int64_t code) {
+    auto* box = static_cast<ErrorBox*>(calloc(1, sizeof(ErrorBox)));
+    box->metadata = const_cast<uint64_t*>(&kErrorBoxMetadata.kind);
+    new (&box->references) std::atomic<uint64_t>(1);
+    box->message = new std::string(message);
+    box->code = code;
+    return box;
+}
+
+SWIFTCC SwiftString error_localized_description(const void* const* self_error) {
+    const auto* box = static_cast<const ErrorBox*>(*self_error);
+    return swift_string_from_utf8(*box->message);
+}
+
+SWIFTCC DataValue data_contents_of(URLBox** url, uint64_t, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+    const std::string path = url_path(*(*url)->text);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        *error = make_error("The file could not be read: " + path, ENOENT);
+        return {0, kDataEmptyTag};
+    }
+    std::string bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return make_data(bytes);
+}
+
+SWIFTCC void data_write(URLBox** url, uint64_t, uint64_t range, uint64_t storage, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+    const std::string path = url_path(*(*url)->text);
+    const size_t slash = path.rfind('/');
+    if (slash != std::string::npos) make_directories(path.substr(0, slash));
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        *error = make_error("The file could not be written: " + path, EACCES);
+        return;
+    }
+    if ((storage >> 62) == (kDataSliceTag >> 62)) {
+        const auto* backing = reinterpret_cast<const DataStorage*>(storage & ~(3ULL << 62));
+        const auto low = static_cast<uint32_t>(range);
+        const auto high = static_cast<uint32_t>(range >> 32);
+        file.write(reinterpret_cast<const char*>(backing->bytes) + low, high - low);
+    }
+}
+
+extern "C" void* rt_url_session_failure() { return make_error("Network access is not available yet.", 1); }
+
+extern "C" void rt_url_session_data();
+
+// An async function pointer: a relative address, then the callee's context size.
+struct AsyncFunctionRecord {
+    int32_t function;
+    uint32_t context_size;
+};
+
+AsyncFunctionRecord g_url_session_data_record;
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -487,7 +603,22 @@ SwiftString swift_string_from_utf8(const std::string& text) {
     return result;
 }
 
+// URLSession.data(for:delegate:): throws through x21, then returns via the context's resume word.
+__asm__(
+    ".text\n"
+    ".globl rt_url_session_data\n"
+    "rt_url_session_data:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  bl rt_url_session_failure\n"
+    "  mov x21, x0\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ldr x0, [x22, #8]\n"
+    "  br x0\n");
+
 void foundation_register_classes() {
+    g_url_session_data_record.context_size = kUrlSessionContextBytes;
+    g_url_session_data_record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(rt_url_session_data) - reinterpret_cast<intptr_t>(&g_url_session_data_record));
     g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
     g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
@@ -575,6 +706,14 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation6LocaleV19autoupdatingCurrentACvgZ", reinterpret_cast<void*>(locale_current)},
         {"$s10Foundation23LocalizedStringResourceV17BundleDescriptionO8forClassyAEyXlXpcAEmFWC", const_cast<int32_t*>(&kBundleDescriptionForClass)},
         {"$sSa10FoundationE36_unconditionallyBridgeFromObjectiveCySayxGSo7NSArrayCSgFZ", reinterpret_cast<void*>(array_bridge_from_objc)},
+        {"$s10Foundation4DataV10contentsOf7optionsAcA3URLVh_So20NSDataReadingOptionsVtKcfC", reinterpret_cast<void*>(data_contents_of)},
+        {"$s10Foundation4DataV5write2to7optionsyAA3URLV_So20NSDataWritingOptionsVtKF", reinterpret_cast<void*>(data_write)},
+        {"$s10Foundation13__DataStorageC6_bytesSvSgvg", reinterpret_cast<void*>(data_storage_bytes)},
+        {"$s10Foundation13__DataStorageC7_lengthSivg", reinterpret_cast<void*>(data_storage_length)},
+        {"$s10Foundation13__DataStorageC7_offsetSivg", reinterpret_cast<void*>(data_storage_offset)},
+        {"$ss5ErrorP10FoundationE20localizedDescriptionSSvg", reinterpret_cast<void*>(error_localized_description)},
+        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
+        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_data_record},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

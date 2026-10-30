@@ -20,6 +20,7 @@
 #define SWIFT_SELF __attribute__((swift_context))
 
 uint64_t* empty_set_singleton();
+uint64_t* empty_array_singleton();
 
 namespace {
 
@@ -373,6 +374,68 @@ SWIFTCC int64_t find_string_switch_case(const char* cases, SwiftString value) {
 
 SWIFTCC SwiftString int_description(SWIFT_SELF const int64_t* self) { return swift_string_from_utf8(std::to_string(*self)); }
 
+// Live Activities have no Android equivalent: the app sees none, and that they are switched off.
+void* activity_list(void*) { return empty_array_singleton(); }
+SWIFTCC void* activity_authorization_init(SWIFT_SELF void* self) { return self; }
+SWIFTCC bool activity_enabled(SWIFT_SELF void*) { return false; }
+
+// AnyHashable is frozen: a three-word inline buffer, then the value's type and Hashable witness table.
+struct AnyHashableValue {
+    uint64_t buffer[3];
+    void* type;
+    void* witnesses;
+};
+
+constexpr uint32_t kFlagNonInline = 0x20000;
+constexpr size_t kBoxHeaderBytes = 16;
+
+struct BoxMetadataWords {
+    void (*destroyer)(void*);
+    const void* witnesses;
+    uint64_t kind;
+};
+
+const BoxMetadataWords kValueBoxMetadata = {free, nullptr, 0};
+
+SWIFTCC void any_hashable_init(SWIFT_OUT AnyHashableValue* out, void* value, void* type, void* hashable) {
+    const auto* witnesses = witnesses_of(type);
+    memset(out, 0, sizeof *out);
+    out->type = type;
+    out->witnesses = hashable;
+    if (witnesses->flags & kFlagNonInline) {
+        const size_t mask = witnesses->flags & 0xff;
+        const size_t offset = align_up(kBoxHeaderBytes, mask);
+        auto* box = static_cast<char*>(calloc(1, offset + witnesses->size));
+        auto* header = reinterpret_cast<HashedHeader*>(box);
+        header->metadata = const_cast<uint64_t*>(&kValueBoxMetadata.kind);
+        new (&header->references) std::atomic<uint64_t>(1);
+        witnesses->initialize_with_take(box + offset, value, type);
+        out->buffer[0] = reinterpret_cast<uint64_t>(box);
+    } else {
+        witnesses->initialize_with_take(out, value, type);
+    }
+}
+
+// Headers and JSON keys are the only AnyHashable values this app builds: both are strings.
+const SwiftString& any_hashable_string(const AnyHashableValue* value) {
+    if (foreign_type_name(value->type) != nullptr) {
+        engine_log("STOP: AnyHashable holding a non-string value");
+        abort();
+    }
+    return *reinterpret_cast<const SwiftString*>(value);
+}
+
+SWIFTCC int64_t any_hashable_raw_hash(int64_t seed, SWIFT_SELF const AnyHashableValue* self) {
+    HasherState hasher;
+    hasher_seed(&hasher, seed);
+    string_hash_into(&hasher, any_hashable_string(self));
+    return hasher_finalize(&hasher);
+}
+
+SWIFTCC bool any_hashable_equal(const AnyHashableValue* left, const AnyHashableValue* right) {
+    return swift_string_to_utf8(any_hashable_string(left)) == swift_string_to_utf8(any_hashable_string(right));
+}
+
 void* get_object_type(void* object) { return *static_cast<void**>(object); }
 
 constexpr size_t kClassSuperOffset = 8;
@@ -535,6 +598,12 @@ void* stdlib_symbol(std::string_view name) {
         {"$sSS14_fromSubstringySSSshFZ", reinterpret_cast<void*>(string_from_substring)},
         {"$sSS18_fromUTF8RepairingySS6result_Sb11repairsMadetSRys5UInt8VGFZ", reinterpret_cast<void*>(string_from_utf8_repairing)},
         {"$ss21_findStringSwitchCase5cases6stringSiSays06StaticB0VG_SStF", reinterpret_cast<void*>(find_string_switch_case)},
+        {"$s11ActivityKit0A0C10activitiesSayACyxGGvgZ", reinterpret_cast<void*>(activity_list)},
+        {"$s11ActivityKit0A17AuthorizationInfoCACycfc", reinterpret_cast<void*>(activity_authorization_init)},
+        {"$s11ActivityKit0A17AuthorizationInfoC20areActivitiesEnabledSbvg", reinterpret_cast<void*>(activity_enabled)},
+        {"$ss11AnyHashableVyABxcSHRzlufC", reinterpret_cast<void*>(any_hashable_init)},
+        {"$ss11AnyHashableV13_rawHashValue4seedS2i_tF", reinterpret_cast<void*>(any_hashable_raw_hash)},
+        {"$ss11AnyHashableV2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(any_hashable_equal)},
         {"swift_getObjectType", reinterpret_cast<void*>(get_object_type)},
         {"swift_dynamicCastObjCClass", reinterpret_cast<void*>(dynamic_cast_objc_class)},
         {"swift_arrayDestroy", reinterpret_cast<void*>(array_destroy)},
