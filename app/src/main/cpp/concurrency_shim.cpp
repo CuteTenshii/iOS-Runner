@@ -191,9 +191,12 @@ struct ExecutorReference {
 
 ExecutorReference main_actor_executor() { return {0, 0}; }
 
-constexpr uint8_t kTaskPriorityUserInitiated = 25;
-uint8_t task_priority_user_initiated() { return kTaskPriorityUserInitiated; }
-uint8_t task_priority_raw_value(uint8_t self) { return self; }
+// TaskPriority is reached through its metadata here, so it is one tagged word returned indirectly.
+constexpr uint64_t kTaskPriorityUserInitiated = 25;
+constexpr uint64_t kImmediateTag = 1ULL << 63;
+
+__attribute__((swiftcall)) void task_priority_user_initiated(__attribute__((swift_indirect_result)) uint64_t* out) { *out = kImmediateTag | kTaskPriorityUserInitiated; }
+__attribute__((swiftcall)) uint8_t task_priority_raw_value(__attribute__((swift_context)) const uint64_t* self) { return static_cast<uint8_t>(*self); }
 
 }  // namespace
 
