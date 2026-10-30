@@ -8,6 +8,7 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdarg>
 #include <cstddef>
@@ -169,6 +170,9 @@ void* guest_thread(void* raw) {
         counts.second++;
         if (import.resolved) counts.first++;
         else missing++;
+#ifdef IOSRUNNER_HOST
+        if (!import.resolved && !import.weak) engine_log("UNRESOLVED: %s", import.name.c_str());
+#endif
     }
     engine_log("LOADED: %s at 0x%zx, entry app+0x%zx", arguments->executable.c_str(), static_cast<size_t>(g_image.base),
                static_cast<size_t>(g_image.entry - g_image.base));
@@ -239,9 +243,15 @@ void engine_emit(const char* kind, const std::string& payload) {
     if (g_message_sink != nullptr) g_message_sink(kind, payload.c_str());
 }
 
-int engine_wait_for_action() {
+int engine_wait_for_action(int64_t deadline_ns) {
     std::unique_lock lock(g_action_lock);
-    g_action_ready.wait(lock, [] { return g_actions_closed || !g_pending_actions.empty() || !g_pending_events.empty(); });
+    const auto ready = [] { return g_actions_closed || !g_pending_actions.empty() || !g_pending_events.empty(); };
+    if (deadline_ns > 0) {
+        const auto deadline = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(deadline_ns));
+        if (!g_action_ready.wait_until(lock, deadline, ready)) return kEngineEventRan;
+    } else {
+        g_action_ready.wait(lock, ready);
+    }
     if (!g_pending_events.empty()) {
         const auto event = std::move(g_pending_events.front());
         g_pending_events.pop_front();

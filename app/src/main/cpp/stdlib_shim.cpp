@@ -66,6 +66,7 @@ constexpr size_t kDictionaryValuesOffset = kDictionaryKeysOffset + sizeof(void*)
 constexpr size_t kDictionaryBitmapOffset = kDictionaryValuesOffset + sizeof(void*);
 constexpr size_t kMetadataArgumentsWord = 2;
 constexpr size_t kArrayElementsOffset = 32;
+constexpr uint64_t kBridgeAddressMask = 0x00FFFFFFFFFFFFF8ULL;
 
 void** arguments_of(const void* metadata) { return const_cast<void**>(static_cast<void* const*>(metadata)) + kMetadataArgumentsWord; }
 
@@ -675,6 +676,23 @@ void swift_will_throw(void*) {}
 
 }  // namespace
 
+// BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
+SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
+    if (array_element_type(type) == nullptr) {
+        engine_log("STOP: joined(separator:) on a collection other than Array");
+        abort();
+    }
+    char* elements;
+    const size_t count = array_storage_contents(reinterpret_cast<void*>(*self & kBridgeAddressMask), type_system_symbol("$sSSN"), &elements);
+    const std::string glue = swift_string_to_utf8(separator);
+    std::string out;
+    for (size_t i = 0; i < count; ++i) {
+        if (i != 0) out += glue;
+        out += swift_string_to_utf8(reinterpret_cast<const SwiftString*>(elements)[i]);
+    }
+    return swift_string_from_utf8(out);
+}
+
 void* stdlib_symbol(std::string_view name) {
     static const bool registered = [] {
         register_foreign_witness("_$sSis23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(int_description));
@@ -682,6 +700,7 @@ void* stdlib_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
         {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
         {"$ss11_StringGutsV4growyySiF", reinterpret_cast<void*>(string_guts_grow)},
         {"$sSS10lowercasedSSyF", reinterpret_cast<void*>(string_lowercased)},
@@ -753,8 +772,8 @@ extern "C" void (*storage_destroyer_for(const char* symbol))(void*) {
     return nullptr;
 }
 
-void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>>& entries) {
-    void* arguments[] = {type_system_symbol("$sSSN"), type_system_symbol("$sSbN")};
+void* make_string_dictionary(void* value_type, const std::vector<std::pair<std::string, const void*>>& entries) {
+    void* arguments[] = {type_system_symbol("$sSSN"), value_type};
     void* metadata = storage_class_metadata("_$ss18_DictionaryStorageCMn", arguments, 2);
     auto* raw = static_cast<char*>(allocate_dictionary(metadata, scale_for_capacity(static_cast<int64_t>(entries.size())), 0, 0, false));
     auto* header = reinterpret_cast<HashedHeader*>(raw);
@@ -764,6 +783,8 @@ void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>
     memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
     auto* bitmap = reinterpret_cast<uint64_t*>(raw + kDictionaryBitmapOffset);
     const uint64_t mask = (1ULL << header->scale) - 1;
+    const size_t stride = witnesses_of(value_type)->stride;
+    const size_t size = witnesses_of(value_type)->size;
     for (const auto& [key, value] : entries) {
         const SwiftString text = swift_string_from_utf8(key);
         HasherState hasher;
@@ -773,8 +794,55 @@ void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>
         while ((bitmap[bucket / kWordBits] >> (bucket % kWordBits)) & 1) bucket = (bucket + 1) & mask;
         bitmap[bucket / kWordBits] |= 1ULL << (bucket % kWordBits);
         memcpy(keys + bucket * sizeof(SwiftString), &text, sizeof text);
-        values[bucket] = value ? 1 : 0;
+        memcpy(values + bucket * stride, value, size);
     }
     header->count = static_cast<int64_t>(entries.size());
     return raw;
+}
+
+void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>>& entries) {
+    std::vector<uint8_t> flags;
+    flags.reserve(entries.size());
+    std::vector<std::pair<std::string, const void*>> values;
+    for (const auto& [key, value] : entries) {
+        flags.push_back(value ? 1 : 0);
+        values.emplace_back(key, &flags.back());
+    }
+    return make_string_dictionary(type_system_symbol("$sSbN"), values);
+}
+
+void visit_string_dictionary(void* storage, const std::function<void(const std::string&, void*)>& visit) {
+    auto* raw = static_cast<char*>(storage);
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    if (header->count == 0) return;
+    char* keys;
+    char* values;
+    memcpy(&keys, raw + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
+    const size_t stride = witnesses_of(arguments_of(header->metadata)[1])->stride;
+    for_each_occupied(raw + kDictionaryBitmapOffset, header->scale, [&](size_t bucket) {
+        SwiftString key;
+        memcpy(&key, keys + bucket * sizeof key, sizeof key);
+        visit(swift_string_to_utf8(key), values + bucket * stride);
+    });
+}
+
+void* make_array_storage(void* element_type, size_t count, char** elements) {
+    const auto* witnesses = witnesses_of(element_type);
+    const size_t elements_at = align_up(kArrayElementsOffset, alignment_mask(witnesses));
+    void* arguments[] = {element_type};
+    auto* raw = static_cast<char*>(calloc(1, elements_at + count * witnesses->stride));
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    header->metadata = storage_class_metadata("_$ss23_ContiguousArrayStorageCMn", arguments, 1);
+    new (&header->references) std::atomic<uint64_t>(1);
+    header->count = static_cast<int64_t>(count);
+    header->capacity = static_cast<int64_t>(count * 2);
+    *elements = raw + elements_at;
+    return raw;
+}
+
+size_t array_storage_contents(void* storage, void* element_type, char** elements) {
+    auto* raw = static_cast<char*>(storage);
+    *elements = raw + align_up(kArrayElementsOffset, alignment_mask(witnesses_of(element_type)));
+    return static_cast<size_t>(reinterpret_cast<HashedHeader*>(raw)->count);
 }

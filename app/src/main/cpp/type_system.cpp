@@ -18,6 +18,7 @@
 
 #include "engine.h"
 #include "macho.h"
+#include "stdlib_shim.h"
 #include "swift_runtime.h"
 
 extern "C" void (*storage_destroyer_for(const char* symbol))(void*);
@@ -699,6 +700,8 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
         return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
+    if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
+    if (symbol == "_$ss15ContinuousClockV7InstantVMn") return named_type("ContinuousClock.Instant", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 16, 8, 0);
     if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
     if (symbol == "_$ss5UInt8VMn") return pod_type("UInt8", 1);
     if (symbol == "_$ss5NeverOMn") return pod_type("Never", 0);
@@ -1717,6 +1720,61 @@ constexpr size_t kAnyTypeWord = 3;
 
 }  // namespace
 
+// `as? [T]` and `as? [String: T]` convert element by element, failing as a whole if one element does not fit.
+bool cast_collection(void* destination, void* value, void* contained, void* target_type) {
+    constexpr uint64_t kCollectionAddressMask = 0x00FFFFFFFFFFFFF8ULL;
+    uint64_t word;
+    void* target_element = array_element_type(target_type);
+    void* source_element = array_element_type(contained);
+    if (target_element != nullptr && source_element != nullptr) {
+        memcpy(&word, value, sizeof word);
+        char* from;
+        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kCollectionAddressMask), source_element, &from);
+        char* to;
+        void* storage = make_array_storage(target_element, count, &to);
+        const size_t from_stride = witnesses_of(source_element)->stride;
+        const size_t to_stride = witnesses_of(target_element)->stride;
+        for (size_t i = 0; i < count; ++i) {
+            if (!swift_cast(to + i * to_stride, from + i * from_stride, source_element, target_element, 0)) {
+                for (size_t done = 0; done < i; ++done) witnesses_of(target_element)->destroy(to + done * to_stride, target_element);
+                free(storage);
+                return false;
+            }
+        }
+        memcpy(destination, &storage, sizeof storage);
+        return true;
+    }
+    void* target_value = dictionary_value_type(target_type);
+    void* source_value = dictionary_value_type(contained);
+    if (target_value == nullptr || source_value == nullptr) return false;
+    memcpy(&word, value, sizeof word);
+    const size_t stride = witnesses_of(target_value)->stride;
+    std::vector<std::pair<std::string, size_t>> converted;
+    std::vector<char> bytes;
+    bool failed = false;
+    visit_string_dictionary(reinterpret_cast<void*>(word & kCollectionAddressMask), [&](const std::string& key, void* member) {
+        if (failed) return;
+        const size_t at = bytes.size();
+        bytes.resize(at + stride);
+        std::vector<char> slot(stride + 8);
+        if (!swift_cast(slot.data(), member, source_value, target_value, 0)) {
+            failed = true;
+            return;
+        }
+        memcpy(bytes.data() + at, slot.data(), stride);
+        converted.emplace_back(key, at);
+    });
+    if (failed) {
+        for (const auto& entry : converted) witnesses_of(target_value)->destroy(bytes.data() + entry.second, target_value);
+        return false;
+    }
+    std::vector<std::pair<std::string, const void*>> entries;
+    for (const auto& [key, at] : converted) entries.emplace_back(key, bytes.data() + at);
+    void* storage = make_string_dictionary(target_value, entries);
+    memcpy(destination, &storage, sizeof storage);
+    return true;
+}
+
 bool swift_cast(void* destination, void* source, void* source_type, void* target_type, size_t flags) {
     const auto* source_metadata = static_cast<Metadata*>(source_type);
     void* value = source;
@@ -1734,12 +1792,12 @@ bool swift_cast(void* destination, void* source, void* source_type, void* target
     // An Optional target holds the value with no case to store, when it uses spare bits.
     if (static_cast<Metadata*>(target_type)->kind == kKindOptional) {
         Metadata* payload = layout_of(target_type)->payload;
-        if (payload == contained) {
-            witnesses_of(payload)->initialize_with_copy(destination, value, payload);
+        if (swift_cast(destination, value, contained, payload, 0)) {
             witnesses_of(payload)->store_enum_tag_single_payload(destination, 0, 1, payload);
             if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
             return true;
         }
+        goto fail;
     }
     if (contained == target_type) {
         witnesses_of(target_type)->initialize_with_copy(destination, value, target_type);
@@ -1755,6 +1813,10 @@ bool swift_cast(void* destination, void* source, void* source_type, void* target
         }
         witnesses_of(contained)->initialize_with_copy(destination, value, contained);
         words[kAnyTypeWord] = contained;
+        if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+        return true;
+    }
+    if (cast_collection(destination, value, contained, target_type)) {
         if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
         return true;
     }

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -15,7 +16,8 @@ void engine_emit(const char* kind, const std::string& payload);
 void engine_set_message_sink(void (*sink)(const char* kind, const char* payload));
 
 // Blocks the guest thread until the UI triggers an action, returning its id, or -1 if there will be no more.
-int engine_wait_for_action();
+// Blocks for the next action or host event; past `deadline_ns` on CLOCK_MONOTONIC, if positive, returns kEngineEventRan.
+int engine_wait_for_action(int64_t deadline_ns = 0);
 void engine_post_action(int action);
 void engine_close_actions();
 

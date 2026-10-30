@@ -37,6 +37,18 @@ jstring to_java_string(JNIEnv* env, const char* text) {
     return result;
 }
 
+// A pending exception would abort at the next JNI call, so report it in the guest's log and carry on.
+void report_exception(JNIEnv* env, const char* where) {
+    if (!env->ExceptionCheck()) return;
+    jthrowable thrown = env->ExceptionOccurred();
+    env->ExceptionClear();
+    jclass throwable = env->GetObjectClass(thrown);
+    auto text = static_cast<jstring>(env->CallObjectMethod(thrown, env->GetMethodID(throwable, "toString", "()Ljava/lang/String;")));
+    engine_log("HOST ERROR in %s: %s", where, text != nullptr ? to_string(env, text).c_str() : "unknown");
+    env->DeleteLocalRef(throwable);
+    env->DeleteLocalRef(thrown);
+}
+
 void send_message(const char* kind, const char* payload) {
     JNIEnv* env = nullptr;
     if (g_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
@@ -46,6 +58,7 @@ void send_message(const char* kind, const char* payload) {
     jstring java_kind = env->NewStringUTF(kind);
     jstring java_payload = to_java_string(env, payload);
     env->CallStaticVoidMethod(g_activity_class, g_on_message, java_kind, java_payload);
+    report_exception(env, kind);
     env->DeleteLocalRef(java_kind);
     env->DeleteLocalRef(java_payload);
 }
@@ -65,6 +78,7 @@ HttpResult perform_http(const std::string& url, const std::string& method, const
     jbyteArray java_body = env->NewByteArray(static_cast<jsize>(body.size()));
     env->SetByteArrayRegion(java_body, 0, static_cast<jsize>(body.size()), reinterpret_cast<const jbyte*>(body.data()));
     auto result = static_cast<jbyteArray>(env->CallStaticObjectMethod(g_activity_class, g_http, java_url, java_method, java_headers, java_body));
+    report_exception(env, "http");
     env->DeleteLocalRef(java_url);
     env->DeleteLocalRef(java_method);
     env->DeleteLocalRef(java_headers);
@@ -86,6 +100,7 @@ HttpResult perform_http(const std::string& url, const std::string& method, const
 std::string read_cookies() {
     JNIEnv* env = guest_env();
     auto cookies = static_cast<jstring>(env->CallStaticObjectMethod(g_activity_class, g_cookies));
+    report_exception(env, "cookies");
     if (cookies == nullptr) return {};
     std::string text = to_string(env, cookies);
     env->DeleteLocalRef(cookies);

@@ -139,6 +139,13 @@ const char* unresolved_symbol_at(uintptr_t address) {
     return g_guard_names[slot - 1].c_str();
 }
 
+const void* unresolved_symbol_named(const char* name) {
+    for (size_t i = 0; i < g_guard_names.size(); ++i) {
+        if (g_guard_names[i] == name) return reinterpret_cast<const void*>(g_guard_base + (i + 1) * kGuardSpacing);
+    }
+    return nullptr;
+}
+
 bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& image, std::string& error) {
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {

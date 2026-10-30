@@ -1479,9 +1479,10 @@ void swiftui_run_scene(void* scene) {
             render_tree();
             concurrency_drain();
         }
-        const int action = engine_wait_for_action();
+        const int action = engine_wait_for_action(concurrency_next_deadline());
         if (action == kEngineEventRan) {
-            // Host events only redraw if they changed something the app observes.
+            // Host events and timers only redraw if they changed something the app observes.
+            concurrency_fire_timers();
             concurrency_drain();
             continue;
         }

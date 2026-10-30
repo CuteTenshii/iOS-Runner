@@ -12,6 +12,18 @@ struct SwiftString {
     uint64_t object;
 };
 
+// Foundation.Data as its two ABI words.
+struct FoundationData {
+    uint64_t range;
+    uint64_t storage;
+};
+
+std::string foundation_data_bytes(FoundationData data);
+FoundationData foundation_make_data(const std::string& bytes);
+
+// An Error existential carrying `message`.
+void* foundation_make_error(const std::string& message, int64_t code);
+
 std::string swift_string_to_utf8(SwiftString value);
 SwiftString swift_string_from_utf8(const std::string& text);
 
