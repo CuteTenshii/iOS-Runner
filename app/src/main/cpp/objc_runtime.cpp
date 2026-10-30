@@ -92,10 +92,15 @@ std::unordered_map<std::string, const void*>& framework_methods() {
     abort();
 }
 
+// Every framework class inherits NSObject's root methods.
 const void* lookup_framework_method(const std::string& description) {
     const auto found = framework_methods().find(description);
-    if (found == framework_methods().end()) stop_unknown_message(description);
-    return found->second;
+    if (found != framework_methods().end()) return found->second;
+    const size_t space = description.find(' ');
+    const std::string root = description.substr(0, 2) + "NSObject" + description.substr(space);
+    const auto inherited = framework_methods().find(root);
+    if (inherited == framework_methods().end()) stop_unknown_message(description);
+    return inherited->second;
 }
 
 extern "C" const void* rt_objc_lookup(void* receiver, const char* selector) {
@@ -129,8 +134,21 @@ extern "C" const void* rt_objc_super_lookup(void* const* super_info, const char*
 extern "C" void rt_objc_msgSend();
 extern "C" void rt_objc_msgSendSuper2();
 
+constexpr size_t kFrameworkInstanceSize = 64;
+
+void* framework_alloc(const std::string& name) {
+    static std::map<std::string, void*> classes;
+    auto& cls = classes[name];
+    if (cls == nullptr) cls = objc_native_class(strdup(name.c_str()), free);
+    auto** object = static_cast<void**>(calloc(1, kFrameworkInstanceSize));
+    object[0] = cls;
+    object[1] = reinterpret_cast<void*>(static_cast<uintptr_t>(1));
+    return object;
+}
+
 extern "C" void* rt_objc_allocWithZone(void* cls, void*) {
-    if (!framework_class_name(cls).empty()) stop_unknown_message("+[" + framework_class_name(cls) + " allocWithZone:]");
+    const std::string framework = framework_class_name(cls);
+    if (!framework.empty()) return framework_alloc(framework);
     uintptr_t data;
     memcpy(&data, static_cast<char*>(cls) + kClassDataOffset, sizeof data);
     uint32_t size;
@@ -144,7 +162,7 @@ extern "C" void* rt_objc_allocWithZone(void* cls, void*) {
 }  // namespace
 
 // Saves every argument register around the lookup, so the method sees exactly the caller's call.
-#define OBJC_DISPATCH(name, lookup, nil_check)  \
+#define OBJC_DISPATCH(name, lookup, nil_check, finish)  \
     ".globl " #name "\n"                        \
     #name ":\n"                                 \
     nil_check                                   \
@@ -171,6 +189,7 @@ extern "C" void* rt_objc_allocWithZone(void* cls, void*) {
     "  ldp d4, d5, [sp, #128]\n"                \
     "  ldp d6, d7, [sp, #144]\n"                \
     "  ldp x29, x30, [sp], #208\n"              \
+    finish                                      \
     "  br x16\n"
 
 __asm__(
@@ -181,8 +200,10 @@ __asm__(
                   "  movi d0, #0\n"
                   "  movi d1, #0\n"
                   "  ret\n"
-                  "1:\n")
-    OBJC_DISPATCH(rt_objc_msgSendSuper2, rt_objc_super_lookup, ""));
+                  "1:\n",
+                  "")
+    // x0 points at {receiver, class}; the method itself must see the receiver.
+    OBJC_DISPATCH(rt_objc_msgSendSuper2, rt_objc_super_lookup, "", "  ldr x0, [x0]\n"));
 
 void* objc_runtime_symbol(std::string_view name) {
     if (name == "objc_msgSend") return reinterpret_cast<void*>(rt_objc_msgSend);
