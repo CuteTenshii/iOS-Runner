@@ -99,6 +99,10 @@ const int32_t kStorageCaseValueTag = 0;
 const int32_t kTitleDisplayInline = 2;
 char g_view_body_requirement;
 char g_view_body_type_requirement;
+char g_toolbar_body_requirement;
+char g_toolbar_body_type_requirement;
+char g_modifier_body_requirement;
+char g_modifier_body_type_requirement;
 
 SWIFTCC void window_group_init(SWIFT_OUT void** out, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                                const void* closure, void* context, void* content_type, void** content_witnesses) {
@@ -1686,6 +1690,8 @@ const char* node_kind_name(NodeKind kind) {
 }
 
 constexpr const char* kViewProtocolSymbol = "_$s7SwiftUI4ViewMp";
+constexpr const char* kToolbarContentSymbol = "_$s7SwiftUI14ToolbarContentMp";
+constexpr const char* kViewModifierSymbol = "_$s7SwiftUI12ViewModifierMp";
 constexpr const char* kRepresentableSymbol = "_$s7SwiftUI19UIViewRepresentableMp";
 constexpr size_t kConformanceTypeOffset = 4;
 constexpr size_t kConformanceFlagsOffset = 12;
@@ -1736,6 +1742,7 @@ const char* find_conformance(const void* type, const char* protocol_symbol) {
 }
 
 extern "C" void* rt_call_make_ui_view(const void* function, void* context, void* self, void* type, void** table);
+extern "C" void rt_call_modifier_body(const void* function, void* out, void* content, void* self, void* type, void** table);
 
 const char* find_view_conformance(const void* type) { return find_conformance(type, kViewProtocolSymbol); }
 
@@ -1758,7 +1765,7 @@ bool is_view_like(void* type) {
     const uint64_t kind = *static_cast<uint64_t*>(type);
     if (kind == kTupleKind) return true;
     if (foreign_type_name(type) != nullptr) return true;
-    return find_view_conformance(type) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
+    return find_view_conformance(type) != nullptr || find_conformance(type, kToolbarContentSymbol) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
 }
 
 std::string json_string(const std::string& text) {
@@ -2018,7 +2025,7 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
             const std::string field = node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":\"Search\",\"v\":" + json_string(swift_string_to_utf8(text)), {});
             const std::string content = render_children(node, path, depth);
-            return content.empty() ? field : field + "," + content;
+            return node_json("v", {}, content.empty() ? field : field + "," + content);
         }
         case NodeKind::Stack: return node_json("v", {}, render_children(node, path, depth));
         case NodeKind::Divider: return {};
@@ -2166,6 +2173,27 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
     return {};
 }
 
+// What a custom modifier's `content` placeholder stands for while its body renders.
+std::string g_modifier_content;
+
+std::string render_custom_modifier(const char* conformance, void* modifier, void* type, const std::string& content, const std::string& path, int depth) {
+    const void* body = find_witness(conformance, &g_modifier_body_requirement);
+    const void* body_type_name = find_witness(conformance, &g_modifier_body_type_requirement);
+    if (body == nullptr || body_type_name == nullptr) return content;
+    const auto* body_name = reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(body_type_name) & ~static_cast<uintptr_t>(1));
+    void* body_metadata = resolve_mangled_type(body_name, static_cast<void* const*>(type) + kMetadataArgumentsWord);
+    const size_t size = witnesses_of(body_metadata)->size;
+    void* output = calloc(1, size == 0 ? 1 : size);
+    auto** table = static_cast<void**>(rt_swift_getWitnessTable_for_view(conformance, type));
+    char placeholder = 0;
+    rt_call_modifier_body(body, output, &placeholder, modifier, type, table);
+    const std::string outer = g_modifier_content;
+    g_modifier_content = content;
+    std::string rendered = render(output, body_metadata, path + "/mod", depth + 1);
+    g_modifier_content = outer;
+    return rendered;
+}
+
 std::string render(void* value, void* type, const std::string& path, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
@@ -2194,6 +2222,7 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         }
         const auto fields = type_fields(type);
         if (fields.empty()) {
+            if (name != nullptr && strcmp(name, "_$s7SwiftUI21_ViewModifier_ContentVMn") == 0) return g_modifier_content;
             if (name != nullptr && strcmp(name, "_$s7SwiftUI6SpacerVMn") == 0) return node_json("spacer", {}, {});
             return {};
         }
@@ -2211,9 +2240,16 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
                 const int action = add_action({ActionKind::SetValue, nullptr, nullptr, g_picker_binding, tag, tag_type, 0, {}});
                 return node_json("option", "\"a\":" + std::to_string(action) + ",\"v\":" + (selected ? "true" : "false"), content);
             }
+            if (modifier != nullptr && strcmp(modifier, "_$s7SwiftUI13_TaskModifierVMn") == 0) {
+                const auto* task = reinterpret_cast<const AppearanceAction*>(modifier_value);
+                if (started_tasks().insert(path + "#task").second) concurrency_start(task->function, rt_swift_retain(task->context));
+            }
             if (modifier != nullptr && strcmp(modifier, kAppearanceSymbol) == 0) {
                 const auto* action = reinterpret_cast<const AppearanceAction*>(modifier_value);
                 if (action->function != nullptr && started_tasks().insert(path + "#appear").second) g_pending_appear.push_back(*action);
+            }
+            if (const char* custom = find_conformance(fields[1].type, kViewModifierSymbol)) {
+                return render_custom_modifier(custom, modifier_value, fields[1].type, content, path, depth);
             }
             if (is_runtime_node_type(fields[1].type)) {
                 const std::string extra = render(modifier_value, fields[1].type, path + "/m", depth);
@@ -2233,8 +2269,14 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
             children += rendered;
         }
         if (name == nullptr) return children;
+        if (strcmp(name, "_$s7SwiftUI21_ViewModifier_ContentVMn") == 0) return g_modifier_content;
         if (strcmp(name, "_$s7SwiftUI6HStackVMn") == 0) return node_json("h", {}, children);
-        if (strcmp(name, "_$s7SwiftUI6VStackVMn") == 0) return node_json("v", {}, children);
+        if (strcmp(name, "_$s7SwiftUI6VStackVMn") == 0) {
+            // A stack around one view adds nothing, and would stop a tab bar or list from filling the screen.
+            Json parsed;
+            if (json_parse("[" + children + "]", parsed) && parsed.items.size() == 1) return children;
+            return node_json("v", {}, children);
+        }
         return children;
     }
     if (const char* representable = find_conformance(type, kRepresentableSymbol)) {
@@ -2251,9 +2293,11 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         return node_json("native", "\"w\":" + std::to_string(web_view), {});
     }
     const char* conformance = find_view_conformance(type);
+    const bool is_toolbar_content = conformance == nullptr;
+    if (is_toolbar_content) conformance = find_conformance(type, kToolbarContentSymbol);
     if (conformance == nullptr) return {};
-    const void* body = find_witness(conformance, &g_view_body_requirement);
-    const void* body_type_name = find_witness(conformance, &g_view_body_type_requirement);
+    const void* body = find_witness(conformance, is_toolbar_content ? &g_toolbar_body_requirement : &g_view_body_requirement);
+    const void* body_type_name = find_witness(conformance, is_toolbar_content ? &g_toolbar_body_type_requirement : &g_view_body_type_requirement);
     if (body == nullptr || body_type_name == nullptr) {
         engine_log("STOP: a view conformance has no body witness");
         abort();
@@ -2385,6 +2429,25 @@ __asm__(
     "  mov x20, x2\n"
     "  mov x1, x3\n"
     "  mov x2, x4\n"
+    "  blr x16\n"
+    "  ldr x20, [sp, #16]\n"
+    "  ldp x29, x30, [sp], #32\n"
+    "  ret\n");
+
+// ViewModifier.body(content:): the placeholder content in x0, self in x20, then Self and its witness table.
+__asm__(
+    ".text\n"
+    ".globl rt_call_modifier_body\n"
+    "rt_call_modifier_body:\n"
+    "  stp x29, x30, [sp, #-32]!\n"
+    "  mov x29, sp\n"
+    "  str x20, [sp, #16]\n"
+    "  mov x16, x0\n"
+    "  mov x8, x1\n"
+    "  mov x0, x2\n"
+    "  mov x20, x3\n"
+    "  mov x1, x4\n"
+    "  mov x2, x5\n"
     "  blr x16\n"
     "  ldr x20, [sp, #16]\n"
     "  ldp x29, x30, [sp], #32\n"
@@ -2809,6 +2872,10 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI19AccessibilityTraitsV8isHeaderACvgZ", reinterpret_cast<void*>(accessibility_is_header)},
         {"$s7SwiftUI17NavigationBarItemV16TitleDisplayModeO6inlineyA2EmFWC", const_cast<int32_t*>(&kTitleDisplayInline)},
         {"$s7SwiftUI3LogO013runtimeIssuesC0So9OS_os_logCvgZ", reinterpret_cast<void*>(runtime_issues_log)},
+        {"$s7SwiftUI14ToolbarContentP4body4BodyQzvgTq", &g_toolbar_body_requirement},
+        {"$s4Body7SwiftUI14ToolbarContentPTl", &g_toolbar_body_type_requirement},
+        {"$s7SwiftUI12ViewModifierP4body7content4BodyQzAA01_cD8_ContentVyxG_tFTq", &g_modifier_body_requirement},
+        {"$s4Body7SwiftUI12ViewModifierPTl", &g_modifier_body_type_requirement},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

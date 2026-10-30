@@ -710,6 +710,7 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI12TupleContentVMn", {kFirstArgument}},
         {"_$s7SwiftUI9TupleViewVMn", {kFirstArgument}},
         {"_$s7SwiftUI5GroupVMn", {kFirstArgument}},
+        {"_$s7SwiftUI13_TaskModifierVMn", {kWord, kReference, kByte}},
         {"_$s7SwiftUI22HierarchicalShapeStyleVMn", {{4, 4, -1, false}}},
         {"_$s7SwiftUI19TupleToolbarContentVMn", {kFirstArgument}},
         {"_$s7SwiftUI16_TupleTabContentVMn", {kFirstArgument, kSecondArgument}},
@@ -747,6 +748,8 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
     if (symbol == "_$s8Dispatch0A4TimeVMn") return pod_type("DispatchTime", 8);
+    // Holds a continuation, which isn't reference counted; the arguments stay for resume to find its value type.
+    if (symbol == "_$sScCMn") return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0, arguments);
     // Payload-free framework enums are plain tag words; a reference's layout would read small tags as Optional.none.
     if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
     if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
@@ -1043,6 +1046,13 @@ private:
                     stack_.push_back(node);
                     return;
                 }
+                if (concurrency == 'C') {
+                    Node node;
+                    node.tag = Node::Tag::Nominal;
+                    node.nominal.foreign_symbol = "_$sScCMn";
+                    stack_.push_back(node);
+                    return;
+                }
                 if (concurrency == 'M') { push_type(native_type()); return; }
                 if (concurrency == 'P') { push_type(pod_type("ScP", 1)); return; }
                 fail(std::string("unknown concurrency type Sc") + concurrency);
@@ -1232,10 +1242,11 @@ private:
             symbolic(byte);
             return;
         }
-        // A tuple element's label: it follows the element and has no effect on layout.
+        // A tuple element's label: no effect on layout, but as an identifier it takes a substitution slot.
         if (code >= '1' && code <= '9') {
             --cursor_;
             cursor_ += read_natural();
+            substitute(Node{});
             return;
         }
         switch (code) {
@@ -1381,14 +1392,14 @@ private:
             if (letter == '_') {
                 // Indexes past the alphabet: `A_` is 26, `A<n>_` is n + 27.
                 const uint64_t index = has_count ? count + 27 : 26;
-                if (index >= substitutions_.size()) { fail("substitution out of range"); return; }
+                if (index >= substitutions_.size()) { fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size())); return; }
                 stack_.push_back(substitutions_[index]);
                 return;
             }
             const bool last = letter >= 'A' && letter <= 'Z';
             if (!last && !(letter >= 'a' && letter <= 'z')) { fail("malformed substitution"); return; }
             const uint64_t index = static_cast<uint64_t>(last ? letter - 'A' : letter - 'a');
-            if (index >= substitutions_.size()) { fail("substitution out of range"); return; }
+            if (index >= substitutions_.size()) { fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size())); return; }
             for (uint64_t i = 0; i < (has_count ? count : 1); ++i) stack_.push_back(substitutions_[index]);
             if (last) return;
         }
@@ -1836,6 +1847,7 @@ size_t accessor_generic_arity(std::string_view symbol) {
         {"$s7SwiftUI4ListVMa", 2}, {"$s7SwiftUI4MenuVMa", 2}, {"$s7SwiftUI15NavigationStackVMa", 2},
         {"$s7SwiftUI11ToolbarItemVMa", 2}, {"$s7SwiftUI19_ConditionalContentVMa", 2},
         {"$s7SwiftUI19_ConditionalContentV7StorageOMa", 2}, {"$s7SwiftUI7SectionVMa", 3},
+        {"$sScCMa", 2},
         {"$s7Combine9PublishedVMa", 1}, {"$s7Combine8DeferredVMa", 1}, {"$s7Combine11SubscribersO10CompletionOMa", 1},
         {"$s7Combine12AnyPublisherVMa", 2}, {"$s7Combine18PassthroughSubjectCMa", 2}, {"$s7Combine6FutureCMa", 2},
         {"$sSaMa", 1}, {"$sShMa", 1}, {"$sSDMa", 2}, {"$ss6ResultOMa", 2},
