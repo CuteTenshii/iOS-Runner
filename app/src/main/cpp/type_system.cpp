@@ -514,7 +514,7 @@ Metadata* metadata_for_field(const FrozenField& field, const std::vector<void*>&
     return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, field.size, field.alignment, 0);
 }
 
-Metadata* struct_from_fields(const std::string& key, const std::vector<FrozenField>& fields, const std::vector<void*>& arguments) {
+Metadata* struct_from_fields(const std::string& key, const std::vector<FrozenField>& fields, const std::vector<void*>& arguments, size_t witness_words) {
     auto* layout = new Layout{LayoutKind::Aggregate, {}, nullptr};
     size_t offset = 0;
     size_t alignment = 1;
@@ -534,10 +534,10 @@ Metadata* struct_from_fields(const std::string& key, const std::vector<FrozenFie
     if (plain) layout->kind = LayoutKind::Pod;
     std::vector<void*> with_offsets = arguments;
     const size_t offset_words = (layout->fields.size() + 1) / 2;
-    with_offsets.resize(arguments.size() + offset_words, nullptr);
+    with_offsets.resize(arguments.size() + witness_words + offset_words, nullptr);
     auto* metadata = named_type(key, kKindStruct, layout, offset, alignment, inhabitants, with_offsets);
-    // The field offset vector follows the generic arguments; the app reads offsets from it directly.
-    auto* offsets = reinterpret_cast<uint32_t*>(&metadata->arguments[arguments.size()]);
+    // Metadata holds generic arguments, then their witness tables, then field offsets, which the app reads directly.
+    auto* offsets = reinterpret_cast<uint32_t*>(&metadata->arguments[arguments.size() + witness_words]);
     for (size_t i = 0; i < layout->fields.size(); ++i) offsets[i] = static_cast<uint32_t>(layout->fields[i].offset);
     return metadata;
 }
@@ -611,6 +611,10 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI6HStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6VStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
         {"_$s7SwiftUI6ZStackVMn", {kAlignment, kFirstArgument}},
+        {"_$s7SwiftUI13_VariadicViewO4TreeVMn", {kFirstArgument, kSecondArgument}},
+        {"_$s7SwiftUI13_HStackLayoutVMn", {kWord, kOptionalDouble}},
+        {"_$s7SwiftUI13_VStackLayoutVMn", {kWord, kOptionalDouble}},
+        {"_$s7SwiftUI13_ZStackLayoutVMn", {kAlignment}},
         {"_$s7SwiftUI6SpacerVMn", {kOptionalDouble}},
         {"_$s7SwiftUI6CircleVMn", {}},
         {"_$s7SwiftUI9RectangleVMn", {}},
@@ -619,6 +623,19 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI16_TupleTabContentVMn", {kFirstArgument, kSecondArgument}},
     };
     return table;
+}
+
+// How many witness tables a type's constraints add to its metadata.
+size_t witness_word_count(const std::string& symbol) {
+    static const std::unordered_map<std::string_view, size_t> counts = {
+        {"_$s7SwiftUI6HStackVMn", 1}, {"_$s7SwiftUI6VStackVMn", 1}, {"_$s7SwiftUI6ZStackVMn", 1},
+        {"_$s7SwiftUI13_VariadicViewO4TreeVMn", 1},
+        {"_$s7SwiftUI24_BackgroundStyleModifierVMn", 1}, {"_$s7SwiftUI16_OverlayModifierVMn", 1},
+        {"_$s7SwiftUI11_ClipEffectVMn", 1}, {"_$s7SwiftUI21_ContentShapeModifierVMn", 1},
+        {"_$s7SwiftUI18_AnimationModifierVMn", 1}, {"_$s7SwiftUI21_TraitWritingModifierVMn", 1},
+    };
+    const auto found = counts.find(symbol);
+    return found == counts.end() ? 0 : found->second;
 }
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
@@ -645,7 +662,11 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
             abort();
         }
     }
-    return struct_from_fields(key, found->second, arguments);
+    if (symbol == "_$s7SwiftUI21_TraitWritingModifierVMn") {
+        // The modifier stores the trait's value rather than its key; ZIndex is this app's only such trait.
+        return struct_from_fields(key, {{sizeof(double), sizeof(double), -1, false}}, arguments, witness_word_count(symbol));
+    }
+    return struct_from_fields(key, found->second, arguments, witness_word_count(symbol));
 }
 
 // Types whose stored layout the app's compiled code depends on; everything else from a framework is one reference.
