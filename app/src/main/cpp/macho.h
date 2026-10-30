@@ -23,6 +23,8 @@ struct MachImage {
     size_t size = 0;
     intptr_t slide = 0;
     uintptr_t entry = 0;
+    // The deployment target, encoded as Darwin versions are: major << 16 | minor << 8 | patch.
+    uint32_t minimum_os = 0;
     std::vector<MachSection> sections;
     std::vector<MachImport> imports;
 

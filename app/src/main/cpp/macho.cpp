@@ -32,8 +32,11 @@ constexpr size_t kMachPageSize = 0x4000;
 constexpr size_t kGuardSpacing = 0x1000;
 constexpr size_t kGuardSlots = 0x4000;
 
+constexpr uint32_t kBuildVersionCommand = 0x32;
+
 struct MachHeader64 { uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved; };
 struct LoadCommand { uint32_t cmd, cmdsize; };
+struct BuildVersionCommand { uint32_t cmd, cmdsize, platform, minos, sdk, ntools; };
 struct SegmentCommand64 {
     uint32_t cmd, cmdsize;
     char segname[16];
@@ -200,6 +203,9 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
     for (uint32_t i = 0; i < header->ncmds; ++i) {
         const auto* command = reinterpret_cast<const LoadCommand*>(cursor);
         switch (command->cmd) {
+            case kBuildVersionCommand:
+                image.minimum_os = reinterpret_cast<const BuildVersionCommand*>(command)->minos;
+                break;
             case kLcSegment64:
                 segments.push_back(reinterpret_cast<const SegmentCommand64*>(command));
                 break;
