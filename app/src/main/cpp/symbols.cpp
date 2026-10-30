@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 
@@ -12,6 +13,7 @@
 #include "codable_shim.h"
 #include "combine_shim.h"
 #include "coredata_shim.h"
+#include "dispatch_shim.h"
 #include "foundation_shim.h"
 #include "regex_shim.h"
 #include "objc_runtime.h"
@@ -84,8 +86,12 @@ bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
 void* darwin_dlsym(void*, const char* name) { return resolve_symbol(name); }
 
-// The runner presents itself as a current iOS, so every availability check passes.
-int32_t platform_version_at_least(uint32_t, uint32_t, uint32_t, uint32_t) { return 1; }
+// The runner presents itself as the app's deployment target: every app must work there, without weak imports.
+uint32_t g_reported_os = 0;
+
+int32_t platform_version_at_least(uint32_t, uint32_t major, uint32_t minor, uint32_t patch) {
+    return ((major << 16) | (minor << 8) | patch) <= g_reported_os ? 1 : 0;
+}
 
 size_t darwin_malloc_size(void* pointer) { return malloc_usable_size(pointer); }
 void darwin_bzero(void* pointer, size_t size) { memset(pointer, 0, size); }
@@ -130,6 +136,16 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
     return table;
 }
 
+// A framework enum's case tag only has to be distinct: its values are opaque tag words to the guest and to these shims.
+void* framework_enum_case_tag(std::string_view name) {
+    constexpr std::string_view kCaseTagSuffix = "WC";
+    if (name.size() <= kCaseTagSuffix.size() || name.substr(0, 2) != "$s" || name.substr(name.size() - kCaseTagSuffix.size()) != kCaseTagSuffix) return nullptr;
+    static std::unordered_map<std::string, int32_t*> tags;
+    int32_t*& tag = tags[std::string(name)];
+    if (tag == nullptr) tag = new int32_t(static_cast<int32_t>(tags.size()));
+    return tag;
+}
+
 }  // namespace
 
 void* resolve_symbol(const char* name) {
@@ -142,15 +158,19 @@ void* resolve_symbol(const char* name) {
     if (void* symbol = foundation_symbol(name)) return symbol;
     if (void* symbol = codable_symbol(name)) return symbol;
     if (void* symbol = coredata_symbol(name)) return symbol;
+    if (void* symbol = dispatch_symbol(name)) return symbol;
     if (void* symbol = combine_symbol(name)) return symbol;
     if (void* symbol = regex_symbol(name)) return symbol;
     if (void* symbol = stdlib_symbol(name)) return symbol;
     if (void* symbol = concurrency_symbol(name)) return symbol;
-    return type_system_symbol(name);
+    if (void* symbol = type_system_symbol(name)) return symbol;
+    return framework_enum_case_tag(name);
 }
 
 void runtime_attach_image(const MachImage& image) {
+    g_reported_os = image.minimum_os;
     foundation_register_classes();
     coredata_register_classes();
+    coredata_attach_image(image);
     swiftui_attach_image(image);
 }

@@ -7,6 +7,7 @@
 #include "engine.h"
 #include "foundation_shim.h"
 #include "localization.h"
+#include "swiftui_shim.h"
 
 namespace {
 
@@ -154,6 +155,10 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
 
 extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeAction(JNIEnv*, jclass, jint action) {
     engine_post_action(action);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeTextInput(JNIEnv* env, jclass, jint action, jstring text) {
+    engine_post_event([action, value = to_string(env, text)] { swiftui_set_text(action, value); });
 }
 
 extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeScriptFinished(JNIEnv* env, jclass, jint call, jstring json, jboolean failed) {

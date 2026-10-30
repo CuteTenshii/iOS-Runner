@@ -365,6 +365,48 @@ void* bridge_retain(void* raw) { return rt_swift_bridgeObjectRetain(raw); }
 void bridge_release(void* raw) { rt_swift_bridgeObjectRelease(raw); }
 
 const ValueWitnessTable kEmptyWitnesses = pod_witnesses<0>();
+void* closure_copy(void* destination, void* source, void*) {
+    auto* words = static_cast<void**>(source);
+    auto* copy = static_cast<void**>(destination);
+    copy[0] = words[0];
+    copy[1] = retain_object(words[1]);
+    return destination;
+}
+
+void* closure_assign_copy(void* destination, void* source, void*) {
+    void* previous = static_cast<void**>(destination)[1];
+    closure_copy(destination, source, nullptr);
+    release_object(previous);
+    return destination;
+}
+
+void* closure_assign_take(void* destination, void* source, void*) {
+    void* previous = static_cast<void**>(destination)[1];
+    memcpy(destination, source, 2 * sizeof(void*));
+    release_object(previous);
+    return destination;
+}
+
+// A function value is {code, context}; Optional's none lives in the code word.
+const ValueWitnessTable kClosureWitnesses = {
+    closure_copy,
+    +[](void* value, void*) { release_object(static_cast<void**>(value)[1]); },
+    closure_copy,
+    closure_assign_copy,
+    pod_copy<16>,
+    closure_assign_take,
+    +[](const void* value, uint32_t empty_cases, void*) -> uint32_t {
+        if (empty_cases == 0) return 0;
+        const auto bits = *static_cast<const uintptr_t*>(value);
+        return bits < kFirstValidPointer ? static_cast<uint32_t>(bits) + 1 : 0;
+    },
+    +[](void* value, uint32_t tag, uint32_t empty_cases, void*) {
+        if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
+    },
+    16, 16, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer)};
+const ValueWitnessTable kInt8Witnesses = pod_witnesses<1>();
+const ValueWitnessTable kInt16Witnesses = pod_witnesses<2>();
+const ValueWitnessTable kInt128Witnesses = pod_witnesses<16>();
 const ValueWitnessTable kInt32Witnesses = pod_witnesses<4>();
 const ValueWitnessTable kInt64Witnesses = pod_witnesses<8>();
 const ValueWitnessTable kNativeObjectWitnesses = reference_witnesses<retain_object, release_object>();
@@ -675,7 +717,28 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_slowAlloc", +[](size_t size, size_t) { return malloc(size); }),
         SYM("swift_slowDealloc", +[](void* pointer, size_t, size_t) { free(pointer); }),
         SYM("swift_getWitnessTable", rt_swift_getWitnessTable),
+        SYM("swift_initStaticObject", +[](void* metadata, void** object) -> void* {
+            object[0] = metadata;
+            object[1] = reinterpret_cast<void*>(static_cast<uintptr_t>(kImmortal));
+            return object;
+        }),
+        SYM("objc_autorelease", rt_identity),
+        SYM("objc_autoreleaseReturnValue", rt_identity),
+        SYM("objc_retainAutorelease", retain_object),
+        SYM("objc_claimAutoreleasedReturnValue", retain_object),
+        SYM("objc_autoreleasePoolPush", +[]() -> void* { return nullptr; }),
+        SYM("objc_autoreleasePoolPop", +[](void*) {}),
+        SYM("objc_sync_enter", +[](void*) -> int { return 0; }),
+        SYM("objc_sync_exit", +[](void*) -> int { return 0; }),
+        SYM("objc_storeStrong", +[](void** slot, void* value) {
+            retain_object(value);
+            void* old = *slot;
+            *slot = value;
+            release_object(old);
+        }),
+        SYM("swift_errorRetain", retain_object),
         SYM("swift_getOpaqueTypeConformance2", rt_get_opaque_conformance),
+        SYM("swift_getOpaqueTypeConformance", rt_get_opaque_conformance),
         SYM("swift_once", rt_once),
         SYM("dispatch_once_f", rt_dispatch_once),
         SYM("objc_opt_self", rt_identity),
@@ -686,6 +749,12 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("_swiftEmptyDictionarySingleton", g_empty_dictionary),
         SYM("_swiftEmptySetSingleton", g_empty_set),
         {"$sytWV", const_cast<ValueWitnessTable*>(&kEmptyWitnesses)},
+        {"$syycWV", const_cast<ValueWitnessTable*>(&kClosureWitnesses)},
+        {"$sBi8_WV", const_cast<ValueWitnessTable*>(&kInt8Witnesses)},
+        {"$sBi16_WV", const_cast<ValueWitnessTable*>(&kInt16Witnesses)},
+        {"$sBi128_WV", const_cast<ValueWitnessTable*>(&kInt128Witnesses)},
+        {"$sBpWV", const_cast<ValueWitnessTable*>(&kInt64Witnesses)},
+        {"$sBomWV", const_cast<ValueWitnessTable*>(&kInt64Witnesses)},
         {"$sBi32_WV", const_cast<ValueWitnessTable*>(&kInt32Witnesses)},
         {"$sBi64_WV", const_cast<ValueWitnessTable*>(&kInt64Witnesses)},
         {"$sBoWV", const_cast<ValueWitnessTable*>(&kNativeObjectWitnesses)},
@@ -705,6 +774,19 @@ void* swift_runtime_symbol(std::string_view name) {
     // Dispatch thunks: the witness table register follows from each requirement's signature.
     static const std::unordered_map<std::string_view, size_t> thunks = {
         {"$ss23CustomStringConvertibleP11descriptionSSvgTj", 1},
+        {"$sST12makeIterator0B0QzyFTj", 1},
+        {"$sST22_copyToContiguousArrays0cD0Vy7ElementQzGyFTj", 1},
+        {"$sST19underestimatedCountSivgTj", 1},
+        {"$sSt4next7ElementQzSgyFTj", 1},
+        {"$sSl8distance4from2toSi5IndexQz_AEtFTj", 3},
+        {"$sSl5index_8offsetBy5IndexQzAD_SitFTj", 3},
+        {"$sSl10startIndex0B0QzvgTj", 1},
+        {"$sSl8endIndex0B0QzvgTj", 1},
+        {"$sSl5countSivgTj", 1},
+        {"$sSl7isEmptySbvgTj", 1},
+        {"$sSl9formIndex5aftery0B0Qzz_tFTj", 2},
+        {"$sSl5index5after5IndexQzAD_tFTj", 2},
+        {"$sSly7ElementQz5IndexQzcirTj", 3},
         {"$sScA15unownedExecutorScevgTj", 1},
         {"$s7SwiftUI10TabContentP15_identifiedView011_IdentifiedF0QzvgTj", 1},
     };

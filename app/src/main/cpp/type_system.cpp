@@ -674,14 +674,44 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
         {"_$s7SwiftUI13_ZStackLayoutVMn", {kAlignment}},
         {"_$s7SwiftUI6SpacerVMn", {kOptionalDouble}},
         {"_$s7SwiftUI5StateVMn", {kFirstArgument, kReference}},
+        {"_$ss16IndexingIteratorVMn", {kFirstArgument, kWord}},
         {"_$s7SwiftUI16SubscriptionViewVMn", {kSecondArgument, kFirstArgument, kClosure}},
         {"_$s7SwiftUI14ObservedObjectVMn", {kWord, kReference}},
         {"_$s7SwiftUI11StateObjectVMn", {kWord, kReference, kByte}},
+        {"_$s7SwiftUI19_BackgroundModifierVMn", {kFirstArgument, kAlignment}},
+        {"_$s7SwiftUI10_ShapeViewVMn", {kFirstArgument, kSecondArgument, {2, 1, -1, false}}},
+        {"_$s7SwiftUI13_StrokedShapeVMn", {kFirstArgument, kWord, kWord, kWord, kReference, kWord}},
+        {"_$s7SwiftUI13_TrimmedShapeVMn", {kFirstArgument, kWord, kWord}},
+        {"_$s7SwiftUI16RoundedRectangleVMn", {kAnchor, kByte}},
+        {"_$s7SwiftUI16RoundedRectangleV6_InsetVMn", {kAnchor, kByte, kWord}},
+        {"_$s7SwiftUI22UnevenRoundedRectangleVMn", {kAnchor, kAnchor, kByte}},
+        {"_$s7SwiftUI7CapsuleVMn", {kByte}},
+        {"_$s7SwiftUI6CircleV6_InsetVMn", {kWord}},
+        {"_$s7SwiftUI11_MaskEffectVMn", {kFirstArgument}},
+        {"_$s7SwiftUI13_OffsetEffectVMn", {kAnchor}},
+        {"_$s7SwiftUI14_OpacityEffectVMn", {kWord}},
+        {"_$s7SwiftUI12_ScaleEffectVMn", {kAnchor, kAnchor}},
+        {"_$s7SwiftUI15_HiddenModifierVMn", {}},
+        {"_$s7SwiftUI16_FixedSizeLayoutVMn", {{2, 1, -1, false}}},
+        {"_$s7SwiftUI16_FlexFrameLayoutVMn", {kOptionalDouble, kOptionalDouble, kOptionalDouble, kOptionalDouble, kOptionalDouble, kOptionalDouble, kAlignment}},
+        {"_$s7SwiftUI21_OverlayStyleModifierVMn", {kFirstArgument, kAlignment}},
+        {"_$s7SwiftUI24_ForegroundStyleModifierVMn", {kFirstArgument}},
+        {"_$s7SwiftUI20_TransactionModifierVMn", {kClosure}},
+        {"_$s7SwiftUI20_ValueActionModifierVMn", {kFirstArgument, kClosure}},
+        {"_$s7SwiftUI18_TaskValueModifierVMn", {kFirstArgument, kClosure, kWord}},
+        {"_$s7SwiftUI23_GeometryActionModifierVMn", {kFirstArgument, kClosure, kClosure}},
+        {"_$s7SwiftUI30_SafeAreaRegionsIgnoringLayoutVMn", {kWord, kByte}},
+        {"_$s7SwiftUI14GeometryReaderVMn", {kClosure}},
+        {"_$s7SwiftUI15ForegroundStyleVMn", {}},
+        {"_$s7SwiftUI21_ViewModifier_ContentVMn", {}},
         {"_$s7SwiftUI6CircleVMn", {}},
         {"_$s7SwiftUI9RectangleVMn", {}},
         {"_$s7SwiftUI9EmptyViewVMn", {}},
         {"_$s7SwiftUI12TupleContentVMn", {kFirstArgument}},
         {"_$s7SwiftUI9TupleViewVMn", {kFirstArgument}},
+        {"_$s7SwiftUI5GroupVMn", {kFirstArgument}},
+        {"_$s7SwiftUI22HierarchicalShapeStyleVMn", {{4, 4, -1, false}}},
+        {"_$s7SwiftUI19TupleToolbarContentVMn", {kFirstArgument}},
         {"_$s7SwiftUI16_TupleTabContentVMn", {kFirstArgument, kSecondArgument}},
     };
     return table;
@@ -698,6 +728,13 @@ size_t witness_word_count(const std::string& symbol) {
         {"_$s7SwiftUI24_TagTraitWritingModifierVMn", 1},
         {"_$s7SwiftUI14ObservedObjectVMn", 1}, {"_$s7SwiftUI11StateObjectVMn", 1},
         {"_$s7SwiftUI16SubscriptionViewVMn", 2},
+        {"_$ss16IndexingIteratorVMn", 1},
+        {"_$s7SwiftUI5GroupVMn", 1},
+        {"_$s7SwiftUI19_BackgroundModifierVMn", 1}, {"_$s7SwiftUI10_ShapeViewVMn", 2}, {"_$s7SwiftUI13_StrokedShapeVMn", 1},
+        {"_$s7SwiftUI13_TrimmedShapeVMn", 1}, {"_$s7SwiftUI11_MaskEffectVMn", 1}, {"_$s7SwiftUI21_OverlayStyleModifierVMn", 1},
+        {"_$s7SwiftUI24_ForegroundStyleModifierVMn", 1}, {"_$s7SwiftUI20_ValueActionModifierVMn", 1},
+        {"_$s7SwiftUI18_TaskValueModifierVMn", 1}, {"_$s7SwiftUI23_GeometryActionModifierVMn", 1},
+        {"_$s7SwiftUI14GeometryReaderVMn", 1},
     };
     const auto found = counts.find(symbol);
     return found == counts.end() ? 0 : found->second;
@@ -709,6 +746,9 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
         return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
+    if (symbol == "_$s8Dispatch0A4TimeVMn") return pod_type("DispatchTime", 8);
+    // Payload-free framework enums are plain tag words; a reference's layout would read small tags as Optional.none.
+    if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
     if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
     if (symbol == "_$ss15ContinuousClockV7InstantVMn") return named_type("ContinuousClock.Instant", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 16, 8, 0);
     if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
@@ -779,6 +819,8 @@ struct NominalReference {
     const char* foreign_symbol = nullptr;
 };
 
+extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t length, const void* context, void* const* generics);
+
 struct Node {
     enum class Tag { Type, Nominal, Protocol, ListMarker, FirstElement } tag = Tag::Type;
     Metadata* type = nullptr;
@@ -787,9 +829,12 @@ struct Node {
 
 using MetadataAccessor = void* (*)(uintptr_t, void*, void*, void*);
 
-Metadata* metadata_for_descriptor(const NominalReference& nominal, const std::vector<void*>& arguments) {
-    if (nominal.foreign_symbol != nullptr) return foreign_nominal(nominal.foreign_symbol, arguments);
+std::vector<void*> key_arguments_for(const char* descriptor, const std::vector<void*>& parameters);
+
+Metadata* metadata_for_descriptor(const NominalReference& nominal, const std::vector<void*>& parameters) {
+    if (nominal.foreign_symbol != nullptr) return foreign_nominal(nominal.foreign_symbol, parameters);
     const auto* descriptor = static_cast<const char*>(nominal.descriptor);
+    const std::vector<void*> arguments = key_arguments_for(descriptor, parameters);
     int32_t offset;
     memcpy(&offset, descriptor + 12, sizeof offset);
     auto accessor = reinterpret_cast<MetadataAccessor>(const_cast<char*>(descriptor + 12 + offset));
@@ -1003,6 +1048,9 @@ private:
                 fail(std::string("unknown concurrency type Sc") + concurrency);
                 return;
             }
+            case 'O':
+                push_type(pod_type("ObjectIdentifier", kPointerSize));
+                return;
             default:
                 break;
         }
@@ -1505,6 +1553,218 @@ extern "C" void rt_initStructMetadata(void** metadata, size_t, size_t field_coun
     metadata[-1] = updated;
 }
 
+// Generic metadata instantiation for the app's own generic structs and enums, per the Swift ABI.
+constexpr size_t kStructGenericHeaderOffset = 28;
+constexpr size_t kEnumGenericHeaderOffset = 28;
+constexpr size_t kClassGenericHeaderOffset = 44;
+constexpr size_t kPatternOffsetInHeader = 4;
+constexpr size_t kNumKeyArgumentsOffset = 12;  // After the two relative pointers and NumParams, NumRequirements.
+constexpr uint32_t kPatternHasExtraData = 1;
+constexpr unsigned kPatternValueKindShift = 21;
+constexpr uint32_t kPatternValueKindMask = 0x7ff;
+constexpr size_t kPatternFlagsOffset = 8;
+constexpr size_t kValuePatternWitnessesOffset = 12;
+constexpr size_t kValuePatternExtraOffset = 16;
+constexpr size_t kValueMetadataHeaderBytes = 3 * kPointerSize;
+
+const char* relative_address(const char* field) {
+    int32_t offset;
+    memcpy(&offset, field, sizeof offset);
+    return offset == 0 ? nullptr : field + offset;
+}
+
+size_t generic_header_offset(const char* descriptor) {
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    switch (flags & kDescriptorKindMask) {
+        case kContextKindClass: return kClassGenericHeaderOffset;
+        case kContextKindStruct: return kStructGenericHeaderOffset;
+        default: return kEnumGenericHeaderOffset;
+    }
+}
+
+uint16_t key_argument_count(const char* descriptor) {
+    uint16_t count;
+    memcpy(&count, descriptor + generic_header_offset(descriptor) + kNumKeyArgumentsOffset, sizeof count);
+    return count;
+}
+
+constexpr size_t kGenericHeaderBytes = 16;
+constexpr size_t kNumParamsOffset = 8;
+constexpr size_t kNumRequirementsOffset = 10;
+constexpr size_t kRequirementBytes = 12;
+
+// A generic type's accessor takes its parameters, then one witness table per protocol requirement.
+std::vector<void*> key_arguments_for(const char* descriptor, const std::vector<void*>& parameters) {
+    std::vector<void*> arguments = parameters;
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    if (!(flags & kDescriptorGeneric)) return arguments;
+    const char* header = descriptor + generic_header_offset(descriptor);
+    uint16_t param_count, requirement_count;
+    memcpy(&param_count, header + kNumParamsOffset, sizeof param_count);
+    memcpy(&requirement_count, header + kNumRequirementsOffset, sizeof requirement_count);
+    const char* requirements = header + kGenericHeaderBytes + ((param_count + 3u) & ~3u);
+    for (uint16_t i = 0; i < requirement_count; ++i) {
+        const char* requirement = requirements + i * kRequirementBytes;
+        uint32_t requirement_flags;
+        memcpy(&requirement_flags, requirement, sizeof requirement_flags);
+        if (!(requirement_flags & kRequirementHasKeyArgument) || (requirement_flags & kRequirementKindMask) != kRequirementKindProtocol) continue;
+        const char* subject_name = relative_address(requirement + sizeof(int32_t));
+        void* subject = rt_getTypeByMangledNameInContext2(subject_name, strlen(subject_name), descriptor, parameters.data());
+        int32_t offset;
+        memcpy(&offset, requirement + 2 * sizeof(int32_t), sizeof offset);
+        // The low bit marks an indirect reference; a set second bit would mean an ObjC protocol, which has no table.
+        const char* protocol_field = requirement + 2 * sizeof(int32_t) + (offset & ~3);
+        const void* protocol = offset & 1 ? *reinterpret_cast<const void* const*>(protocol_field) : protocol_field;
+        arguments.push_back(swift_runtime_find_conformance(subject, protocol));
+    }
+    return arguments;
+}
+
+extern "C" void* rt_allocateGenericValueMetadata(const char* descriptor, void* const* arguments, const char* pattern, size_t extra_size) {
+    auto* block = static_cast<void**>(calloc(1, kValueMetadataHeaderBytes + extra_size));
+    void** metadata = block + 1;
+    uint32_t flags;
+    memcpy(&flags, pattern + kPatternFlagsOffset, sizeof flags);
+    metadata[-1] = const_cast<char*>(relative_address(pattern + kValuePatternWitnessesOffset));
+    metadata[0] = reinterpret_cast<void*>(static_cast<uintptr_t>((flags >> kPatternValueKindShift) & kPatternValueKindMask));
+    metadata[1] = const_cast<char*>(descriptor);
+    memcpy(metadata + 2, arguments, key_argument_count(descriptor) * sizeof(void*));
+    if (flags & kPatternHasExtraData) {
+        const char* partial = pattern + kValuePatternExtraOffset;
+        uint16_t offset_in_words, size_in_words;
+        memcpy(&offset_in_words, partial + 4, sizeof offset_in_words);
+        memcpy(&size_in_words, partial + 6, sizeof size_in_words);
+        memcpy(metadata + offset_in_words, relative_address(partial), size_in_words * sizeof(void*));
+    }
+    return metadata;
+}
+
+struct CachedGeneric {
+    const char* descriptor;
+    std::vector<void*> arguments;
+    bool operator<(const CachedGeneric& other) const { return descriptor != other.descriptor ? descriptor < other.descriptor : arguments < other.arguments; }
+};
+
+extern "C" MetadataResponse rt_getGenericMetadata(size_t, void* const* arguments, const char* descriptor) {
+    static std::map<CachedGeneric, void*> cache;
+    const uint16_t count = key_argument_count(descriptor);
+    CachedGeneric key{descriptor, std::vector<void*>(arguments, arguments + count)};
+    {
+        const std::lock_guard guard(g_types_lock);
+        if (const auto found = cache.find(key); found != cache.end()) return {static_cast<Metadata*>(found->second), 0};
+    }
+    const char* pattern = relative_address(descriptor + generic_header_offset(descriptor) + kPatternOffsetInHeader);
+    using Instantiate = void* (*)(const void*, void* const*, const void*);
+    using Complete = MetadataResponse (*)(void*, void*, const void*);
+    auto instantiate = reinterpret_cast<Instantiate>(const_cast<char*>(relative_address(pattern)));
+    void* metadata = instantiate(descriptor, arguments, pattern);
+    {
+        // Recursive types look themselves up while completing.
+        const std::lock_guard guard(g_types_lock);
+        cache[key] = metadata;
+    }
+    if (const char* completion = relative_address(pattern + sizeof(int32_t))) {
+        void* context[4] = {};
+        reinterpret_cast<Complete>(const_cast<char*>(completion))(metadata, context, pattern);
+    }
+    return {static_cast<Metadata*>(metadata), 0};
+}
+
+// Arguments arrive complete, witness tables included, so unlike the mangled form nothing needs looking up.
+extern "C" MetadataResponse rt_getOpaqueTypeMetadata(size_t, void* const* arguments, const char* descriptor, size_t ordinal) {
+    if (const char* symbol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(descriptor))) {
+        const std::lock_guard guard(g_types_lock);
+        return {foreign_nominal(symbol, {}), 0};
+    }
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    const char* trailing = descriptor + 2 * sizeof(int32_t);
+    if (flags & kDescriptorGeneric) {
+        uint16_t params, requirements;
+        memcpy(&params, trailing, sizeof params);
+        memcpy(&requirements, trailing + 2, sizeof requirements);
+        trailing += kGenericHeaderSize + ((params + 3u) & ~3u) + requirements * kGenericRequirementSize;
+    }
+    const char* underlying = relative_address(trailing + ordinal * sizeof(int32_t));
+    size_t length = 0;
+    while (underlying[length] != 0) {
+        const auto byte = static_cast<uint8_t>(underlying[length]);
+        length += byte >= 1 && byte <= 0x17 ? 5 : 1;
+    }
+    return {static_cast<Metadata*>(rt_getTypeByMangledNameInContext2(underlying, length, descriptor, arguments)), 0};
+}
+
+extern "C" MetadataResponse rt_checkMetadataState(size_t, void* metadata) { return {static_cast<Metadata*>(metadata), 0}; }
+
+// How many bytes after the payload an enum needs to tell `tags` cases apart.
+size_t enum_tag_bytes(size_t payload_size, uint64_t empty_cases, uint64_t payload_cases) {
+    uint64_t tags = payload_cases;
+    if (empty_cases > 0) {
+        if (payload_size >= 4) {
+            tags += 1;
+        } else {
+            const uint64_t per_tag = 1ULL << (payload_size * 8);
+            tags += (empty_cases + per_tag - 1) / per_tag;
+        }
+    }
+    if (tags <= 1) return 0;
+    if (tags <= 0x100) return 1;
+    if (tags <= 0x10000) return 2;
+    return 4;
+}
+
+void install_enum_witnesses(void** metadata, const ValueWitnessTable* base, size_t size, size_t alignment_mask, uint32_t pod_flags, uint32_t inhabitants) {
+    auto* updated = new ValueWitnessTable(*base);
+    updated->size = size;
+    updated->stride = size == 0 ? 1 : (size + alignment_mask) & ~alignment_mask;
+    updated->flags = static_cast<uint32_t>(alignment_mask) | (pod_flags & kFlagNonPod);
+    if (size > kInlineBufferSize || alignment_mask >= kPointerSize) updated->flags |= kFlagNonInline;
+    updated->extra_inhabitants = inhabitants;
+    metadata[-1] = updated;
+}
+
+extern "C" void rt_initEnumMetadataSingleCase(void** metadata, size_t, const void* payload_layout) {
+    const auto* payload = witnesses_from_type_layout(payload_layout);
+    install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), payload->size, payload->flags & 0xff, payload->flags, payload->extra_inhabitants);
+}
+
+extern "C" void rt_initEnumMetadataSinglePayload(void** metadata, size_t, const void* payload_layout, uint32_t empty_cases) {
+    const auto* payload = witnesses_from_type_layout(payload_layout);
+    const uint32_t available = payload->extra_inhabitants;
+    if (empty_cases <= available) {
+        install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), payload->size, payload->flags & 0xff, payload->flags, available - empty_cases);
+        return;
+    }
+    const size_t tag = enum_tag_bytes(payload->size, empty_cases - available, 1);
+    install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), payload->size + tag, payload->flags & 0xff, payload->flags, 0);
+}
+
+constexpr size_t kEnumPayloadCasesOffset = 20;
+constexpr size_t kEnumEmptyCasesOffset = 24;
+constexpr unsigned kEnumPayloadSizeOffsetShift = 24;
+constexpr uint32_t kEnumPayloadCasesMask = 0xffffff;
+
+extern "C" void rt_initEnumMetadataMultiPayload(void** metadata, size_t, size_t payload_count, const void* const* payload_layouts) {
+    size_t largest = 0;
+    size_t alignment_mask = 0;
+    uint32_t flags = 0;
+    for (size_t i = 0; i < payload_count; ++i) {
+        const auto* payload = witnesses_from_type_layout(payload_layouts[i]);
+        if (payload->size > largest) largest = payload->size;
+        if ((payload->flags & 0xff) > alignment_mask) alignment_mask = payload->flags & 0xff;
+        flags |= payload->flags;
+    }
+    const auto* descriptor = static_cast<const char*>(metadata[1]);
+    uint32_t cases_and_offset, empty_cases;
+    memcpy(&cases_and_offset, descriptor + kEnumPayloadCasesOffset, sizeof cases_and_offset);
+    memcpy(&empty_cases, descriptor + kEnumEmptyCasesOffset, sizeof empty_cases);
+    const size_t tag = enum_tag_bytes(largest, empty_cases, cases_and_offset & kEnumPayloadCasesMask);
+    if (const uint32_t offset = cases_and_offset >> kEnumPayloadSizeOffsetShift) metadata[offset] = reinterpret_cast<void*>(largest);
+    install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), largest + tag, alignment_mask, flags, 0);
+}
+
 constexpr size_t kClassSuperclassOffset = 8;
 constexpr size_t kClassInstanceSizeOffset = 48;
 constexpr size_t kClassInstanceAlignOffset = 52;
@@ -1568,6 +1828,19 @@ constexpr size_t kAccessorStubSize = 32;
 
 // Accessors take generic arguments in registers, so each needs its arity; anything unlisted is non-generic.
 size_t accessor_generic_arity(std::string_view symbol) {
+    static const std::unordered_map<std::string_view, size_t> arities = {
+        {"$s7SwiftUI5StateVMa", 1}, {"$s7SwiftUI7BindingVMa", 1}, {"$s7SwiftUI12FetchRequestVMa", 1},
+        {"$s7SwiftUI5GroupVMa", 1}, {"$s7SwiftUI4FormVMa", 1}, {"$s7SwiftUI10ScrollViewVMa", 1},
+        {"$s7SwiftUI6ZStackVMa", 1}, {"$s7SwiftUI9LazyVGridVMa", 1},
+        {"$s7SwiftUI28UIApplicationDelegateAdaptorVMa", 1},
+        {"$s7SwiftUI4ListVMa", 2}, {"$s7SwiftUI4MenuVMa", 2}, {"$s7SwiftUI15NavigationStackVMa", 2},
+        {"$s7SwiftUI11ToolbarItemVMa", 2}, {"$s7SwiftUI19_ConditionalContentVMa", 2},
+        {"$s7SwiftUI19_ConditionalContentV7StorageOMa", 2}, {"$s7SwiftUI7SectionVMa", 3},
+        {"$s7Combine9PublishedVMa", 1}, {"$s7Combine8DeferredVMa", 1}, {"$s7Combine11SubscribersO10CompletionOMa", 1},
+        {"$s7Combine12AnyPublisherVMa", 2}, {"$s7Combine18PassthroughSubjectCMa", 2}, {"$s7Combine6FutureCMa", 2},
+        {"$sSaMa", 1}, {"$sShMa", 1}, {"$sSDMa", 2}, {"$ss6ResultOMa", 2},
+    };
+    if (const auto found = arities.find(symbol); found != arities.end()) return found->second;
     if (symbol == "$s7SwiftUI15ModifiedContentVMa") return 2;
     if (symbol == "$s7SwiftUI8BindableVMa" || symbol == "$s7SwiftUI9LazyStateVMa" || symbol == "$sSqMa" ||
         symbol == "$s7SwiftUI11EnvironmentV7ContentOMa" ||
@@ -1613,6 +1886,13 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_getTypeByMangledNameInContext") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContext2);
     if (name == "swift_getTypeByMangledNameInContextInMetadataState") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContextInMetadataState2);
     if (name == "swift_getTypeByMangledNameInContextInMetadataState2") return reinterpret_cast<void*>(rt_getTypeByMangledNameInContextInMetadataState2);
+    if (name == "swift_getGenericMetadata") return reinterpret_cast<void*>(rt_getGenericMetadata);
+    if (name == "swift_allocateGenericValueMetadata") return reinterpret_cast<void*>(rt_allocateGenericValueMetadata);
+    if (name == "swift_getOpaqueTypeMetadata") return reinterpret_cast<void*>(rt_getOpaqueTypeMetadata);
+    if (name == "swift_checkMetadataState") return reinterpret_cast<void*>(rt_checkMetadataState);
+    if (name == "swift_initEnumMetadataSingleCase") return reinterpret_cast<void*>(rt_initEnumMetadataSingleCase);
+    if (name == "swift_initEnumMetadataSinglePayload") return reinterpret_cast<void*>(rt_initEnumMetadataSinglePayload);
+    if (name == "swift_initEnumMetadataMultiPayload") return reinterpret_cast<void*>(rt_initEnumMetadataMultiPayload);
     if (name == "swift_getObjCClassMetadata") return reinterpret_cast<void*>(rt_getObjCClassMetadata);
     if (name == "swift_getObjCClassFromMetadata") return reinterpret_cast<void*>(rt_getObjCClassFromMetadata);
     if (name == "swift_getSingletonMetadata") return reinterpret_cast<void*>(rt_getSingletonMetadata);

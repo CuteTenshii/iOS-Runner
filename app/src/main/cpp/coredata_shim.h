@@ -7,11 +7,16 @@
 void coredata_register_classes();
 void* coredata_symbol(std::string_view name);
 
-// The context the app's @FetchRequests and @Environment(\\.managedObjectContext) read from.
+struct MachImage;
+
+// Finds the app's managed object classes, which restoring saved objects needs.
+void coredata_attach_image(const MachImage& image);
+
+// The context the app's @Environment(\\.managedObjectContext) reads.
 void* coredata_view_context();
 
-// Objects of an entity, in insertion order, borrowed from the store.
-std::vector<void*> coredata_objects_of(const std::string& entity);
+// The objects an @FetchRequest shows: `sort_descriptors` is a native [NSSortDescriptor], `predicate` may be null.
+std::vector<void*> coredata_fetch(const std::string& entity, void* predicate, void* sort_descriptors);
 
-// The entity an NSEntityDescription, or a managed object subclass's +entity, names.
+// The entity an NSEntityDescription names.
 std::string coredata_entity_name(void* description);

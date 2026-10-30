@@ -24,7 +24,9 @@
 #include "key_path.h"
 #include "localization.h"
 #include "macho.h"
+#include "stdlib_shim.h"
 #include "swift_runtime.h"
+#include "symbols.h"
 #include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
@@ -108,6 +110,17 @@ SWIFTCC void window_group_init(SWIFT_OUT void** out, uint64_t, uint64_t, uint64_
     *out = box;
 }
 
+// Unlike lazyContent, this closure is non-escaping: its context dies when App.body returns, so it runs now.
+SWIFTCC void window_group_content(SWIFT_OUT void** out, const void* closure, void* context, void* content_type, void* content_witnesses) {
+    auto* box = new_box();
+    box->content_type = content_type;
+    box->content_witnesses = static_cast<void**>(content_witnesses);
+    const size_t size = witnesses_of(content_type)->size;
+    box->closure_context = calloc(1, size == 0 ? 1 : size);
+    rt_call_witness(closure, box->closure_context, context, nullptr, nullptr);
+    *out = box;
+}
+
 SWIFTCC void scene_build_block(SWIFT_OUT void* out, void* value, void* type, void*) {
     witnesses_of(type)->initialize_with_copy(out, value, type);
 }
@@ -177,7 +190,7 @@ enum class NodeKind : uint32_t {
     TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
     Sheet, Toolbar, OnChange, Task, Picker, ForEach, Section, ProgressView, Stepper, Image, AsyncImage,
     Disclosure, LabeledContent, Unavailable, Menu, Link, ToolbarItem, ImageResource,
-    RowMenu, PresentedSheet, Alert, NavigationLink, TextField, Stack, Divider,
+    RowMenu, PresentedSheet, Alert, NavigationLink, TextField, Stack, Divider, Searchable,
 };
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
@@ -700,6 +713,14 @@ SWIFTCC void view_alert_message(SWIFT_OUT ViewNode** out, SwiftString key, uint6
     evaluate_child(*out, message, message_context, message_type);
 }
 
+// Binding<String> and the optional prompt fill the registers, so Self arrives on the stack.
+SWIFTCC void view_searchable(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, uint64_t, const void*, uint64_t, uint64_t, uint64_t, uint64_t, void* self_type, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::Searchable);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
 // A transition only animates a view in and out, which the tree doesn't show.
 SWIFTCC uint64_t transition_constant() { return kImmediate; }
 SWIFTCC uint64_t transition_with_argument(uint64_t) { return kImmediate; }
@@ -788,12 +809,6 @@ SWIFTCC void for_each_init_identifiable(SWIFT_OUT ViewNode** out, void* data, co
     for_each_identifiable(out, data, row, row_context, data_type, id_type, row_type);
 }
 
-SWIFTCC void for_each_init_key_path(SWIFT_OUT ViewNode** out, void* data, void*, const void* row, void* row_context, void* data_type, void*, void* row_type) {
-    auto* node = new_node(NodeKind::ForEach);
-    evaluate_rows(node, data, data_type, row, row_context, row_type);
-    *out = node;
-}
-
 // Section's forms differ only in which of header, content and footer they take, and how.
 ViewNode* new_section() { return new_node(NodeKind::Section); }
 
@@ -839,11 +854,8 @@ SWIFTCC void section_title_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64
     *out = node;
 }
 
-SWIFTCC void group_init(SWIFT_OUT ViewNode** out, const void* content, void* context, void* content_type, void*) {
-    auto* node = new_node(NodeKind::Modifier);
-    evaluate_child(node, content, context, content_type);
-    *out = node;
-}
+// Group is frozen: just its content, in place.
+SWIFTCC void group_init(SWIFT_OUT void* out, const void* content, void* context, void*, void*) { rt_call_witness(content, out, context, nullptr, nullptr); }
 
 SWIFTCC void scroll_view_init(SWIFT_OUT ViewNode** out, uint8_t, bool, const void* content, void* context, void* content_type, void*) {
     auto* node = new_node(NodeKind::List);
@@ -892,6 +904,13 @@ SWIFTCC void conditional_from_storage(SWIFT_OUT void* out, void* storage, void* 
     memcpy(out, storage, larger + 1);
 }
 
+// buildBlock's result is opaque to the app, which only sees one word: a node holding the real content.
+SWIFTCC void toolbar_build_block(SWIFT_OUT ViewNode** out, void* value, void* type, void*) {
+    auto* node = new_node(NodeKind::Modifier);
+    add_self_child(node, value, type);
+    *out = node;
+}
+
 // A builder result is the value itself, for toolbar content as for views.
 SWIFTCC void builder_identity(SWIFT_OUT void* out, void* value, void* type, void*) { witnesses_of(type)->initialize_with_copy(out, value, type); }
 
@@ -905,6 +924,7 @@ struct FetchRequestBox {
     HeapHeader header;
     std::string* entity;
     void* sort_descriptors;
+    void* predicate;
 };
 
 void destroy_fetch_request(HeapHeader* object) {
@@ -915,12 +935,13 @@ void destroy_fetch_request(HeapHeader* object) {
 
 const BoxMetadata kFetchRequestMetadata = {destroy_fetch_request, nullptr, 0};
 
-SWIFTCC void fetch_request_init(SWIFT_OUT FetchRequestBox** out, void* entity, void* sort_descriptors, void*, void*, void*) {
+SWIFTCC void fetch_request_init(SWIFT_OUT FetchRequestBox** out, void* entity, void* sort_descriptors, void* predicate, void*, void*) {
     auto* box = static_cast<FetchRequestBox*>(calloc(1, sizeof(FetchRequestBox)));
     box->header.metadata = const_cast<uint64_t*>(&kFetchRequestMetadata.kind);
     new (&box->header.references) std::atomic<uint64_t>(1);
     box->entity = new std::string(coredata_entity_name(entity));
     box->sort_descriptors = sort_descriptors;
+    box->predicate = predicate;
     *out = box;
 }
 
@@ -941,13 +962,137 @@ SWIFTCC void fetch_request_wrapped(SWIFT_OUT FetchedResultsBox** out, void*, SWI
     auto* box = static_cast<FetchedResultsBox*>(calloc(1, sizeof(FetchedResultsBox)));
     box->header.metadata = const_cast<uint64_t*>(&kFetchedResultsMetadata.kind);
     new (&box->header.references) std::atomic<uint64_t>(1);
-    box->objects = new std::vector<void*>(coredata_objects_of(*(*self)->entity));
+    box->objects = new std::vector<void*>(coredata_fetch(*(*self)->entity, (*self)->predicate, (*self)->sort_descriptors));
     *out = box;
 }
 
 const std::vector<void*>& fetched_results_contents(void* value) { return *(*static_cast<FetchedResultsBox**>(value))->objects; }
 
+// FetchedResults' Collection witnesses: its Index is Int and Iterator is IndexingIterator, as in the framework.
+struct IndexingIteratorValue {
+    void* elements;
+    int64_t position;
+};
+
+SWIFTCC void fetched_make_iterator(SWIFT_OUT IndexingIteratorValue* out, void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) { *out = {rt_swift_retain(*self), 0}; }
+SWIFTCC void fetched_start_index(SWIFT_OUT int64_t* out, void*, void*, SWIFT_CONTEXT void*) { *out = 0; }
+SWIFTCC void fetched_end_index(SWIFT_OUT int64_t* out, void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) { *out = static_cast<int64_t>((*self)->objects->size()); }
+SWIFTCC int64_t fetched_count(void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) { return static_cast<int64_t>((*self)->objects->size()); }
+SWIFTCC bool fetched_is_empty(void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) { return (*self)->objects->empty(); }
+SWIFTCC int64_t fetched_distance(const int64_t* from, const int64_t* to, void*, void*, SWIFT_CONTEXT void*) { return *to - *from; }
+SWIFTCC void fetched_index_offset(SWIFT_OUT int64_t* out, const int64_t* index, int64_t distance, void*, void*, SWIFT_CONTEXT void*) { *out = *index + distance; }
+SWIFTCC void fetched_form_index(int64_t* index, void*, void*, SWIFT_CONTEXT void*) { ++*index; }
+SWIFTCC void fetched_index_after(SWIFT_OUT int64_t* out, const int64_t* index, void*, void*, SWIFT_CONTEXT void*) { *out = *index + 1; }
+
+SWIFTCC void* fetched_copy_to_array(void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) {
+    const auto& objects = *(*self)->objects;
+    char* elements;
+    void* storage = make_array_storage(type_system_symbol("$syXlN"), objects.size(), &elements);
+    for (size_t i = 0; i < objects.size(); ++i) {
+        void* object = rt_swift_retain(objects[i]);
+        memcpy(elements + i * sizeof object, &object, sizeof object);
+    }
+    return storage;
+}
+
+SWIFTCC int64_t fetched_underestimated_count(void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) { return static_cast<int64_t>((*self)->objects->size()); }
+
+struct ReadYield {
+    void (*resume)(void*, bool) SWIFTCC;
+    void* value;
+};
+
+SWIFTCC void read_finished(void*, bool) {}
+
+// A read accessor is a yield-once coroutine: the element is borrowed from the caller's frame buffer.
+SWIFTCC ReadYield fetched_read(void** frame, const int64_t* index, void*, void*, SWIFT_CONTEXT FetchedResultsBox** self) {
+    frame[0] = (*(*self)->objects)[static_cast<size_t>(*index)];
+    return {read_finished, frame};
+}
+
 SWIFTCC void* fetched_results_subscript(int64_t index, void*, SWIFT_CONTEXT FetchedResultsBox** self) { return rt_swift_retain((*(*self)->objects)[static_cast<size_t>(index)]); }
+
+SWIFTCC TextValue text_bold(TextValue text);
+SWIFTCC TextValue text_foreground_color(uint64_t, TextValue text);
+SWIFTCC TextValue text_font_weight(uint64_t, bool, TextValue text);
+
+SWIFTCC ViewNode* image_from_ui_image(void*) { return new_node(NodeKind::Image); }
+
+constexpr size_t kStrokeStyleBytes = 40;
+constexpr size_t kFlexFrameBytes = 112;
+
+SWIFTCC void stroke_style_init(SWIFT_OUT char* out) { memset(out, 0, kStrokeStyleBytes); }
+SWIFTCC void flex_frame_init(SWIFT_OUT char* out) { memset(out, 0, kFlexFrameBytes); }
+
+SWIFTCC void progress_value_init(SWIFT_OUT ViewNode** out) { *out = new_node(NodeKind::ProgressView); }
+SWIFTCC void empty_node_init(SWIFT_OUT ViewNode** out) { *out = new_node(NodeKind::Modifier); }
+
+// _ConditionalContent as written by the toolbar builder: the larger branch's bytes, then the tag.
+void write_conditional(char* out, void* value, void* type, void* true_type, void* false_type, uint8_t tag) {
+    const size_t larger = std::max(witnesses_of(true_type)->size, witnesses_of(false_type)->size);
+    witnesses_of(type)->initialize_with_copy(out, value, type);
+    out[larger] = static_cast<char>(tag);
+}
+
+SWIFTCC void toolbar_build_first(SWIFT_OUT char* out, void* value, void* true_type, void* false_type) { write_conditional(out, value, true_type, true_type, false_type, 0); }
+SWIFTCC void toolbar_build_second(SWIFT_OUT char* out, void* value, void* true_type, void* false_type) { write_conditional(out, value, false_type, true_type, false_type, 1); }
+
+SWIFTCC void toolbar_build_if(SWIFT_OUT void* out, void* value, void* type, void*) {
+    void* optional = optional_metadata(type);
+    witnesses_of(optional)->initialize_with_copy(out, value, optional);
+}
+
+SWIFTCC void picker_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, const uint64_t* selection, const void* content, void* context, void* selection_type, void* content_type) {
+    auto* node = new_node(NodeKind::Picker);
+    *node->title = key_text(key, interpolation);
+    node->item_type = selection_type;
+    node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(selection[1])));
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void toggle_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location, uint64_t) {
+    auto* node = new_node(NodeKind::Toggle);
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
+    *node->title = key_text(key, interpolation);
+    *out = node;
+}
+
+void make_titled_disclosure(ViewNode** out, std::string title, const void* content, void* context, void* content_type) {
+    auto* node = new_node(NodeKind::Disclosure);
+    *node->title = std::move(title);
+    evaluate_child(node, content, context, content_type);
+    *out = node;
+}
+
+SWIFTCC void disclosure_key(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, const void* content, void* context, void* content_type) {
+    make_titled_disclosure(out, key_text(key, interpolation), content, context, content_type);
+}
+
+SWIFTCC void disclosure_string(SWIFT_OUT ViewNode** out, const SwiftString* title, const void* content, void* context, void* content_type) {
+    make_titled_disclosure(out, swift_string_to_utf8(*title), content, context, content_type);
+}
+
+SWIFTCC void disclosure_expanded(SWIFT_OUT ViewNode** out, uint64_t, BindingNode*, uint64_t, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
+    auto* node = new_node(NodeKind::Disclosure);
+    evaluate_child(node, label, label_context, label_type);
+    evaluate_child(node, content, content_context, content_type);
+    *out = node;
+}
+
+SWIFTCC void labeled_strings(SWIFT_OUT ViewNode** out, const SwiftString* title, const SwiftString* value) {
+    auto* node = new_node(NodeKind::LabeledContent);
+    *node->title = swift_string_to_utf8(*title);
+    *node->system_image = swift_string_to_utf8(*value);
+    *out = node;
+}
+
+struct SizeValue {
+    double width;
+    double height;
+};
+
+SWIFTCC SizeValue geometry_size(SWIFT_CONTEXT void*) { return {390, 844}; }
 
 // Backing store of @State, attached to the inline LazyState through its location word.
 struct StateBox {
@@ -1092,19 +1237,22 @@ AppStorageBox* new_app_storage(SwiftString key) {
     return box;
 }
 
-SWIFTCC void app_storage_bool(SWIFT_OUT AppStorageBox** out, bool value, SwiftString key, void*) {
-    *out = new_app_storage(key);
-    (*out)->fallback_number = value ? 1 : 0;
+SWIFTCC AppStorageBox* app_storage_bool(bool value, SwiftString key, void*) {
+    AppStorageBox* box = new_app_storage(key);
+    box->fallback_number = value ? 1 : 0;
+    return box;
 }
 
-SWIFTCC void app_storage_integer(SWIFT_OUT AppStorageBox** out, int64_t value, SwiftString key, void*) {
-    *out = new_app_storage(key);
-    (*out)->fallback_number = value;
+SWIFTCC AppStorageBox* app_storage_integer(int64_t value, SwiftString key, void*) {
+    AppStorageBox* box = new_app_storage(key);
+    box->fallback_number = value;
+    return box;
 }
 
-SWIFTCC void app_storage_string(SWIFT_OUT AppStorageBox** out, SwiftString value, SwiftString key, void*) {
-    *out = new_app_storage(key);
-    *(*out)->fallback_text = swift_string_to_utf8(value);
+SWIFTCC AppStorageBox* app_storage_string(SwiftString value, SwiftString key, void*) {
+    AppStorageBox* box = new_app_storage(key);
+    *box->fallback_text = swift_string_to_utf8(value);
+    return box;
 }
 
 void* bool_metadata();
@@ -1237,17 +1385,17 @@ SWIFTCC void binding_member(SWIFT_OUT void* out, void* key_path, void* metadata,
     write_binding(out, binding, key_path_value_type(key_path));
 }
 
-SWIFTCC void app_storage_wrapped_get(SWIFT_OUT void* out, void* box, void* metadata) { app_storage_read(box, out, generic_argument(metadata)); }
-SWIFTCC void app_storage_wrapped_set(void* value, void* box, void* metadata) {
-    void* type = generic_argument(metadata);
+// The guest passes the value's type itself, because AppStorage is loadable as its one reference.
+SWIFTCC void app_storage_wrapped_get(SWIFT_OUT void* out, void* box, void* type) { app_storage_read(box, out, type); }
+SWIFTCC void app_storage_wrapped_set(void* value, void* box, void* type) {
     app_storage_write(box, value, type);
     witnesses_of(type)->destroy(value, type);
     registrar_mark_dirty();
 }
-SWIFTCC void app_storage_projected(SWIFT_OUT void* out, void* box, void* metadata) {
+SWIFTCC void app_storage_projected(SWIFT_OUT void* out, void* box, void* type) {
     auto* binding = new_binding(BindingKind::AppStorage);
     binding->source = rt_swift_retain(box);
-    write_binding(out, binding, generic_argument(metadata));
+    write_binding(out, binding, type);
 }
 
 // State<T> is frozen: the value inline, then the location word this box hangs from.
@@ -1375,6 +1523,31 @@ SWIFTCC void environment_action_get(SWIFT_OUT uint64_t* out, SWIFT_CONTEXT void*
 
 void dismiss_presented_sheet();
 
+// Phones are compact; the size class is an Optional<tag word> with its presence byte after it.
+SWIFTCC void environment_size_class(SWIFT_OUT char* out, SWIFT_CONTEXT void*) {
+    const int64_t compact = *static_cast<int32_t*>(resolve_symbol("$s7SwiftUI22UserInterfaceSizeClassO7compactyA2CmFWC"));
+    memcpy(out, &compact, sizeof compact);
+    out[sizeof compact] = 0;
+}
+
+constexpr int64_t kColorSchemeLight = -1;
+
+SWIFTCC void environment_color_scheme(SWIFT_OUT int64_t* out, SWIFT_CONTEXT void*) { *out = kColorSchemeLight; }
+SWIFTCC bool edit_mode_is_editing(SWIFT_CONTEXT const int64_t* self) { return *self == *static_cast<int32_t*>(resolve_symbol("$s7SwiftUI8EditModeO6activeyA2CmFWC")); }
+SWIFTCC bool word_tags_equal(const int64_t* left, const int64_t* right) { return *left == *right; }
+
+SWIFTCC void* environment_no_value(SWIFT_CONTEXT void*) { return nullptr; }
+SWIFTCC void environment_no_edit_mode(SWIFT_OUT uint64_t* out, SWIFT_CONTEXT void*) { out[0] = out[1] = out[2] = 0; }
+SWIFTCC void* environment_context(SWIFT_CONTEXT void*) { return rt_swift_retain(coredata_view_context()); }
+
+struct OptionalInt {
+    int64_t value;
+    bool is_none;
+};
+
+SWIFTCC OptionalInt environment_no_limit(SWIFT_CONTEXT void*) { return {0, true}; }
+SWIFTCC uint8_t environment_leading_alignment(SWIFT_CONTEXT void*) { return 0; }
+
 SWIFTCC void dismiss_action_call(SWIFT_CONTEXT void*) { dismiss_presented_sheet(); }
 SWIFTCC void open_url_action_call(void** url, SWIFT_CONTEXT void*) { engine_emit("open", foundation_url_text(*url)); }
 
@@ -1440,6 +1613,23 @@ SWIFTCC TextValue text_font(uint64_t font, TextValue text) {
     return text;
 }
 
+SWIFTCC TextValue text_bold(TextValue text) {
+    retain_text(text);
+    text.style |= kFontBold;
+    return text;
+}
+
+SWIFTCC TextValue text_foreground_color(uint64_t, TextValue text) {
+    retain_text(text);
+    return text;
+}
+
+SWIFTCC TextValue text_font_weight(uint64_t, bool, TextValue text) {
+    retain_text(text);
+    text.style |= kFontBold;
+    return text;
+}
+
 SWIFTCC TextValue text_foreground_style(const uint32_t* style, TextValue text, void*, void*) {
     retain_text(text);
     text.style = (text.style & ~kTextColorMask) | (static_cast<uint64_t>(*style & 0xff) << kTextColorShift);
@@ -1490,6 +1680,7 @@ const char* node_kind_name(NodeKind kind) {
         case NodeKind::TextField: return "TextField";
         case NodeKind::Stack: return "Stack";
         case NodeKind::Divider: return "Divider";
+        case NodeKind::Searchable: return "Searchable";
     }
     return "?";
 }
@@ -1821,6 +2012,14 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
             return node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":" + json_string(*node->title) + ",\"v\":" + json_string(current) + (node->lower != 0 ? ",\"secure\":true" : ""), {});
         }
+        case NodeKind::Searchable: {
+            SwiftString text{};
+            binding_read(node->binding, &text, string_metadata());
+            const int action = add_action({ActionKind::SetText, nullptr, nullptr, node->binding, nullptr, nullptr, 0, {}});
+            const std::string field = node_json("field", "\"a\":" + std::to_string(action) + ",\"t\":\"Search\",\"v\":" + json_string(swift_string_to_utf8(text)), {});
+            const std::string content = render_children(node, path, depth);
+            return content.empty() ? field : field + "," + content;
+        }
         case NodeKind::Stack: return node_json("v", {}, render_children(node, path, depth));
         case NodeKind::Divider: return {};
         case NodeKind::Link: {
@@ -1861,7 +2060,7 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             g_selection_value = outer_value;
             g_selection_type = outer_type;
             g_picker_binding = outer_binding;
-            return node_json("picker", {}, children);
+            return node_json("picker", node->title->empty() ? std::string() : "\"t\":" + json_string(*node->title), children);
         }
         case NodeKind::Sheet: {
             std::string children = render_children(node, path, depth);
@@ -1938,7 +2137,11 @@ std::string render_node(ViewNode* node, const std::string& path, int depth) {
             return node_json("h", {}, render_children(node, path, depth));
         }
         case NodeKind::Menu: return node_json("menu", {}, render_children(node, path, depth));
-        case NodeKind::Disclosure: return node_json("disclosure", {}, render_children(node, path, depth));
+        case NodeKind::Disclosure: {
+            std::string children = render_children(node, path, depth);
+            if (!node->title->empty()) children = node_json("text", "\"t\":" + json_string(*node->title) + ",\"font\":\"body\"", {}) + "," + children;
+            return node_json("disclosure", {}, children);
+        }
         case NodeKind::Toolbar: return node_json("toolbar", {}, render_children(node, path, depth));
         case NodeKind::ToolbarItem: return node_json("toolbaritem", {}, render_children(node, path, depth));
         case NodeKind::ProgressView: return node_json("progress", {}, {});
@@ -2218,10 +2421,10 @@ void swiftui_attach_image(const MachImage& image) {
 void swiftui_run_scene(void* scene) {
     auto* box = *static_cast<ViewBox**>(scene);
     const size_t size = witnesses_of(box->content_type)->size;
-    g_root_content = calloc(1, size == 0 ? 1 : size);
+    g_root_content = box->closure == nullptr ? box->closure_context : calloc(1, size == 0 ? 1 : size);
     g_root_type = box->content_type;
     engine_log("SCENE: running WindowGroup content");
-    rt_call_witness(box->closure, g_root_content, box->closure_context, nullptr, nullptr);
+    if (box->closure != nullptr) rt_call_witness(box->closure, g_root_content, box->closure_context, nullptr, nullptr);
 
     // The guest thread lives here: each action runs the app's own code, then the tree is re-evaluated if needed.
     g_tree_dirty.store(true, std::memory_order_relaxed);
@@ -2257,12 +2460,27 @@ void* swiftui_symbol(std::string_view name) {
     static const bool registered = [] {
         register_foreign_witness("_$s7SwiftUI3TabVyxq_q0_GAA0C7ContentAASHRzAA4ViewR_AaFR0_rlMc",
                                  "_$s7SwiftUI10TabContentP15_identifiedView011_IdentifiedF0QzvgTq", reinterpret_cast<const void*>(tab_identified_view));
+        constexpr const char* kFetchedSequence = "_$s7SwiftUI14FetchedResultsVyxGSTAAMc";
+        constexpr const char* kFetchedCollection = "_$s7SwiftUI14FetchedResultsVyxGSlAAMc";
+        register_foreign_witness(kFetchedSequence, "_$sST12makeIterator0B0QzyFTq", reinterpret_cast<const void*>(fetched_make_iterator));
+        register_foreign_witness(kFetchedSequence, "_$sST22_copyToContiguousArrays0cD0Vy7ElementQzGyFTq", reinterpret_cast<const void*>(fetched_copy_to_array));
+        register_foreign_witness(kFetchedSequence, "_$sST19underestimatedCountSivgTq", reinterpret_cast<const void*>(fetched_underestimated_count));
+        register_foreign_witness(kFetchedCollection, "_$sSl8distance4from2toSi5IndexQz_AEtFTq", reinterpret_cast<const void*>(fetched_distance));
+        register_foreign_witness(kFetchedCollection, "_$sSl5index_8offsetBy5IndexQzAD_SitFTq", reinterpret_cast<const void*>(fetched_index_offset));
+        register_foreign_witness(kFetchedCollection, "_$sSl10startIndex0B0QzvgTq", reinterpret_cast<const void*>(fetched_start_index));
+        register_foreign_witness(kFetchedCollection, "_$sSl8endIndex0B0QzvgTq", reinterpret_cast<const void*>(fetched_end_index));
+        register_foreign_witness(kFetchedCollection, "_$sSl5countSivgTq", reinterpret_cast<const void*>(fetched_count));
+        register_foreign_witness(kFetchedCollection, "_$sSl7isEmptySbvgTq", reinterpret_cast<const void*>(fetched_is_empty));
+        register_foreign_witness(kFetchedCollection, "_$sSl9formIndex5aftery0B0Qzz_tFTq", reinterpret_cast<const void*>(fetched_form_index));
+        register_foreign_witness(kFetchedCollection, "_$sSl5index5after5IndexQzAD_tFTq", reinterpret_cast<const void*>(fetched_index_after));
+        register_foreign_witness(kFetchedCollection, "_$sSly7ElementQz5IndexQzcirTq", reinterpret_cast<const void*>(fetched_read));
         return true;
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
         {"$s7SwiftUI28UIApplicationDelegateAdaptorVyACyxGxmcfC", reinterpret_cast<void*>(delegate_adaptor_init)},
         {"$s7SwiftUI11WindowGroupV2id5title11lazyContentACyxGSSSg_AA4TextVSgxyctcfC", reinterpret_cast<void*>(window_group_init)},
+        {"$s7SwiftUI11WindowGroupV7contentACyxGxyXE_tcfC", reinterpret_cast<void*>(window_group_content)},
         {"$s7SwiftUI12SceneBuilderV10buildBlockyxxAA0C0RzlFZ", reinterpret_cast<void*>(scene_build_block)},
         {"$s7SwiftUI9LazyStateV12wrappedValueACyxGxyXA_tcfC", reinterpret_cast<void*>(lazy_state_init)},
         {"$s7SwiftUI9LazyStateV7StorageO5valueyAEyx_GxcAGmlFWC", const_cast<int32_t*>(&kStorageCaseValueTag)},
@@ -2383,7 +2601,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI14NavigationLinkVA2A4TextVRszrlE_11destinationACyAEq_GAA18LocalizedStringKeyV_q_tcfC", reinterpret_cast<void*>(navigation_link_key)},
         {"$s7SwiftUI14NavigationLinkV11destination5labelACyxq_Gq__xyXEtcfC", reinterpret_cast<void*>(navigation_link_label)},
         {"$s7SwiftUI7ForEachVAA7Element_2IDQZRs_AA4ViewR0_s12IdentifiableADRpzrlE_7contentACyxq_q0_Gx_q0_AIctcfC", reinterpret_cast<void*>(for_each_init_identifiable)},
-        {"$s7SwiftUI7ForEachVA2A4ViewR0_rlE_2id7contentACyxq_q0_Gx_s7KeyPathCy7ElementQzq_Gq0_AKctcfC", reinterpret_cast<void*>(for_each_init_key_path)},
+        {"$s7SwiftUI7ForEachVA2A4ViewR0_rlE_2id7contentACyxq_q0_Gx_s7KeyPathCy7ElementQzq_Gq0_AKctcfC", reinterpret_cast<void*>(for_each_key_path)},
         {"$s7SwiftUI7SectionVA2A4ViewRzAaDR_AA05EmptyD0VRs0_rlE6header7contentACyxq_AFGx_q_yXEtcfC", reinterpret_cast<void*>(section_header_view)},
         {"$s7SwiftUI7SectionVA2A9EmptyViewVRszAA0E0R_AERs0_rlE7contentACyAEq_AEGq_yXE_tcfC", reinterpret_cast<void*>(section_content)},
         {"$s7SwiftUI7SectionVA2A9EmptyViewVRszAA0E0R_AaFR0_rlE6footer7contentACyAEq_q0_Gq0__q_yXEtcfC", reinterpret_cast<void*>(section_footer_view)},
@@ -2398,9 +2616,10 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI7AnyViewVyACxcAA0D0RzlufC", reinterpret_cast<void*>(any_view_init)},
         {"$s7SwiftUI7TabViewV9selection7contentACyxq_GAA7BindingVyxGSg_q_yXEtcfC", reinterpret_cast<void*>(tab_view_selection)},
         {"$s7SwiftUI19_ConditionalContentVA2A4ViewRzAaDR_rlE7storageACyxq_GAC7StorageOyxq__G_tcfC", reinterpret_cast<void*>(conditional_from_storage)},
-        {"$s7SwiftUI21ToolbarContentBuilderV10buildBlockyQrxAA0cD0RzlFZ", reinterpret_cast<void*>(builder_identity)},
+        {"$s7SwiftUI21ToolbarContentBuilderV10buildBlockyQrxAA0cD0RzlFZ", reinterpret_cast<void*>(toolbar_build_block)},
         {"$s7SwiftUI19TupleToolbarContentVyACyxGxcfC", reinterpret_cast<void*>(builder_identity)},
         {"$s7SwiftUI15withTransactionyxAA0D0V_xyKXEtKlF", reinterpret_cast<void*>(with_transaction)},
+        {"$s7SwiftUI12FetchRequestV6entity15sortDescriptors9predicate9animationACyxGSo19NSEntityDescriptionC_SaySo16NSSortDescriptorCGSo11NSPredicateCSgAA9AnimationVSgtcfC", reinterpret_cast<void*>(fetch_request_init)},
         {"$s7SwiftUI12FetchRequestV12wrappedValueAA14FetchedResultsVyxGvg", reinterpret_cast<void*>(fetch_request_wrapped)},
         {"$s7SwiftUI14FetchedResultsVyxSicig", reinterpret_cast<void*>(fetched_results_subscript)},
         {"$s7SwiftUI10ButtonRoleV6cancelACvgZ", reinterpret_cast<void*>(immediate_indirect)},
@@ -2433,6 +2652,75 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI20ToolbarItemPlacementV9automaticACvgZ", reinterpret_cast<void*>(immediate_indirect)},
         {"$s7SwiftUI20ToolbarItemPlacementV9principalACvgZ", reinterpret_cast<void*>(immediate_indirect)},
         {"$s7SwiftUI11TransactionV9animationAA9AnimationVSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI4ViewPAAE10searchable4text9placement6promptQrAA7BindingVySSG_AA20SearchFieldPlacementVAA4TextVSgtF", reinterpret_cast<void*>(view_searchable)},
+        {"$s7SwiftUI4ViewPAAE12searchScopes_6scopesQrAA7BindingVyqd__G_qd_0_yXEtSHRd__AaBRd_0_r0_lF", reinterpret_cast<void*>(modifier_passthrough<3>)},
+        {"$s7SwiftUI20SearchFieldPlacementV30NavigationBarDrawerDisplayModeV6alwaysAEvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI20SearchFieldPlacementV19navigationBarDrawer11displayModeA2C010Navigationgh7DisplayJ0V_tFZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI17EnvironmentValuesV19horizontalSizeClassAA013UserInterfacefG0OSgvg", reinterpret_cast<void*>(environment_size_class)},
+        {"$s7SwiftUI17EnvironmentValuesV19horizontalSizeClassAA013UserInterfacefG0OSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV11colorSchemeAA05ColorF0Ovg", reinterpret_cast<void*>(environment_color_scheme)},
+        {"$s7SwiftUI17EnvironmentValuesV11colorSchemeAA05ColorF0Ovs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV8editModeAA7BindingVyAA04EditF0OGSgvg", reinterpret_cast<void*>(environment_no_edit_mode)},
+        {"$s7SwiftUI17EnvironmentValuesV8editModeAA7BindingVyAA04EditF0OGSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV15foregroundColorAA0F0VSgvg", reinterpret_cast<void*>(environment_no_value)},
+        {"$s7SwiftUI17EnvironmentValuesV15foregroundColorAA0F0VSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV4fontAA4FontVSgvg", reinterpret_cast<void*>(environment_no_value)},
+        {"$s7SwiftUI17EnvironmentValuesV4fontAA4FontVSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV17contentTransitionAA07ContentF0Vvg", reinterpret_cast<void*>(environment_action_get)},
+        {"$s7SwiftUI17EnvironmentValuesV17contentTransitionAA07ContentF0Vvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV20managedObjectContextSo09NSManagedfG0Cvg", reinterpret_cast<void*>(environment_context)},
+        {"$s7SwiftUI17EnvironmentValuesV20managedObjectContextSo09NSManagedfG0Cvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV9lineLimitSiSgvg", reinterpret_cast<void*>(environment_no_limit)},
+        {"$s7SwiftUI17EnvironmentValuesV9lineLimitSiSgvs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI17EnvironmentValuesV22multilineTextAlignmentAA0fG0Ovg", reinterpret_cast<void*>(environment_leading_alignment)},
+        {"$s7SwiftUI17EnvironmentValuesV22multilineTextAlignmentAA0fG0Ovs", reinterpret_cast<void*>(environment_set_ignored)},
+        {"$s7SwiftUI11ColorSchemeO2eeoiySbAC_ACtFZ", reinterpret_cast<void*>(word_tags_equal)},
+        {"$s7SwiftUI8EditModeO2eeoiySbAC_ACtFZ", reinterpret_cast<void*>(word_tags_equal)},
+        {"$s7SwiftUI10LazyVStackV9alignment7spacing11pinnedViews7contentACyxGAA19HorizontalAlignmentV_12CoreGraphics7CGFloatVSgAA016PinnedScrollableH0VxyXEtcfC", reinterpret_cast<void*>(lazy_stack_init)},
+        {"$s7SwiftUI10LazyHStackV9alignment7spacing11pinnedViews7contentACyxGAA17VerticalAlignmentV_12CoreGraphics7CGFloatVSgAA016PinnedScrollableH0VxyXEtcfC", reinterpret_cast<void*>(lazy_stack_init)},
+        {"$s7SwiftUI9LazyVGridV7columns9alignment7spacing11pinnedViews7contentACyxGSayAA8GridItemVG_AA19HorizontalAlignmentV12CoreGraphics7CGFloatVSgAA016PinnedScrollableI0VxyXEtcfC", reinterpret_cast<void*>(lazy_grid_init)},
+        {"$s7SwiftUI9LazyHGridV4rows9alignment7spacing11pinnedViews7contentACyxGSayAA8GridItemVG_AA17VerticalAlignmentV12CoreGraphics7CGFloatVSgAA016PinnedScrollableI0VxyXEtcfC", reinterpret_cast<void*>(lazy_grid_init)},
+        {"$s7SwiftUI8GridItemV_7spacing9alignmentA2C4SizeO_12CoreGraphics7CGFloatVSgAA9AlignmentVSgtcfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI4FontV6system4size6weight6designAC12CoreGraphics7CGFloatV_AC6WeightVSgAC6DesignOSgtFZ", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI5ColorV02uiC0ACSo7UIColorC_tcfC", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI5ColorVyACSo7UIColorCcfC", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI5ColorV_3red5green4blue7opacityA2C13RGBColorSpaceO_S4dtcfC", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI5ColorV7opacityyACSdF", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI8GradientV6colorsACSayAA5ColorVG_tcfC", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI14LinearGradientV8gradient10startPoint03endG0AcA0D0V_AA04UnitG0VAJtcfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI4TextV4boldACyF", reinterpret_cast<void*>(text_bold)},
+        {"$s7SwiftUI4TextV15foregroundColoryAcA0E0VSgF", reinterpret_cast<void*>(text_foreground_color)},
+        {"$s7SwiftUI4TextV10fontWeightyAcA4FontV0E0VSgF", reinterpret_cast<void*>(text_font_weight)},
+        {"$s7SwiftUI5ImageV02uiC0ACSo7UIImageC_tcfC", reinterpret_cast<void*>(image_from_ui_image)},
+        {"$s7SwiftUI11StrokeStyleV9lineWidth0E3Cap0E4Join10miterLimit4dash0K5PhaseAC12CoreGraphics7CGFloatV_So06CGLineG0VSo0pH0VALSayALGALtcfC", reinterpret_cast<void*>(stroke_style_init)},
+        {"$s7SwiftUI16_FlexFrameLayoutV8minWidth05idealG003maxG00F6Height0hJ00iJ09alignmentAC12CoreGraphics7CGFloatVSg_A5nA9AlignmentVtcfC", reinterpret_cast<void*>(flex_frame_init)},
+        {"$s7SwiftUI12ProgressViewV5value5totalACyAA05EmptyD0VAGGqd__Sg_qd__tcAGRszAGRs_SBRd__lufC", reinterpret_cast<void*>(progress_value_init)},
+        {"$s7SwiftUI17ContentTransitionV11numericText10countsDownACSb_tFZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI17ContentTransitionV7opacityACvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI18LocalizedStringKeyVyACSScfC", reinterpret_cast<void*>(localized_key_literal)},
+        {"$s7SwiftUI21ToolbarContentBuilderV11buildEither5firstAA012_ConditionalD0Vyxq_Gx_tAA0cD0RzAaIR_r0_lFZ", reinterpret_cast<void*>(toolbar_build_first)},
+        {"$s7SwiftUI21ToolbarContentBuilderV11buildEither6secondAA012_ConditionalD0Vyxq_Gq__tAA0cD0RzAaIR_r0_lFZ", reinterpret_cast<void*>(toolbar_build_second)},
+        {"$s7SwiftUI21ToolbarContentBuilderV7buildIfyxSgAeA0cD0RzlFZ", reinterpret_cast<void*>(toolbar_build_if)},
+        {"$s7SwiftUI18PresentationDetentV6heightyAC12CoreGraphics7CGFloatVFZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI13GeometryProxyV4sizeSo6CGSizeVvg", reinterpret_cast<void*>(geometry_size)},
+        {"$s7SwiftUI9NamespaceV12wrappedValueAC2IDVvg", reinterpret_cast<void*>(immediate_value)},
+        {"$s7SwiftUI12TimelineViewVA2A0D0R_rlE_7contentACyxq_Gx_q_AC7ContextVyxq__GctcfC", reinterpret_cast<void*>(empty_node_init)},
+        {"$s7SwiftUI25AnimationTimelineScheduleV15minimumInterval6pausedACSdSg_SbtcfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI16PageTabViewStyleV16indexDisplayModeA2C05IndexhI0V_tcfC", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI16PageTabViewStyleV16IndexDisplayModeV5neverAEvgZ", reinterpret_cast<void*>(immediate_indirect)},
+        {"$s7SwiftUI6PickerVA2A4TextVRszrlE_9selection7contentACyAEq_q0_GAA18LocalizedStringKeyV_AA7BindingVyq_Gq0_yXEtcfC", reinterpret_cast<void*>(picker_key)},
+        {"$s7SwiftUI6ToggleVA2A4TextVRszrlE_4isOnACyAEGAA18LocalizedStringKeyV_AA7BindingVySbGtcfC", reinterpret_cast<void*>(toggle_key)},
+        {"$s7SwiftUI6ToggleVA2A4TextVRszrlE_4isOnACyAEGqd___AA7BindingVySbGtcSyRd__lufC", reinterpret_cast<void*>(toggle_title_init)},
+        {"$s7SwiftUI9TextFieldVA2A0C0VRszrlE_4text16onEditingChanged0F6CommitACyAEGAA18LocalizedStringKeyV_AA7BindingVySSGySbcyyctcfC", reinterpret_cast<void*>(text_field_key)},
+        {"$s7SwiftUI9TextFieldVA2A0C0VRszrlE_4text16onEditingChanged0F6CommitACyAEGqd___AA7BindingVySSGySbcyyctcSyRd__lufC", reinterpret_cast<void*>(text_field_string)},
+        {"$s7SwiftUI11SecureFieldVA2A4TextVRszrlE_4text8onCommitACyAEGAA18LocalizedStringKeyV_AA7BindingVySSGyyctcfC", reinterpret_cast<void*>(secure_field_key)},
+        {"$s7SwiftUI15DisclosureGroupV10isExpanded7content5labelACyxq_GAA7BindingVySbG_q_ycxyXEtcfC", reinterpret_cast<void*>(disclosure_expanded)},
+        {"$s7SwiftUI15DisclosureGroupVA2A4TextVRszrlE_7contentACyAEq_GAA18LocalizedStringKeyV_q_yctcfC", reinterpret_cast<void*>(disclosure_key)},
+        {"$s7SwiftUI15DisclosureGroupVA2A4TextVRszrlE_7contentACyAEq_Gqd___q_yctcSyRd__lufC", reinterpret_cast<void*>(disclosure_string)},
+        {"$s7SwiftUI14LabeledContentVA2A4TextVRszAERs_rlE_5valueACyA2EGqd___qd_0_tcSyRd__SyRd_0_r0_lufC", reinterpret_cast<void*>(labeled_strings)},
+        {"$s7SwiftUI11ColorPickerVA2A4TextVRszrlE_9selection15supportsOpacityACyAEGAA18LocalizedStringKeyV_AA7BindingVyAA0C0VGSbtcfC", reinterpret_cast<void*>(empty_node_init)},
+        {"$s7SwiftUI22UIHostingConfigurationVA2A9EmptyViewVRs_rlE7contentACyxAEGxyXE_tcfC", reinterpret_cast<void*>(empty_node_init)},
+        {"$s7SwiftUI8EditModeO9isEditingSbvg", reinterpret_cast<void*>(edit_mode_is_editing)},
         {"$s11Observation0A9RegistrarVACycfC", reinterpret_cast<void*>(registrar_init)},
         {"$s11Observation0A9RegistrarV6access_7keyPathyx_s03KeyE0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
         {"$s11Observation0A9RegistrarV7willSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},

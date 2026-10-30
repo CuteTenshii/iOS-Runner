@@ -15,17 +15,20 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.inputmethod.EditorInfo
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -260,6 +263,7 @@ class GuestActivity : Activity() {
             "spacer" -> parent.addView(View(this), LinearLayout.LayoutParams(0, 0, 1f))
             "button" -> parent.addView(buildButton(node, key))
             "toggle" -> parent.addView(buildToggle(node, key))
+            "field" -> parent.addView(buildField(node))
             "stepper" -> parent.addView(buildStepper(node, key))
             "picker" -> parent.addView(buildPicker(node))
             "labeled" -> parent.addView(buildLabeled(node, key))
@@ -461,6 +465,27 @@ class GuestActivity : Activity() {
         when (view) {
             is TextView -> view.setTextColor(color)
             is ViewGroup -> for (i in 0 until view.childCount) tintText(view.getChildAt(i), color)
+        }
+    }
+
+    // The value is sent when editing ends: every update redraws the tree, which would drop focus mid-word.
+    private fun buildField(node: JSONObject): View = EditText(this).apply {
+        val action = node.optInt("a", -1)
+        hint = node.optString("t")
+        setText(node.optString("v"))
+        inputType = if (node.optBoolean("secure")) {
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        } else {
+            InputType.TYPE_CLASS_TEXT
+        }
+        isSingleLine = true
+        imeOptions = EditorInfo.IME_ACTION_DONE
+        val commit = { if (action >= 0) nativeTextInput(action, text.toString()) }
+        setOnFocusChangeListener { _, focused -> if (!focused) commit() }
+        setOnEditorActionListener { view, _, _ ->
+            commit()
+            view.clearFocus()
+            false
         }
     }
 
@@ -779,6 +804,8 @@ class GuestActivity : Activity() {
 
         @JvmStatic
         private external fun nativeCookiesChanged()
+
+        private external fun nativeTextInput(action: Int, text: String)
 
         @JvmStatic
         private external fun nativeRun(bundleDir: String, executable: String, logPath: String, language: String): Int

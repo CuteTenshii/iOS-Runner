@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -102,6 +103,12 @@ void* new_nsstring(const std::string& text) {
     object->header.references = 1;
     object->text = new std::string(text);
     return object;
+}
+
+// Imports resolve before classes register, so these get their class later.
+std::vector<void*>& string_constants() {
+    static std::vector<void*> constants;
+    return constants;
 }
 
 const std::string& nsstring_text(void* object) { return *static_cast<NSStringObject*>(object)->text; }
@@ -338,6 +345,14 @@ struct BlockHeader {
 };
 
 
+struct URLBox;
+URLBox* make_url_box(const std::string& text);
+
+bool is_url_type(void* type) {
+    const char* name = foreign_type_name(type);
+    return name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0;
+}
+
 constexpr size_t kArrayHeaderBytes = 32;
 constexpr size_t kArrayCountOffset = 16;
 constexpr size_t kArrayCapacityOffset = 24;
@@ -347,6 +362,22 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
     auto* array = static_cast<NSArrayObject*>(object);
     if (array == nullptr || array->items->empty()) return empty_array_singleton();
     const size_t count = array->items->size();
+    // Strings and URLs change representation across the bridge; everything else is one object reference.
+    if (element_type == type_system_symbol("$sSSN") || is_url_type(element_type)) {
+        char* elements;
+        void* converted = make_array_storage(element_type, count, &elements);
+        for (size_t i = 0; i < count; ++i) {
+            void* item = (*array->items)[i];
+            if (element_type == type_system_symbol("$sSSN")) {
+                const SwiftString text = swift_string_from_utf8(nsstring_text(item));
+                memcpy(elements + i * sizeof text, &text, sizeof text);
+            } else {
+                URLBox* url = make_url_box(nsstring_text(item));
+                memcpy(elements + i * sizeof url, &url, sizeof url);
+            }
+        }
+        return converted;
+    }
     auto* storage = static_cast<char*>(calloc(1, kArrayHeaderBytes + count * sizeof(void*)));
     auto* header = reinterpret_cast<NativeObject*>(storage);
     header->isa = storage_class_metadata("_$ss23_ContiguousArrayStorageCMn", &element_type, 1);
@@ -462,6 +493,106 @@ std::string url_path(const std::string& text) {
     return text.substr(start, end == std::string::npos ? std::string::npos : end - start);
 }
 
+std::string path_last_component(std::string path) {
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    const size_t slash = path.rfind('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+std::string text_without_query(const std::string& text) { return text.substr(0, text.find_first_of("?#")); }
+
+SWIFTCC void url_file_with_path(__attribute__((swift_indirect_result)) URLBox** out, SwiftString path) { *out = new_url("file://" + swift_string_to_utf8(path)); }
+
+SWIFTCC void url_documents(__attribute__((swift_indirect_result)) URLBox** out) { *out = new_url("file://" + engine_bundle_dir() + "/.Documents/"); }
+
+std::string appended_component(const std::string& text, const std::string& component, bool directory) {
+    const std::string base = text_without_query(text);
+    std::string joined = base;
+    if (joined.empty() || joined.back() != '/') joined += '/';
+    joined += component;
+    if (directory && (joined.empty() || joined.back() != '/')) joined += '/';
+    return joined;
+}
+
+SWIFTCC void url_appending_component(__attribute__((swift_indirect_result)) URLBox** out, SwiftString component, __attribute__((swift_context)) URLBox** self) {
+    *out = new_url(appended_component(*(*self)->text, swift_string_to_utf8(component), false));
+}
+
+SWIFTCC void url_appending_directory(__attribute__((swift_indirect_result)) URLBox** out, SwiftString component, bool directory, __attribute__((swift_context)) URLBox** self) {
+    *out = new_url(appended_component(*(*self)->text, swift_string_to_utf8(component), directory));
+}
+
+SWIFTCC void url_appending_extension(__attribute__((swift_indirect_result)) URLBox** out, SwiftString extension, __attribute__((swift_context)) URLBox** self) {
+    std::string base = text_without_query(*(*self)->text);
+    while (base.size() > 1 && base.back() == '/') base.pop_back();
+    *out = new_url(base + "." + swift_string_to_utf8(extension));
+}
+
+SWIFTCC void url_deleting_extension(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) {
+    std::string base = text_without_query(*(*self)->text);
+    while (base.size() > 1 && base.back() == '/') base.pop_back();
+    const size_t dot = base.rfind('.');
+    const size_t slash = base.rfind('/');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash + 1)) base.erase(dot);
+    *out = new_url(base);
+}
+
+SWIFTCC SwiftString url_last_component(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(path_last_component(url_path(*(*self)->text))); }
+
+SWIFTCC SwiftString url_path_extension(__attribute__((swift_context)) URLBox** self) {
+    const std::string name = path_last_component(url_path(*(*self)->text));
+    const size_t dot = name.rfind('.');
+    return swift_string_from_utf8(dot == std::string::npos || dot == 0 ? std::string() : name.substr(dot + 1));
+}
+
+SWIFTCC SwiftString url_path_percent(bool, __attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
+SWIFTCC bool url_is_file(__attribute__((swift_context)) URLBox** self) { return (*self)->text->rfind("file:", 0) == 0; }
+SWIFTCC bool url_has_directory_path(__attribute__((swift_context)) URLBox** self) { const std::string base = text_without_query(*(*self)->text); return !base.empty() && base.back() == '/'; }
+SWIFTCC bool url_equal(URLBox** left, URLBox** right) { return *(*left)->text == *(*right)->text; }
+SWIFTCC bool url_start_security_scope(__attribute__((swift_context)) void*) { return true; }
+SWIFTCC void url_absolute(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) { *out = new_url(*(*self)->text); }
+SWIFTCC void url_no_base(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) void*) { *out = nullptr; }
+
+struct UrlAuthority {
+    std::string host;
+    int64_t port = -1;
+};
+
+UrlAuthority url_authority(const std::string& text) {
+    UrlAuthority result;
+    const size_t scheme = text.find("://");
+    if (scheme == std::string::npos) return result;
+    const size_t start = scheme + 3;
+    std::string authority = text.substr(start, text.find_first_of("/?#", start) - start);
+    if (const size_t at = authority.rfind('@'); at != std::string::npos) authority.erase(0, at + 1);
+    const size_t colon = authority.rfind(':');
+    if (colon != std::string::npos && authority.find(']', colon) == std::string::npos) {
+        result.port = strtol(authority.c_str() + colon + 1, nullptr, 10);
+        authority.erase(colon);
+    }
+    result.host = authority;
+    return result;
+}
+
+SWIFTCC void url_string_relative(__attribute__((swift_indirect_result)) URLBox** out, SwiftString value, URLBox** base) {
+    const std::string relative = swift_string_to_utf8(value);
+    if (base == nullptr || *base == nullptr || relative.find("://") != std::string::npos) {
+        *out = new_url(relative);
+        return;
+    }
+    *out = new_url(appended_component(*(*base)->text, relative, false));
+}
+
+struct OptionalIntResult {
+    int64_t value;
+    bool is_none;
+};
+
+SWIFTCC OptionalIntResult url_port(__attribute__((swift_context)) URLBox** self) {
+    const int64_t port = url_authority(*(*self)->text).port;
+    return {port < 0 ? 0 : port, port < 0};
+}
+
 SWIFTCC void url_application_support(__attribute__((swift_indirect_result)) URLBox** out) {
     const std::string directory = engine_bundle_dir() + "/.Library/Application Support";
     make_directories(directory);
@@ -480,6 +611,21 @@ struct OptionalSwiftString {
     uint64_t count_and_flags;
     uint64_t object;
 };
+
+SWIFTCC OptionalSwiftString url_host(__attribute__((swift_context)) URLBox** self) {
+    const std::string host = url_authority(*(*self)->text).host;
+    if (host.empty()) return {0, 0};
+    const SwiftString value = swift_string_from_utf8(host);
+    return {value.count_and_flags, value.object};
+}
+
+SWIFTCC OptionalSwiftString url_query(__attribute__((swift_context)) URLBox** self) {
+    const std::string& text = *(*self)->text;
+    const size_t question = text.find('?');
+    if (question == std::string::npos) return {0, 0};
+    const SwiftString value = swift_string_from_utf8(text.substr(question + 1, text.find('#', question) - question - 1));
+    return {value.count_and_flags, value.object};
+}
 
 SWIFTCC OptionalSwiftString url_scheme(__attribute__((swift_context)) URLBox** self) {
     const size_t end = (*self)->text->find(':');
@@ -502,6 +648,158 @@ SWIFTCC void url_deleting_last_component(__attribute__((swift_indirect_result)) 
 }
 
 void* g_nsurl_class = nullptr;
+
+URLBox* make_url_box(const std::string& text) { return new_url(text); }
+
+void* new_nsurl(const std::string& text) {
+    auto* object = static_cast<NSStringObject*>(new_nsstring(text));
+    object->header.isa = g_nsurl_class;
+    return object;
+}
+
+std::string file_url_text(const std::string& path) { return "file://" + path; }
+
+std::string nsobject_path(void* object) {
+    const std::string& text = nsstring_text(object);
+    return static_cast<NativeObject*>(object)->isa == g_nsurl_class ? url_path(text) : text;
+}
+
+void set_cocoa_error(void** error, const std::string& message) {
+    if (error != nullptr) *error = foundation_make_error(message, errno);
+}
+
+void* bundle_url(void*, const char*) { return new_nsurl(file_url_text(engine_bundle_dir() + "/")); }
+void* bundle_path(void*, const char*) { return new_nsstring(engine_bundle_dir()); }
+
+void* bundle_url_for_resource(void*, const char*, void* name, void* extension) {
+    std::string path = engine_bundle_dir() + "/" + (name == nullptr ? std::string() : nsstring_text(name));
+    if (extension != nullptr && !nsstring_text(extension).empty()) path += "." + nsstring_text(extension);
+    return access(path.c_str(), F_OK) == 0 ? new_nsurl(file_url_text(path)) : nullptr;
+}
+
+constexpr int64_t kDocumentDirectory = 9;
+constexpr int64_t kCachesDirectory = 13;
+
+std::string sandbox_directory(int64_t directory) {
+    switch (directory) {
+        case kDocumentDirectory: return engine_bundle_dir() + "/.Documents";
+        case kCachesDirectory: return engine_bundle_dir() + "/.Library/Caches";
+        default: return engine_bundle_dir() + "/.Library/Application Support";
+    }
+}
+
+void make_directory_tree(const std::string& path) {
+    for (size_t at = path.find('/', 1); at != std::string::npos; at = path.find('/', at + 1)) mkdir(path.substr(0, at).c_str(), 0700);
+    mkdir(path.c_str(), 0700);
+}
+
+void* file_manager_urls(void*, const char*, int64_t directory, uint64_t) {
+    const std::string path = sandbox_directory(directory);
+    make_directory_tree(path);
+    auto* array = static_cast<NSArrayObject*>(new_nsarray());
+    array->items->push_back(new_nsurl(file_url_text(path + "/")));
+    return array;
+}
+
+void* file_manager_temporary_directory(void*, const char*) {
+    const std::string path = engine_bundle_dir() + "/.tmp";
+    make_directory_tree(path);
+    return new_nsurl(file_url_text(path + "/"));
+}
+
+bool file_manager_exists_directory(void*, const char*, void* path, bool* is_directory) {
+    struct stat info{};
+    if (stat(nsstring_text(path).c_str(), &info) != 0) return false;
+    if (is_directory != nullptr) *is_directory = S_ISDIR(info.st_mode);
+    return true;
+}
+
+bool file_manager_create_path(void*, const char*, void* path, bool, void*, void**) {
+    make_directory_tree(nsobject_path(path));
+    return true;
+}
+
+bool remove_recursively(const std::string& path) {
+    struct stat info{};
+    if (lstat(path.c_str(), &info) != 0) return false;
+    if (S_ISDIR(info.st_mode)) {
+        if (DIR* directory = opendir(path.c_str())) {
+            while (const dirent* entry = readdir(directory)) {
+                const std::string name = entry->d_name;
+                if (name != "." && name != "..") remove_recursively(path + "/" + name);
+            }
+            closedir(directory);
+        }
+        return rmdir(path.c_str()) == 0;
+    }
+    return unlink(path.c_str()) == 0;
+}
+
+bool file_manager_remove(void*, const char*, void* item, void** error) {
+    if (remove_recursively(nsobject_path(item))) return true;
+    set_cocoa_error(error, "Could not remove " + nsobject_path(item));
+    return false;
+}
+
+bool file_manager_move(void*, const char*, void* from, void* to, void** error) {
+    if (rename(nsobject_path(from).c_str(), nsobject_path(to).c_str()) == 0) return true;
+    set_cocoa_error(error, "Could not move " + nsobject_path(from));
+    return false;
+}
+
+bool copy_recursively(const std::string& from, const std::string& to) {
+    struct stat info{};
+    if (stat(from.c_str(), &info) != 0) return false;
+    if (S_ISDIR(info.st_mode)) {
+        make_directory_tree(to);
+        DIR* directory = opendir(from.c_str());
+        if (directory == nullptr) return false;
+        bool copied = true;
+        while (const dirent* entry = readdir(directory)) {
+            const std::string name = entry->d_name;
+            if (name != "." && name != "..") copied = copy_recursively(from + "/" + name, to + "/" + name) && copied;
+        }
+        closedir(directory);
+        return copied;
+    }
+    FILE* input = fopen(from.c_str(), "rb");
+    if (input == nullptr) return false;
+    FILE* output = fopen(to.c_str(), "wb");
+    if (output == nullptr) {
+        fclose(input);
+        return false;
+    }
+    char chunk[65536];
+    for (size_t got; (got = fread(chunk, 1, sizeof chunk, input)) > 0;) fwrite(chunk, 1, got, output);
+    fclose(input);
+    return fclose(output) == 0;
+}
+
+bool file_manager_copy(void*, const char*, void* from, void* to, void** error) {
+    if (copy_recursively(nsobject_path(from), nsobject_path(to))) return true;
+    set_cocoa_error(error, "Could not copy " + nsobject_path(from));
+    return false;
+}
+
+void* directory_listing(const std::string& path, bool as_urls) {
+    auto* array = static_cast<NSArrayObject*>(new_nsarray());
+    if (DIR* directory = opendir(path.c_str())) {
+        while (const dirent* entry = readdir(directory)) {
+            const std::string name = entry->d_name;
+            if (name == "." || name == "..") continue;
+            array->items->push_back(as_urls ? new_nsurl(file_url_text(path + "/" + name)) : new_nsstring(name));
+        }
+        closedir(directory);
+    }
+    return array;
+}
+
+void* file_manager_contents_path(void*, const char*, void* path, void**) { return directory_listing(nsobject_path(path), false); }
+void* file_manager_contents_url(void*, const char*, void* url, void*, uint64_t, void**) {
+    std::string path = nsobject_path(url);
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    return directory_listing(path, true);
+}
 
 SWIFTCC void* url_bridge_to_objc(__attribute__((swift_context)) URLBox** self) {
     auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->text));
@@ -1887,6 +2185,94 @@ void foundation_cookies_changed() {
 
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
 
+void* foundation_native_array(void* object) {
+    void* value = nullptr;
+    return object != nullptr && bridged_collection_value(object, value) ? value : nullptr;
+}
+
+struct FormatArgument {
+    void* buffer[3];
+    void* type;
+    void* table;
+};
+
+std::string format_argument_text(const FormatArgument& argument, const std::string& specifier) {
+    char text[64];
+    if (argument.type == type_system_symbol("$sSSN")) return swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(argument.buffer));
+    if (argument.type == type_system_symbol("$sSdN")) {
+        snprintf(text, sizeof text, specifier.c_str(), *reinterpret_cast<const double*>(argument.buffer));
+        return text;
+    }
+    if (specifier.back() == '@') {
+        if (argument.type == type_system_symbol("$sSiN")) return std::to_string(reinterpret_cast<int64_t>(argument.buffer[0]));
+        const std::string object_text = foundation_object_text(argument.buffer[0]);
+        return object_text;
+    }
+    std::string wide = specifier;
+    wide.erase(std::remove_if(wide.begin(), wide.end(), [](char c) { return c == 'l' || c == 'z' || c == 'q'; }), wide.end());
+    wide.insert(wide.size() - 1, "ll");
+    snprintf(text, sizeof text, wide.c_str(), reinterpret_cast<long long>(argument.buffer[0]));
+    return text;
+}
+
+// printf-style formatting over [CVarArg], whose elements are existentials holding their value inline.
+SWIFTCC SwiftString string_format_arguments(SwiftString format, void* arguments) {
+    const std::string pattern = swift_string_to_utf8(format);
+    int64_t count = 0;
+    memcpy(&count, static_cast<char*>(arguments) + kArrayCountOffset, sizeof count);
+    const auto* values = reinterpret_cast<const FormatArgument*>(static_cast<char*>(arguments) + kArrayHeaderBytes);
+    std::string out;
+    int64_t next = 0;
+    for (size_t i = 0; i < pattern.size(); ++i) {
+        if (pattern[i] != '%') {
+            out += pattern[i];
+            continue;
+        }
+        if (i + 1 < pattern.size() && pattern[i + 1] == '%') {
+            out += '%';
+            ++i;
+            continue;
+        }
+        size_t end = i + 1;
+        while (end < pattern.size() && strchr("0123456789.+-# lzq$", pattern[end]) != nullptr) ++end;
+        if (end >= pattern.size()) break;
+        const std::string specifier = pattern.substr(i, end - i + 1);
+        if (next < count) out += format_argument_text(values[next++], specifier);
+        i = end;
+    }
+    return swift_string_from_utf8(out);
+}
+
+SWIFTCC SwiftString ns_localized_string(SwiftString key) { return swift_string_from_utf8(localization_lookup(swift_string_to_utf8(key))); }
+
+std::string foundation_object_text(void* object) {
+    const void* isa = static_cast<NativeObject*>(object)->isa;
+    return isa == g_nsstring_class || isa == g_nsurl_class ? nsstring_text(object) : std::string();
+}
+
+bool foundation_object_date(void* object, double& seconds) {
+    if (static_cast<NativeObject*>(object)->isa != g_nsdate_class) return false;
+    seconds = static_cast<NSDateObject*>(object)->seconds;
+    return true;
+}
+
+std::string foundation_encode_object(void* object) {
+    const void* isa = static_cast<NativeObject*>(object)->isa;
+    if (isa == g_nsstring_class) return "s" + nsstring_text(object);
+    if (isa == g_nsurl_class) return "u" + nsstring_text(object);
+    if (isa == g_nsdate_class) return "d" + std::to_string(static_cast<NSDateObject*>(object)->seconds);
+    return {};
+}
+
+void* foundation_decode_object(const std::string& encoded) {
+    if (encoded.empty()) return nullptr;
+    const std::string body = encoded.substr(1);
+    if (encoded[0] == 'd') return new_date_object(strtod(body.c_str(), nullptr));
+    auto* object = static_cast<NSStringObject*>(new_nsstring(body));
+    if (encoded[0] == 'u') object->header.isa = g_nsurl_class;
+    return object;
+}
+
 bool foundation_defaults_lookup_bool(const std::string& key, bool fallback) {
     void* name = new_nsstring(key);
     const bool known = defaults_object_for_key(nullptr, nullptr, name) != nullptr;
@@ -1909,6 +2295,8 @@ void foundation_defaults_store_integer(const std::string& key, int64_t value) { 
 void foundation_defaults_store_string(const std::string& key, const std::string& value) { defaults_set_object(nullptr, nullptr, new_nsstring(value), new_nsstring(key)); }
 
 void foundation_register_classes() {
+    if (g_nsstring_class == nullptr) g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
+    for (void* constant : string_constants()) static_cast<NativeObject*>(constant)->isa = g_nsstring_class;
     const auto make_record = [](AsyncFunctionRecord& record, void (*entry)()) {
         record.context_size = kUrlSessionContextBytes;
         record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(entry) - reinterpret_cast<intptr_t>(&record));
@@ -1917,7 +2305,6 @@ void foundation_register_classes() {
     make_record(g_url_session_request_record, rt_url_session_data_request);
     g_http_response_class = objc_native_class("NSHTTPURLResponse", free);
     objc_register_method("-[NSHTTPURLResponse statusCode]", reinterpret_cast<const void*>(http_response_status));
-    g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
     g_defaults_class = objc_native_class("NSUserDefaults", free);
     objc_register_method("-[WKUserScript initWithSource:injectionTime:forMainFrameOnly:]", reinterpret_cast<const void*>(user_script_init));
     objc_register_method("-[WKWebView initWithFrame:configuration:]", reinterpret_cast<const void*>(web_view_init));
@@ -1965,6 +2352,20 @@ void foundation_register_classes() {
     objc_register_method("-[NSUserDefaults initWithSuiteName:]", reinterpret_cast<const void*>(return_self_with_argument));
     objc_register_method("+[NSProcessInfo processInfo]", reinterpret_cast<const void*>(process_info_shared));
     objc_register_method("-[NSProcessInfo operatingSystemVersion]", reinterpret_cast<const void*>(process_info_version));
+    objc_register_method("-[NSBundle bundleURL]", reinterpret_cast<const void*>(bundle_url));
+    objc_register_method("-[NSBundle resourceURL]", reinterpret_cast<const void*>(bundle_url));
+    objc_register_method("-[NSBundle bundlePath]", reinterpret_cast<const void*>(bundle_path));
+    objc_register_method("-[NSBundle URLForResource:withExtension:]", reinterpret_cast<const void*>(bundle_url_for_resource));
+    objc_register_method("-[NSFileManager URLsForDirectory:inDomains:]", reinterpret_cast<const void*>(file_manager_urls));
+    objc_register_method("-[NSFileManager temporaryDirectory]", reinterpret_cast<const void*>(file_manager_temporary_directory));
+    objc_register_method("-[NSFileManager fileExistsAtPath:isDirectory:]", reinterpret_cast<const void*>(file_manager_exists_directory));
+    objc_register_method("-[NSFileManager createDirectoryAtPath:withIntermediateDirectories:attributes:error:]", reinterpret_cast<const void*>(file_manager_create_path));
+    objc_register_method("-[NSFileManager removeItemAtPath:error:]", reinterpret_cast<const void*>(file_manager_remove));
+    objc_register_method("-[NSFileManager removeItemAtURL:error:]", reinterpret_cast<const void*>(file_manager_remove));
+    objc_register_method("-[NSFileManager moveItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_move));
+    objc_register_method("-[NSFileManager copyItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_copy));
+    objc_register_method("-[NSFileManager contentsOfDirectoryAtPath:error:]", reinterpret_cast<const void*>(file_manager_contents_path));
+    objc_register_method("-[NSFileManager contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:]", reinterpret_cast<const void*>(file_manager_contents_url));
     objc_register_method("-[UIApplication keyWindow]", reinterpret_cast<const void*>(no_object));
     objc_register_method("+[NSNotificationCenter defaultCenter]", reinterpret_cast<const void*>(notification_center_default));
     objc_register_method("-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]", reinterpret_cast<const void*>(notification_add_block));
@@ -2003,7 +2404,41 @@ void foundation_register_classes() {
 }
 
 void* foundation_symbol(std::string_view name) {
+    // UIKit and Foundation name their notifications with NSString constants holding the same text.
+    constexpr std::string_view kNotificationSuffix = "Notification";
+    if ((name.rfind("UI", 0) == 0 || name.rfind("NS", 0) == 0) && name.size() > kNotificationSuffix.size() && name.substr(name.size() - kNotificationSuffix.size()) == kNotificationSuffix) {
+        static std::unordered_map<std::string, void*> constants;
+        void*& slot = constants[std::string(name)];
+        if (slot == nullptr) {
+            slot = new_nsstring(std::string(name));
+            string_constants().push_back(slot);
+        }
+        return &slot;
+    }
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sSS10FoundationE6format9argumentsS2Sh_Says7CVarArg_pGhtcfC", reinterpret_cast<void*>(string_format_arguments)},
+        {"$sSS10FoundationE6format_S2Sh_s7CVarArg_pdtcfC", reinterpret_cast<void*>(string_format_arguments)},
+        {"$s10Foundation3URLV15fileURLWithPathACSSh_tcfC", reinterpret_cast<void*>(url_file_with_path)},
+        {"$s10Foundation3URLV18documentsDirectoryACvgZ", reinterpret_cast<void*>(url_documents)},
+        {"$s10Foundation3URLV22appendingPathComponentyACSSF", reinterpret_cast<void*>(url_appending_component)},
+        {"$s10Foundation3URLV22appendingPathComponent_11isDirectoryACSS_SbtF", reinterpret_cast<void*>(url_appending_directory)},
+        {"$s10Foundation3URLV22appendingPathExtensionyACSSF", reinterpret_cast<void*>(url_appending_extension)},
+        {"$s10Foundation3URLV21deletingPathExtensionACyF", reinterpret_cast<void*>(url_deleting_extension)},
+        {"$s10Foundation3URLV17lastPathComponentSSvg", reinterpret_cast<void*>(url_last_component)},
+        {"$s10Foundation3URLV13pathExtensionSSvg", reinterpret_cast<void*>(url_path_extension)},
+        {"$s10Foundation3URLV12relativePathSSvg", reinterpret_cast<void*>(url_path_getter)},
+        {"$s10Foundation3URLV4path14percentEncodedSSSb_tF", reinterpret_cast<void*>(url_path_percent)},
+        {"$s10Foundation3URLV06isFileB0Sbvg", reinterpret_cast<void*>(url_is_file)},
+        {"$s10Foundation3URLV16hasDirectoryPathSbvg", reinterpret_cast<void*>(url_has_directory_path)},
+        {"$s10Foundation3URLV2eeoiySbAC_ACtFZ", reinterpret_cast<void*>(url_equal)},
+        {"$s10Foundation3URLV36startAccessingSecurityScopedResourceSbyF", reinterpret_cast<void*>(url_start_security_scope)},
+        {"$s10Foundation3URLV08absoluteB0ACvg", reinterpret_cast<void*>(url_absolute)},
+        {"$s10Foundation3URLV04baseB0ACSgvg", reinterpret_cast<void*>(url_no_base)},
+        {"$s10Foundation3URLV4hostSSSgvg", reinterpret_cast<void*>(url_host)},
+        {"$s10Foundation3URLV5querySSSgvg", reinterpret_cast<void*>(url_query)},
+        {"$s10Foundation3URLV4portSiSgvg", reinterpret_cast<void*>(url_port)},
+        {"$s10Foundation3URLV6string10relativeToACSgSSh_AFhtcfC", reinterpret_cast<void*>(url_string_relative)},
+        {"$s10Foundation17NSLocalizedString_9tableName6bundle5value7commentS2S_SSSgSo8NSBundleCS2StF", reinterpret_cast<void*>(ns_localized_string)},
         {"$s10Foundation3URLV27applicationSupportDirectoryACvgZ", reinterpret_cast<void*>(url_application_support)},
         {"$s10Foundation3URLV6stringACSgSSh_tcfC", reinterpret_cast<void*>(url_from_string)},
         {"$s10Foundation3URLV14absoluteStringSSvg", reinterpret_cast<void*>(url_absolute_string)},

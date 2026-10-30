@@ -45,3 +45,16 @@ std::string foundation_defaults_lookup_string(const std::string& key, const std:
 void foundation_defaults_store_bool(const std::string& key, bool value);
 void foundation_defaults_store_integer(const std::string& key, int64_t value);
 void foundation_defaults_store_string(const std::string& key, const std::string& value);
+
+// A string, URL or date object as text that foundation_decode_object restores, or empty for anything else.
+std::string foundation_encode_object(void* object);
+void* foundation_decode_object(const std::string& encoded);
+
+// The text of an NSString or NSURL, or empty for anything else.
+std::string foundation_object_text(void* object);
+
+// Seconds since the reference date, if `object` is an NSDate.
+bool foundation_object_date(void* object, double& seconds);
+
+// The native array behind an NSArray that was bridged from Swift, or null.
+void* foundation_native_array(void* object);

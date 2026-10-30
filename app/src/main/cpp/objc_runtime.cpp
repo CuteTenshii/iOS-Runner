@@ -6,6 +6,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -109,8 +110,14 @@ const void* lookup_framework_method(const std::string& description) {
     }
     const std::string root = description.substr(0, 2) + "NSObject" + description.substr(space);
     const auto inherited = framework_methods().find(root);
-    if (inherited == framework_methods().end()) stop_unknown_message(description);
-    return inherited->second;
+    if (inherited != framework_methods().end()) return inherited->second;
+    // UIKit only describes presentation, which the host draws itself: nil is a valid answer to all of it.
+    if (description.compare(2, 2, "UI") == 0) {
+        static std::set<std::string> logged;
+        if (logged.insert(description).second) engine_log("UIKIT: ignoring %s", description.c_str());
+        return reinterpret_cast<const void*>(+[](void*) -> void* { return nullptr; });
+    }
+    stop_unknown_message(description);
 }
 
 extern "C" const void* rt_objc_lookup(void* receiver, const char* selector) {
@@ -219,6 +226,8 @@ void* objc_runtime_symbol(std::string_view name) {
     if (name == "objc_msgSend") return reinterpret_cast<void*>(rt_objc_msgSend);
     if (name == "objc_msgSendSuper2") return reinterpret_cast<void*>(rt_objc_msgSendSuper2);
     if (name == "objc_allocWithZone") return reinterpret_cast<void*>(rt_objc_allocWithZone);
+    if (name == "objc_alloc") return reinterpret_cast<void*>(rt_objc_allocWithZone);
+    if (name == "objc_alloc_init") return reinterpret_cast<void*>(objc_alloc_init);
     return nullptr;
 }
 

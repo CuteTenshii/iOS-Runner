@@ -776,12 +776,16 @@ SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_SELF vo
     header->count = old_count + 1;
 }
 
+constexpr uint32_t kFlagNonPod = 0x10000;
+
 // Equatable's dispatch thunk; framework types only reach it as String or URL.
 SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, void* table) {
     if (type == type_system_symbol("$sSSN")) return swift_string_to_utf8(*static_cast<const SwiftString*>(left)) == swift_string_to_utf8(*static_cast<const SwiftString*>(right));
     if (const char* name = foreign_type_name(type); name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) {
         return foundation_url_text(*static_cast<void* const*>(left)) == foundation_url_text(*static_cast<void* const*>(right));
     }
+    // Framework values with no references, such as enum tags, are equal when their bytes are.
+    if (const auto* witnesses = witnesses_of(type); foreign_type_name(type) != nullptr && (witnesses->flags & kFlagNonPod) == 0) return memcmp(left, right, witnesses->size) == 0;
     using Equal = SWIFTCC bool (*)(const void*, const void*, void*, void*, SWIFT_SELF void*);
     const auto equal = reinterpret_cast<Equal>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSQ2eeoiySbx_xtFZTq")));
     if (equal == nullptr) {
@@ -790,6 +794,9 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
     }
     return equal(left, right, type, table, type);
 }
+
+// A framework OptionSet is its raw value, whatever the type's witness table says.
+SWIFTCC void option_set_init(SWIFT_OUT void* out, const void* raw, void* type, void*) { memcpy(out, raw, witnesses_of(type)->size); }
 
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
@@ -819,6 +826,7 @@ void* stdlib_symbol(std::string_view name) {
         {"$sSa16_createNewBuffer14bufferIsUnique15minimumCapacity13growForAppendySb_SiSbtFyXl_Ts5", reinterpret_cast<void*>(object_array_create_new_buffer)},
         {"$sSa37_appendElementAssumeUniqueAndCapacity_03newB0ySi_xntFyXl_Ts5", reinterpret_cast<void*>(object_array_append)},
         {"$sSQ2eeoiySbx_xtFZTj", reinterpret_cast<void*>(equatable_equal)},
+        {"$ss9OptionSetP8rawValuex03RawD0Qz_tcfCTj", reinterpret_cast<void*>(option_set_init)},
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},

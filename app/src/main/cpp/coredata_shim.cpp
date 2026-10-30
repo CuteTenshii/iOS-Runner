@@ -1,6 +1,8 @@
 #include "coredata_shim.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -10,7 +12,16 @@
 
 #include "engine.h"
 #include "foundation_shim.h"
+#include "json.h"
+#include "key_path.h"
+#include "macho.h"
 #include "objc_runtime.h"
+#include "stdlib_shim.h"
+#include "type_system.h"
+
+#define SWIFTCC __attribute__((swiftcall))
+#define SWIFT_CONTEXT __attribute__((swift_context))
+#define SWIFT_ERROR __attribute__((swift_error_result))
 
 extern "C" void* rt_swift_retain(void*);
 extern "C" void rt_swift_release(void*);
@@ -145,6 +156,274 @@ void* managed_entity(void* cls, const char*) {
 
 std::string nsstring_of_description(void* description) { return *static_cast<EntityDescription*>(description)->name; }
 
+struct SortDescriptor {
+    void* isa;
+    uint64_t references;
+    void* key_path;
+    bool ascending;
+};
+
+SWIFTCC void* sort_descriptor_init(void* key_path, bool ascending) {
+    auto* descriptor = static_cast<SortDescriptor*>(objc_framework_object("NSSortDescriptor"));
+    descriptor->key_path = key_path;
+    descriptor->ascending = ascending;
+    return descriptor;
+}
+
+// `key == %@` is the only predicate shape the app builds.
+struct Predicate {
+    void* isa;
+    uint64_t references;
+    std::string* key;
+    std::string* value;
+};
+
+struct CVarArgExistential {
+    void* buffer[3];
+    void* type;
+    void* table;
+};
+
+constexpr size_t kArrayCountOffset = 16;
+constexpr size_t kArrayElementsOffset = 32;
+
+SWIFTCC void* predicate_init(SwiftString format, void* arguments, SWIFT_CONTEXT void*) {
+    const std::string text = swift_string_to_utf8(format);
+    auto* predicate = static_cast<Predicate*>(objc_framework_object("NSPredicate"));
+    predicate->key = new std::string(text.substr(0, text.find(' ')));
+    predicate->value = new std::string();
+    int64_t count;
+    memcpy(&count, static_cast<char*>(arguments) + kArrayCountOffset, sizeof count);
+    if (count > 0) {
+        const auto* first = reinterpret_cast<const CVarArgExistential*>(static_cast<char*>(arguments) + kArrayElementsOffset);
+        *predicate->value = foundation_object_text(first->buffer[0]);
+    }
+    return predicate;
+}
+
+bool matches(void* object, const Predicate* predicate) {
+    if (predicate == nullptr) return true;
+    const auto& attributes = store().records[object].attributes;
+    const auto found = attributes.find(*predicate->key);
+    return found != attributes.end() && found->second.value != nullptr && foundation_object_text(found->second.value) == *predicate->value;
+}
+
+// Attribute values compare by what they hold: only strings and dates are ever sorted on.
+int compare_objects(void* left, void* right) {
+    if (left == nullptr || right == nullptr) return (left != nullptr) - (right != nullptr);
+    double left_date, right_date;
+    if (foundation_object_date(left, left_date) && foundation_object_date(right, right_date)) return (left_date > right_date) - (left_date < right_date);
+    return foundation_object_text(left).compare(foundation_object_text(right));
+}
+
+// The key path's getter returns a bridged value, but its pattern ends in the property's accessor: the sort reads through it.
+void sort_key_value(void* object, void* key_path, char (&buffer)[64], void*& type) {
+    type = key_path_value_type(key_path);
+    memset(buffer, 0, sizeof buffer);
+    key_path_get(key_path, &object, buffer, type);
+}
+
+int compare_by_key_path(void* left, void* right, void* key_path) {
+    char left_value[64], right_value[64];
+    void* type;
+    sort_key_value(left, key_path, left_value, type);
+    sort_key_value(right, key_path, right_value, type);
+    TypeField payload;
+    const bool left_some = optional_payload(type, left_value, payload) && payload.type != nullptr;
+    const bool right_some = optional_payload(type, right_value, payload) && payload.type != nullptr;
+    if (!left_some || !right_some) return left_some - right_some;
+    const char* name = foreign_type_name(payload.type);
+    if (name != nullptr && strcmp(name, "_$s10Foundation4DateVMn") == 0) {
+        const double a = *reinterpret_cast<double*>(left_value);
+        const double b = *reinterpret_cast<double*>(right_value);
+        return (a > b) - (a < b);
+    }
+    if (payload.type == type_system_symbol("$sSSN")) {
+        return swift_string_to_utf8(*reinterpret_cast<SwiftString*>(left_value)).compare(swift_string_to_utf8(*reinterpret_cast<SwiftString*>(right_value)));
+    }
+    return 0;
+}
+
+std::vector<void*> fetch_objects(const std::string& entity, void* predicate, void* sort_descriptors) {
+    std::vector<void*> objects;
+    for (void* object : store().insertion_order) {
+        if (store().records[object].entity == entity && matches(object, static_cast<Predicate*>(predicate))) objects.push_back(object);
+    }
+    if (sort_descriptors == nullptr) return objects;
+    int64_t count;
+    memcpy(&count, static_cast<char*>(sort_descriptors) + kArrayCountOffset, sizeof count);
+    auto* const* descriptors = reinterpret_cast<SortDescriptor* const*>(static_cast<char*>(sort_descriptors) + kArrayElementsOffset);
+    std::stable_sort(objects.begin(), objects.end(), [&](void* left, void* right) {
+        for (int64_t i = 0; i < count; ++i) {
+            const int order = compare_by_key_path(left, right, descriptors[i]->key_path);
+            if (order != 0) return descriptors[i]->ascending ? order < 0 : order > 0;
+        }
+        return false;
+    });
+    return objects;
+}
+
+std::map<std::string, void*>& entity_classes() {
+    static std::map<std::string, void*> classes;
+    return classes;
+}
+
+struct FetchRequest {
+    void* isa;
+    uint64_t references;
+    std::string* entity;
+    void* predicate;
+    void* sort_descriptors;
+};
+
+void* fetch_request_init(void* self, const char*, void* name) {
+    static_cast<FetchRequest*>(self)->entity = new std::string(foundation_object_text(name));
+    return self;
+}
+
+// `+fetchRequest` reaches here through the metaclass chain, so `self` is the class itself.
+void* managed_fetch_request(void* cls, const char*) {
+    auto* request = static_cast<FetchRequest*>(objc_framework_object("NSFetchRequest"));
+    request->entity = new std::string(entity_name_of_class(cls));
+    return request;
+}
+
+void fetch_request_set_predicate(void* self, const char*, void* predicate) { static_cast<FetchRequest*>(self)->predicate = predicate; }
+
+// The setter receives an NSArray bridged from a native array, and the sort needs the native array back.
+void fetch_request_set_sort(void* self, const char*, void* descriptors) {
+    static_cast<FetchRequest*>(self)->sort_descriptors = foundation_native_array(descriptors);
+}
+
+std::vector<void*> run_request(const FetchRequest* request) { return fetch_objects(*request->entity, request->predicate, request->sort_descriptors); }
+
+SWIFTCC void* context_fetch(FetchRequest* request, void*, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**) {
+    const std::vector<void*> objects = run_request(request);
+    char* elements;
+    void* storage = make_array_storage(type_system_symbol("$syXlN"), objects.size(), &elements);
+    for (size_t i = 0; i < objects.size(); ++i) {
+        rt_swift_retain(objects[i]);
+        memcpy(elements + i * sizeof(void*), &objects[i], sizeof(void*));
+    }
+    return storage;
+}
+
+SWIFTCC int64_t context_count(FetchRequest* request, void*, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**) { return static_cast<int64_t>(run_request(request).size()); }
+
+int64_t context_count_objc(void*, const char*, FetchRequest* request, void**) { return static_cast<int64_t>(run_request(request).size()); }
+
+void remove_object(void* object) {
+    auto& order = store().insertion_order;
+    order.erase(std::remove(order.begin(), order.end(), object), order.end());
+    store().records.erase(object);
+    store().has_changes = true;
+    rt_swift_release(object);
+}
+
+void context_delete(void*, const char*, void* object) { remove_object(object); }
+
+void* batch_delete_init(void* self, const char*, void* request) {
+    static_cast<FetchRequest*>(self)->entity = static_cast<FetchRequest*>(request)->entity;
+    static_cast<FetchRequest*>(self)->predicate = static_cast<FetchRequest*>(request)->predicate;
+    return self;
+}
+
+void* context_execute(void*, const char*, FetchRequest* request, void**) {
+    for (void* object : run_request(request)) remove_object(object);
+    return objc_framework_object("NSBatchDeleteResult");
+}
+
+// Saved as JSON beside the app's other support files; relationships are indexes into the saved list.
+std::string store_path() { return engine_bundle_dir() + "/.Library/Application Support/coredata.json"; }
+
+Json json_text(const std::string& text) {
+    Json value;
+    value.kind = Json::Kind::String;
+    value.text = text;
+    return value;
+}
+
+void save_store() {
+    const auto& order = store().insertion_order;
+    std::unordered_map<void*, size_t> indexes;
+    for (size_t i = 0; i < order.size(); ++i) indexes[order[i]] = i;
+    Json root;
+    root.kind = Json::Kind::Array;
+    for (void* object : order) {
+        const ManagedRecord& record = store().records[object];
+        Json entry;
+        entry.kind = Json::Kind::Object;
+        entry.members.emplace_back("#entity", json_text(record.entity));
+        for (const auto& [name, attribute] : record.attributes) {
+            if (attribute.value == nullptr && attribute.is_object) continue;
+            std::string encoded;
+            if (!attribute.is_object) encoded = attribute.value != nullptr ? "b1" : "b0";
+            else if (const auto related = indexes.find(attribute.value); related != indexes.end()) encoded = "r" + std::to_string(related->second);
+            else encoded = foundation_encode_object(attribute.value);
+            if (!encoded.empty()) entry.members.emplace_back(name, json_text(encoded));
+        }
+        root.items.push_back(std::move(entry));
+    }
+    const std::string path = store_path();
+    FILE* file = fopen((path + ".tmp").c_str(), "w");
+    if (file == nullptr) {
+        engine_log("COREDATA: cannot write %s", path.c_str());
+        return;
+    }
+    const std::string text = json_write(root);
+    fwrite(text.data(), 1, text.size(), file);
+    fclose(file);
+    rename((path + ".tmp").c_str(), path.c_str());
+}
+
+void load_store() {
+    FILE* file = fopen(store_path().c_str(), "r");
+    if (file == nullptr) return;
+    std::string text;
+    char chunk[4096];
+    for (size_t got; (got = fread(chunk, 1, sizeof chunk, file)) > 0;) text.append(chunk, got);
+    fclose(file);
+    Json root;
+    if (!json_parse(text, root)) {
+        engine_log("COREDATA: saved store is unreadable, starting empty");
+        return;
+    }
+    using Allocate = void* (*)(void*, void*);
+    auto allocate = reinterpret_cast<Allocate>(objc_runtime_symbol("objc_allocWithZone"));
+    std::vector<void*> restored;
+    for (const Json& entry : root.items) {
+        const Json* entity = entry.member("#entity");
+        const auto cls = entity == nullptr ? entity_classes().end() : entity_classes().find(entity->text);
+        if (cls == entity_classes().end()) {
+            restored.push_back(nullptr);
+            continue;
+        }
+        void* object = allocate(cls->second, nullptr);
+        ManagedRecord& record = store().records[object];
+        record.entity = entity->text;
+        store().insertion_order.push_back(object);
+        restored.push_back(object);
+    }
+    for (size_t i = 0; i < root.items.size(); ++i) {
+        if (restored[i] == nullptr) continue;
+        ManagedRecord& record = store().records[restored[i]];
+        for (const auto& [name, value] : root.items[i].members) {
+            if (name == "#entity" || value.text.empty()) continue;
+            Attribute& attribute = record.attributes[name];
+            if (value.text[0] == 'b') {
+                attribute.is_object = false;
+                attribute.value = value.text == "b1" ? reinterpret_cast<void*>(static_cast<uintptr_t>(1)) : nullptr;
+            } else if (value.text[0] == 'r') {
+                const size_t index = strtoul(value.text.c_str() + 1, nullptr, 10);
+                attribute.value = index < restored.size() && restored[index] != nullptr ? rt_swift_retain(restored[index]) : nullptr;
+            } else {
+                attribute.value = foundation_decode_object(value.text);
+            }
+        }
+    }
+    store().has_changes = false;
+}
+
 void* view_context() {
     static void* context = objc_framework_object("NSManagedObjectContext");
     return context;
@@ -158,6 +437,7 @@ void container_load_stores(void*, const char*, void* block) {
         int32_t flags, reserved;
         void (*invoke)(void*, void*, void*);
     };
+    load_store();
     void* description = objc_framework_object("NSPersistentStoreDescription");
     static_cast<Literal*>(block)->invoke(block, description, nullptr);
 }
@@ -165,20 +445,28 @@ void context_ignore_argument(void*, const char*, void*) {}
 void context_set_bool(void*, const char*, bool) {}
 bool context_has_changes(void*, const char*) { return store().has_changes; }
 bool context_save(void*, const char*, void**) {
+    save_store();
     store().has_changes = false;
     return true;
 }
 
 }  // namespace
 
+void coredata_attach_image(const MachImage& image) {
+    const MachSection* list = image.section("__DATA_CONST", "__objc_classlist");
+    if (list == nullptr) list = image.section("__DATA", "__objc_classlist");
+    if (list == nullptr) return;
+    for (size_t offset = 0; offset + sizeof(void*) <= list->size; offset += sizeof(void*)) {
+        void* cls;
+        memcpy(&cls, reinterpret_cast<const char*>(list->address + offset), sizeof cls);
+        entity_classes()[entity_name_of_class(cls)] = cls;
+    }
+}
+
 void* coredata_view_context() { return view_context(); }
 
-std::vector<void*> coredata_objects_of(const std::string& entity) {
-    std::vector<void*> objects;
-    for (void* object : store().insertion_order) {
-        if (store().records[object].entity == entity) objects.push_back(object);
-    }
-    return objects;
+std::vector<void*> coredata_fetch(const std::string& entity, void* predicate, void* sort_descriptors) {
+    return fetch_objects(entity, predicate, sort_descriptors);
 }
 
 std::string coredata_entity_name(void* description) { return nsstring_of_description(description); }
@@ -186,11 +474,23 @@ std::string coredata_entity_name(void* description) { return nsstring_of_descrip
 void* coredata_symbol(std::string_view name) {
     static void* merge_policy = objc_framework_object("NSMergePolicy");
     if (name == "NSMergeByPropertyObjectTrumpMergePolicy") return &merge_policy;
+    if (name == "$sSo16NSSortDescriptorC10FoundationE7keyPath9ascendingABs03KeyE0Cyxq_G_Sbtcr0_lufC") return reinterpret_cast<void*>(sort_descriptor_init);
+    if (name == "$sSo11NSPredicateC10FoundationE6format_ABSSh_s7CVarArg_pdtcfC") return reinterpret_cast<void*>(predicate_init);
+    if (name == "$sSo22NSManagedObjectContextC8CoreDataE5fetchySayxGSo14NSFetchRequestCyxGKSo0gH6ResultRzlF") return reinterpret_cast<void*>(context_fetch);
+    if (name == "$sSo22NSManagedObjectContextC8CoreDataE5count3forSiSo14NSFetchRequestCyxG_tKSo0hI6ResultRzlF") return reinterpret_cast<void*>(context_count);
     return nullptr;
 }
 
 void coredata_register_classes() {
     objc_register_fallback("NSManagedObject", managed_accessor);
+    objc_register_method("-[NSManagedObject fetchRequest]", reinterpret_cast<const void*>(managed_fetch_request));
+    objc_register_method("-[NSFetchRequest initWithEntityName:]", reinterpret_cast<const void*>(fetch_request_init));
+    objc_register_method("-[NSFetchRequest setPredicate:]", reinterpret_cast<const void*>(fetch_request_set_predicate));
+    objc_register_method("-[NSFetchRequest setSortDescriptors:]", reinterpret_cast<const void*>(fetch_request_set_sort));
+    objc_register_method("-[NSBatchDeleteRequest initWithFetchRequest:]", reinterpret_cast<const void*>(batch_delete_init));
+    objc_register_method("-[NSManagedObjectContext deleteObject:]", reinterpret_cast<const void*>(context_delete));
+    objc_register_method("-[NSManagedObjectContext executeRequest:error:]", reinterpret_cast<const void*>(context_execute));
+    objc_register_method("-[NSManagedObjectContext countForFetchRequest:error:]", reinterpret_cast<const void*>(context_count_objc));
     objc_register_method("-[NSManagedObject entity]", reinterpret_cast<const void*>(managed_entity));
     objc_register_method("-[NSManagedObject initWithContext:]", reinterpret_cast<const void*>(managed_init_with_context));
     objc_register_method("-[NSManagedObject initWithEntity:insertIntoManagedObjectContext:]", reinterpret_cast<const void*>(managed_init_with_entity));
