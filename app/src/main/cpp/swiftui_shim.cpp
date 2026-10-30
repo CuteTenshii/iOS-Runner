@@ -4,11 +4,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <new>
 #include <unordered_map>
 
 #include "concurrency_shim.h"
 #include "engine.h"
+#include "foundation_shim.h"
+#include "localization.h"
 #include "swift_runtime.h"
 #include "type_system.h"
 
@@ -167,6 +170,72 @@ SWIFTCC void registrar_mark_dirty() { g_tree_dirty.store(true, std::memory_order
 
 extern "C" void rt_registrar_with_mutation();
 
+// Optional doubles travel in integer registers, so these words hold raw bit patterns.
+struct FrameLayout {
+    uint64_t width;
+    uint64_t width_is_nil;
+    uint64_t height;
+    uint64_t height_is_nil;
+    uint64_t horizontal;
+    uint64_t vertical;
+};
+
+SWIFTCC void frame_layout_init(SWIFT_OUT FrameLayout* out, uint64_t width, uint64_t width_nil, uint64_t height, uint64_t height_nil, uint64_t horizontal, uint64_t vertical) {
+    *out = {width, width_nil, height, height_nil, horizontal, vertical};
+}
+
+// Text: words 0-1 hold the resolved string, and the last word packs font and colour as an immediate.
+struct TextValue {
+    uint64_t text_bits;
+    uint64_t text_object;
+    uint64_t kind;
+    uint64_t style;
+};
+
+constexpr uint64_t kTextFontMask = 0x3ffff;
+constexpr unsigned kTextColorShift = 24;
+constexpr uint64_t kTextColorMask = 0xffULL << kTextColorShift;
+
+TextValue make_text(const std::string& text) {
+    const SwiftString value = swift_string_from_utf8(text);
+    return {value.count_and_flags, value.object, 0, kImmediate};
+}
+
+struct LocalizedKey {
+    SwiftString key;
+    uint64_t has_formatting;
+    LocalizedBox* interpolation;
+};
+
+SWIFTCC LocalizedKey localized_key_literal(SwiftString literal) { return {literal, 0, nullptr}; }
+
+SWIFTCC TextValue text_from_key(SwiftString key, uint64_t, LocalizedBox* interpolation) {
+    if (interpolation != nullptr) return make_text(localized_text(interpolation));
+    return make_text(localization_lookup(swift_string_to_utf8(key)));
+}
+
+SWIFTCC TextValue text_from_string(const SwiftString* value, void*, void*) { return make_text(swift_string_to_utf8(*value)); }
+SWIFTCC TextValue text_from_resource(LocalizedBox** resource) { return make_text(localized_text(*resource)); }
+
+SWIFTCC TextValue text_font(uint64_t font, TextValue text) {
+    text.style = (text.style & ~kTextFontMask) | (font & kTextFontMask);
+    return text;
+}
+
+SWIFTCC TextValue text_foreground_style(const uint32_t* style, TextValue text, void*, void*) {
+    text.style = (text.style & ~kTextColorMask) | (static_cast<uint64_t>(*style & 0xff) << kTextColorShift);
+    return text;
+}
+
+struct EdgeInsetsValue {
+    double top;
+    double leading;
+    double bottom;
+    double trailing;
+};
+
+SWIFTCC EdgeInsetsValue edge_insets_all(double value) { return {value, value, value, value}; }
+
 void walk_view(void* value, void* type, void** witnesses, int depth) {
     if (depth > kMaximumDepth) {
         engine_log("STOP: view tree deeper than %d levels", kMaximumDepth);
@@ -252,6 +321,14 @@ void* swiftui_symbol(std::string_view name) {
         {"$s11Observation0A9RegistrarV7willSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
         {"$s11Observation0A9RegistrarV6didSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_mark_dirty)},
         {"$s11Observation0A9RegistrarV12withMutation2of7keyPath_q0_x_s03KeyG0Cyxq_Gq0_yKXEtKAA10ObservableRzr1_lF", reinterpret_cast<void*>(rt_registrar_with_mutation)},
+        {"$s7SwiftUI12_FrameLayoutV5width6height9alignmentAC12CoreGraphics7CGFloatVSg_AjA9AlignmentVtcfC", reinterpret_cast<void*>(frame_layout_init)},
+        {"$s7SwiftUI10EdgeInsetsV4_allAC12CoreGraphics7CGFloatV_tcfC", reinterpret_cast<void*>(edge_insets_all)},
+        {"$s7SwiftUI18LocalizedStringKeyV13stringLiteralACSS_tcfC", reinterpret_cast<void*>(localized_key_literal)},
+        {"$s7SwiftUI4TextV_9tableName6bundle7commentAcA18LocalizedStringKeyV_SSSgSo8NSBundleCSgs06StaticI0VSgtcfC", reinterpret_cast<void*>(text_from_key)},
+        {"$s7SwiftUI4TextVyACxcSyRzlufC", reinterpret_cast<void*>(text_from_string)},
+        {"$s7SwiftUI4TextVyAC10Foundation23LocalizedStringResourceVcfC", reinterpret_cast<void*>(text_from_resource)},
+        {"$s7SwiftUI4TextV4fontyAcA4FontVSgF", reinterpret_cast<void*>(text_font)},
+        {"$s7SwiftUI4TextV15foregroundStyleyACxAA05ShapeE0RzlF", reinterpret_cast<void*>(text_foreground_style)},
         {"$s7SwiftUI4ViewP4body4BodyQzvgTq", &g_view_body_requirement},
         {"$s4Body7SwiftUI4ViewPTl", &g_view_body_type_requirement},
     };

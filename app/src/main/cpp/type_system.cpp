@@ -457,6 +457,89 @@ Metadata* protocol_existential(const char* protocol_name) {
     return named_type(key, kKindExistential, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
 }
 
+struct FrozenField {
+    size_t size;      // 0 means the type comes from `argument`.
+    size_t alignment;
+    int argument;     // Index of a generic argument, or -1.
+    bool reference;   // A retained word, rather than plain bytes.
+};
+
+Metadata* metadata_for_field(const FrozenField& field, const std::vector<void*>& arguments) {
+    if (field.argument >= 0) return static_cast<Metadata*>(arguments[static_cast<size_t>(field.argument)]);
+    if (field.reference) return native_type();
+    std::string key = "pod" + std::to_string(field.size) + "/" + std::to_string(field.alignment);
+    return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, field.size, field.alignment, 0);
+}
+
+Metadata* struct_from_fields(const std::string& key, const std::vector<FrozenField>& fields, const std::vector<void*>& arguments) {
+    auto* layout = new Layout{LayoutKind::Aggregate, {}, nullptr};
+    size_t offset = 0;
+    size_t alignment = 1;
+    uint32_t inhabitants = 0;
+    bool plain = true;
+    for (const auto& field : fields) {
+        Metadata* type = metadata_for_field(field, arguments);
+        const auto* witnesses = witnesses_of(type);
+        const size_t mask = witnesses->flags & 0xff;
+        offset = (offset + mask) & ~mask;
+        layout->fields.push_back({type, offset});
+        offset += witnesses->size;
+        if (mask + 1 > alignment) alignment = mask + 1;
+        if (witnesses->extra_inhabitants > inhabitants) inhabitants = witnesses->extra_inhabitants;
+        if (witnesses->flags & kFlagNonPod) plain = false;
+    }
+    if (plain) layout->kind = LayoutKind::Pod;
+    return named_type(key, kKindStruct, layout, offset, alignment, inhabitants, arguments);
+}
+
+constexpr FrozenField kWord = {8, 8, -1, false};
+constexpr FrozenField kReference = {8, 8, -1, true};
+constexpr FrozenField kOptionalDouble = {9, 8, -1, false};
+constexpr FrozenField kByte = {1, 1, -1, false};
+constexpr FrozenField kAlignment = {16, 8, -1, false};
+constexpr FrozenField kPadding = {33, 8, -1, false};
+constexpr FrozenField kAnchor = {16, 8, -1, false};
+constexpr FrozenField kClosure = {16, 8, -1, false};
+constexpr FrozenField kFirstArgument = {0, 0, 0, false};
+constexpr FrozenField kSecondArgument = {0, 0, 1, false};
+
+// SwiftUI's @frozen types, from its public interface: the app's compiled code writes these fields inline.
+const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_layouts() {
+    static const std::unordered_map<std::string_view, std::vector<FrozenField>> table = {
+        {"_$s7SwiftUI15ModifiedContentVMn", {kFirstArgument, kSecondArgument}},
+        {"_$s7SwiftUI4TextVMn", {kWord, kWord, kWord, kReference}},
+        {"_$s7SwiftUI12_FrameLayoutVMn", {kOptionalDouble, kOptionalDouble, kAlignment}},
+        {"_$s7SwiftUI14_PaddingLayoutVMn", {kByte, kPadding}},
+        {"_$s7SwiftUI18_AspectRatioLayoutVMn", {kOptionalDouble, kByte}},
+        {"_$s7SwiftUI25_AllowsHitTestingModifierVMn", {kByte}},
+        {"_$s7SwiftUI15_RotationEffectVMn", {kWord, kAnchor}},
+        {"_$s7SwiftUI25_AppearanceActionModifierVMn", {kClosure, kClosure}},
+        {"_$s7SwiftUI24_BackgroundStyleModifierVMn", {kFirstArgument, kByte}},
+        {"_$s7SwiftUI16_OverlayModifierVMn", {kFirstArgument, kAlignment}},
+        {"_$s7SwiftUI11_ClipEffectVMn", {kFirstArgument, {2, 1, -1, false}}},
+        {"_$s7SwiftUI21_ContentShapeModifierVMn", {kFirstArgument, kByte}},
+        {"_$s7SwiftUI18_AnimationModifierVMn", {kReference, kFirstArgument}},
+        {"_$s7SwiftUI30_EnvironmentKeyWritingModifierVMn", {kReference, kFirstArgument}},
+        {"_$s7SwiftUI32_EnvironmentKeyTransformModifierVMn", {kReference, kClosure}},
+        {"_$s7SwiftUI21_TraitWritingModifierVMn", {kFirstArgument}},
+        {"_$s7SwiftUI6HStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
+        {"_$s7SwiftUI6VStackVMn", {kWord, kOptionalDouble, kFirstArgument}},
+        {"_$s7SwiftUI6ZStackVMn", {kAlignment, kFirstArgument}},
+        {"_$s7SwiftUI6SpacerVMn", {kOptionalDouble}},
+        {"_$s7SwiftUI6CircleVMn", {}},
+        {"_$s7SwiftUI9RectangleVMn", {}},
+        {"_$s7SwiftUI9EmptyViewVMn", {}},
+        {"_$s7SwiftUI12TupleContentVMn", {kFirstArgument}},
+        {"_$s7SwiftUI16_TupleTabContentVMn", {kFirstArgument, kSecondArgument}},
+    };
+    return table;
+}
+
+Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
+    const auto found = frozen_layouts().find(symbol);
+    return found == frozen_layouts().end() ? nullptr : struct_from_fields(key, found->second, arguments);
+}
+
 // Types whose stored layout the app's compiled code depends on; everything else from a framework is one reference.
 Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& arguments) {
     std::string key = symbol;
@@ -472,10 +555,10 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
         g_foreign_names[metadata] = strdup(symbol.c_str());
         return metadata;
     }
-    // Text is frozen, so the app's compiled code passes its four words inline.
-    Metadata* metadata = symbol == "_$s7SwiftUI4TextVMn"
-        ? named_type(key, kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants)
-        : named_type(key, kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants, arguments);
+    Metadata* metadata = frozen_layout_type(key, symbol, arguments);
+    if (metadata == nullptr) {
+        metadata = named_type(key, kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants, arguments);
+    }
     g_foreign_names[metadata] = strdup(symbol.c_str());
     return metadata;
 }
@@ -1043,7 +1126,14 @@ extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_co
         for (uint32_t i = 0; i < count && i < field_count; ++i) {
             uint64_t* offset_global;
             memcpy(&offset_global, entries + i * entry_size, sizeof offset_global);
-            if (offset_global != nullptr) *offset_global = field_offsets[i];
+            if (offset_global == nullptr) continue;
+            // Offsets the compiler could prove are read-only constants, and must already agree.
+            if (image_address_is_writable(reinterpret_cast<uintptr_t>(offset_global))) {
+                *offset_global = field_offsets[i];
+            } else if (*offset_global != field_offsets[i]) {
+                engine_log("STOP: field %u is compiled at offset %llu but laid out at %zu", i, static_cast<unsigned long long>(*offset_global), field_offsets[i]);
+                abort();
+            }
         }
     }
     return nullptr;
@@ -1073,15 +1163,10 @@ extern "C" MetadataResponse rt_foreign_access(size_t, void* first, void* second,
     if (arity > 0) arguments.push_back(first);
     if (arity > 1) arguments.push_back(second);
     if (arity > 2) arguments.push_back(third);
-    if (name == "$s7SwiftUI15ModifiedContentVMa") {
-        std::string key(symbol);
-        for (const void* argument : arguments) key += pointer_key(argument);
-        if (const auto found = g_named_types.find(key); found != g_named_types.end()) return {found->second, 0};
-        auto* tuple = tuple_of({static_cast<Metadata*>(first), static_cast<Metadata*>(second)});
-        const auto* witnesses = witnesses_of(tuple);
-        return {named_type(key, kKindStruct, new Layout(*layout_of(tuple)), witnesses->size, (witnesses->flags & 0xff) + 1, witnesses->extra_inhabitants, arguments), 0};
-    }
-    return {foreign_nominal(symbol, arguments), 0};
+    if (name == "$s7SwiftUI15ModifiedContentVMa") return {foreign_nominal("_$s7SwiftUI15ModifiedContentVMn", arguments), 0};
+    std::string descriptor = std::string("_") + symbol;
+    descriptor.replace(descriptor.size() - 2, 2, "Mn");
+    return {foreign_nominal(descriptor, arguments), 0};
 }
 
 extern "C" void rt_foreign_access_entry();
@@ -1114,7 +1199,7 @@ void* type_system_symbol(std::string_view name) {
         if (name == "$sSbN") return named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254);
         if (name == "$sSJN") return two_word_type("SJ", word_type(), bridge_word_type());
         if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
-        if (name == "$ss5NeverON" || name == "$s7SwiftUI9EmptyViewVN") return pod_type(std::string(name), 0);
+        if (name == "$ss5NeverON") return pod_type(std::string(name), 0);
         if (name == "$s7SwiftUI22HierarchicalShapeStyleVN") return pod_type(std::string(name), 4);
         if (name == "$s10Foundation4DataVN" || name == "$s10Foundation4DataV15_RepresentationON") return two_word_type("Data", word_type(), bridge_word_type());
         std::string descriptor = "_" + std::string(name);

@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "localization.h"
 #include "objc_runtime.h"
 
 #define SWIFTCC __attribute__((swiftcall))
@@ -338,6 +339,45 @@ bool file_manager_create_directory(void*, const char*, void* url, bool, void*, v
     return make_directories(url_path(nsstring_text(url)));
 }
 
+#define SWIFT_OUT __attribute__((swift_indirect_result))
+#define SWIFT_SELF __attribute__((swift_context))
+
+SWIFTCC void localization_value_literal(SWIFT_OUT LocalizedBox** out, SwiftString literal) { *out = new_localized_box(swift_string_to_utf8(literal)); }
+SWIFTCC void localization_interpolation_init(SWIFT_OUT LocalizedBox** out, int64_t, int64_t) { *out = new_localized_box(""); }
+SWIFTCC void localization_append_literal(SwiftString literal, SWIFT_SELF LocalizedBox** self) { *(*self)->key += swift_string_to_utf8(literal); }
+
+SWIFTCC void localization_append_string(SwiftString value, SWIFT_SELF LocalizedBox** self) {
+    *(*self)->key += "%@";
+    (*self)->arguments->push_back(swift_string_to_utf8(value));
+}
+
+SWIFTCC void localization_append_integer(const int64_t* value, SwiftString specifier, void*, void*, SWIFT_SELF LocalizedBox** self) {
+    *(*self)->key += swift_string_to_utf8(specifier);
+    (*self)->arguments->push_back(std::to_string(*value));
+}
+
+// Interpolations are passed indirectly and consumed: ownership of the box moves to the new value.
+SWIFTCC void localization_value_interpolation(SWIFT_OUT LocalizedBox** out, LocalizedBox** interpolation) { *out = *interpolation; }
+
+LocalizedBox* copy_localized(const LocalizedBox* source) {
+    auto* copy = new_localized_box(*source->key);
+    *copy->arguments = *source->arguments;
+    return copy;
+}
+
+SWIFTCC void localized_resource_init(SWIFT_OUT LocalizedBox** out, LocalizedBox** value) { *out = copy_localized(*value); }
+SWIFTCC void localized_resource_init_default(SWIFT_OUT LocalizedBox** out, const char* key, int64_t length, uint64_t, LocalizedBox** default_value) {
+    *out = copy_localized(*default_value);
+    *(*out)->key = std::string(key, static_cast<size_t>(length));
+}
+
+SWIFTCC SwiftString string_localized(LocalizedBox** resource) { return swift_string_from_utf8(localized_text(*resource)); }
+
+constexpr uint64_t kLocaleImmediate = 1ULL << 63;
+SWIFTCC void locale_current(SWIFT_OUT uint64_t* out) { *out = kLocaleImmediate; }
+
+const int32_t kBundleDescriptionForClass = 0;
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -464,6 +504,18 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation3URLV19_bridgeToObjectiveCSo5NSURLCyF", reinterpret_cast<void*>(url_bridge_to_objc)},
         {"$s10Foundation3URLV36_unconditionallyBridgeFromObjectiveCyACSo5NSURLCSgFZ", reinterpret_cast<void*>(url_bridge_from_objc)},
         {"$s10Foundation3URLV13DirectoryHintO13inferFromPathyA2EmFWC", const_cast<int32_t*>(&kDirectoryHintInferFromPath)},
+        {"$sSS10FoundationE17LocalizationValueV13stringLiteralACSS_tcfC", reinterpret_cast<void*>(localization_value_literal)},
+        {"$sSS10FoundationE17LocalizationValueV19StringInterpolationV15literalCapacity18interpolationCountAESi_SitcfC", reinterpret_cast<void*>(localization_interpolation_init)},
+        {"$sSS10FoundationE17LocalizationValueV19StringInterpolationV13appendLiteralyySSF", reinterpret_cast<void*>(localization_append_literal)},
+        {"$sSS10FoundationE17LocalizationValueV19StringInterpolationV06appendE0yySSF", reinterpret_cast<void*>(localization_append_string)},
+        {"$sSS10FoundationE17LocalizationValueV19StringInterpolationV06appendE0_9specifieryx_SStAA18_FormatSpecifiableRzlF", reinterpret_cast<void*>(localization_append_integer)},
+        {"$sSS10FoundationE17LocalizationValueV19stringInterpolationA2C06StringE0V_tcfC", reinterpret_cast<void*>(localization_value_interpolation)},
+        {"$s10Foundation23LocalizedStringResourceV_5table6locale6bundle7commentACSSAAE17LocalizationValueV_SSSgAA6LocaleVAC17BundleDescriptionOs06StaticC0VSgtcfC", reinterpret_cast<void*>(localized_resource_init)},
+        {"$s10Foundation23LocalizedStringResourceV_12defaultValue5table6locale6bundle7commentACs06StaticC0V_SSAAE012LocalizationF0VSSSgAA6LocaleVAC17BundleDescriptionOAJSgtcfC", reinterpret_cast<void*>(localized_resource_init_default)},
+        {"$sSS10FoundationE9localizedSSAA23LocalizedStringResourceV_tcfC", reinterpret_cast<void*>(string_localized)},
+        {"$s10Foundation6LocaleV7currentACvgZ", reinterpret_cast<void*>(locale_current)},
+        {"$s10Foundation6LocaleV19autoupdatingCurrentACvgZ", reinterpret_cast<void*>(locale_current)},
+        {"$s10Foundation23LocalizedStringResourceV17BundleDescriptionO8forClassyAEyXlXpcAEmFWC", const_cast<int32_t*>(&kBundleDescriptionForClass)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},

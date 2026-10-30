@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace {
 
@@ -76,6 +77,7 @@ constexpr uint32_t kImportFormatAddend64 = 3;
 
 uintptr_t g_guard_base = 0;
 std::vector<std::string> g_guard_names;
+std::vector<std::pair<uintptr_t, uintptr_t>> g_writable_ranges;
 
 uintptr_t guard_address(const std::string& name) {
     if (g_guard_base == 0) {
@@ -378,6 +380,7 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
         // __DATA_CONST stays writable: the Swift and ObjC shims patch metadata caches in place.
         if (strncmp(segment->segname, "__DATA_CONST", 16) == 0) protection |= PROT_WRITE;
         const uintptr_t start = (image.base + (segment->vmaddr - low)) & ~(kMachPageSize - 1);
+        if (protection & PROT_WRITE) g_writable_ranges.emplace_back(start, start + segment->vmsize);
         const size_t length = (segment->vmsize + kMachPageSize - 1) & ~(kMachPageSize - 1);
         if (mprotect(reinterpret_cast<void*>(start), length, protection) != 0) {
             error = "mprotect failed for segment " + std::string(segment->segname, strnlen(segment->segname, 16));
@@ -388,4 +391,11 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
 
     munmap(file, file_size);
     return true;
+}
+
+bool image_address_is_writable(uintptr_t address) {
+    for (const auto& [start, end] : g_writable_ranges) {
+        if (address >= start && address < end) return true;
+    }
+    return false;
 }

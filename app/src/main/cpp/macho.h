@@ -36,3 +36,6 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
 
 // Names the unresolved import owning `address`, or nullptr if it is outside the guard region.
 const char* unresolved_symbol_at(uintptr_t address);
+
+// True if `address` lies in a writable segment of the loaded image.
+bool image_address_is_writable(uintptr_t address);
