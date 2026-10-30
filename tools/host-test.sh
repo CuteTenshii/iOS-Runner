@@ -17,4 +17,4 @@ rm -rf $BUNDLE && mkdir -p $BUNDLE
 unzip -q -o "$1" 'Payload/*' -d $BUNDLE
 APP=$(print -l $BUNDLE/Payload/*.app(/) | head -1)
 EXE=${${APP:t}%.app}
-exec qemu-aarch64 $OUT/iosrunner-cli "$APP" "$EXE"
+exec timeout ${IOSRUNNER_TIMEOUT:-30} qemu-aarch64 $OUT/iosrunner-cli "$APP" "$EXE"

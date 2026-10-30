@@ -9,6 +9,7 @@
 
 #include "engine.h"
 #include "swift_runtime.h"
+#include "type_system.h"
 
 extern "C" {
 void darwin_chkstk();
@@ -51,7 +52,9 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
 void* resolve_symbol(const char* name) {
     const auto& table = symbol_table();
     const auto found = table.find(name);
-    return found == table.end() ? swift_runtime_symbol(name) : found->second;
+    if (found != table.end()) return found->second;
+    if (void* symbol = swift_runtime_symbol(name)) return symbol;
+    return type_system_symbol(name);
 }
 
 void runtime_attach_image(const MachImage&) {}
