@@ -321,7 +321,12 @@ SWIFTCC void regex_init(SWIFT_OUT RegexBox** out, SwiftString pattern, int64_t) 
     auto* box = static_cast<RegexBox*>(calloc(1, sizeof(RegexBox)));
     box->metadata = const_cast<uint64_t*>(&kRegexMetadata.kind);
     new (&box->references) std::atomic<uint64_t>(1);
-    box->root = Parser(swift_string_to_utf8(pattern)).parse(box->captures).release();
+    // The compiler passes the literal as written, delimiters included.
+    std::string source = swift_string_to_utf8(pattern);
+    size_t hashes = 0;
+    while (hashes < source.size() && source[hashes] == '#') ++hashes;
+    if (source.size() >= 2 * hashes + 2 && source[hashes] == '/') source = source.substr(hashes + 1, source.size() - 2 * hashes - 2);
+    box->root = Parser(source).parse(box->captures).release();
     *out = box;
 }
 

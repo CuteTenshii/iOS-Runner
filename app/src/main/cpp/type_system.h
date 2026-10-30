@@ -41,6 +41,9 @@ void* array_element_type(const void* metadata);
 // Metadata of Optional<T>.
 void* optional_metadata(void* payload);
 
+// Metadata of Foundation.Date.
+void* date_metadata();
+
 // Metadata for a plain retained object reference, as stored in an Any.
 void* any_object_metadata();
 

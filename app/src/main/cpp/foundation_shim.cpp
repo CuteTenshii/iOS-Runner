@@ -1773,7 +1773,7 @@ SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     } else if (isa == g_nsdate_class) {
         const double seconds = static_cast<NSDateObject*>(object)->seconds;
         memcpy(out->buffer, &seconds, sizeof seconds);
-        out->type = resolve_mangled_type("10Foundation4DateV", nullptr);
+        out->type = date_metadata();
     } else if (isa == g_nsstring_class) {
         const SwiftString text = swift_string_from_utf8(nsstring_text(object));
         memcpy(out->buffer, &text, sizeof text);

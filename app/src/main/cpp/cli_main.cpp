@@ -42,7 +42,7 @@ HttpResult serve_from_directory(const std::string& url, const std::string&, cons
 // IOSRUNNER_DRIVE=<button text>: taps that button once it appears, and plays the web view's part until IOSRUNNER_DRIVE_SECONDS.
 void drive_message(const char* kind, const char* payload) {
     const std::string text(payload);
-    fprintf(stdout, "EMIT %s %.200s\n", kind, payload);
+    fprintf(stdout, "EMIT %s %s\n", kind, payload);
     fflush(stdout);
     if (strcmp(kind, "tree") == 0 && !g_tapped) {
         // Action ids change between trees, so wait for the one that has the loaded content.

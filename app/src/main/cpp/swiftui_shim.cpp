@@ -1305,7 +1305,8 @@ std::string render(void* value, void* type, const std::string& path, int depth) 
         size_t index = 0;
         for (const auto& field : fields) {
             const size_t current = index++;
-            if (!is_view_like(field.type)) continue;
+            // A view builder's tuple holds only views, including Optional ones from `if let`.
+            if (kind_word != kTupleKind && !is_view_like(field.type)) continue;
             const std::string rendered = render(static_cast<char*>(value) + field.offset, field.type, path + "." + std::to_string(current), depth + 1);
             if (rendered.empty()) continue;
             if (!children.empty()) children += ',';

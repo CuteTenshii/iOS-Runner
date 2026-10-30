@@ -1839,6 +1839,11 @@ fail:
     return false;
 }
 
+void* date_metadata() {
+    const std::lock_guard guard(g_types_lock);
+    return pod_type("Date", 8);
+}
+
 void* dictionary_value_type(const void* metadata) {
     const std::lock_guard guard(g_types_lock);
     const auto found = g_dictionary_values.find(metadata);
