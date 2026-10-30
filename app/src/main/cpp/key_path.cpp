@@ -7,11 +7,13 @@
 #include <new>
 
 #include "engine.h"
+#include "type_system.h"
 
 namespace {
 
 // Field layout of KeyPathPattern and its components, from the Swift ABI.
-constexpr size_t kPatternComponentsOffset = 20;
+constexpr size_t kPatternValueTypeOffset = 12;
+constexpr size_t kPatternComponentsOffset = 24;
 constexpr uint32_t kBufferSizeMask = 0x00ffffff;
 constexpr uint32_t kComponentKindMask = 0x7f000000;
 constexpr unsigned kComponentKindShift = 24;
@@ -253,4 +255,11 @@ void key_path_set(const void* key_path, void* root, void* new_value, void* value
                 abort();
         }
     });
+}
+
+void* key_path_value_type(const void* key_path) {
+    const auto* path = static_cast<const KeyPathObject*>(key_path);
+    // The low bit of the offset marks a mangled name rather than an accessor.
+    const auto target = reinterpret_cast<uintptr_t>(relative_target(path->pattern + kPatternValueTypeOffset));
+    return resolve_mangled_type(reinterpret_cast<const char*>(target & ~static_cast<uintptr_t>(1)), static_cast<void* const*>(path->arguments));
 }

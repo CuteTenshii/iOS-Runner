@@ -25,6 +25,8 @@ namespace {
 
 constexpr size_t kGuestStackSize = 64 * 1024 * 1024;
 constexpr size_t kSignalStackSize = 256 * 1024;
+constexpr int kStackScanWords = 128;
+constexpr int kStackScanReports = 6;
 
 int g_log_fd = -1;
 std::string g_bundle_dir;
@@ -96,6 +98,16 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
                static_cast<unsigned long long>(machine.regs[2]), static_cast<unsigned long long>(machine.regs[8]),
                static_cast<unsigned long long>(machine.regs[19]), static_cast<unsigned long long>(machine.regs[20]),
                static_cast<unsigned long long>(machine.regs[21]), static_cast<unsigned long long>(machine.regs[22]));
+    // Leaf thunks keep no frame, so return addresses on the stack are the only trace of their callers.
+    const auto* stack = reinterpret_cast<const uintptr_t*>(machine.sp);
+    const MachSection* code = g_image.section("__TEXT", "__text");
+    for (int slot = 0, reported = 0; code != nullptr && slot < kStackScanWords && reported < kStackScanReports; ++slot) {
+        const uintptr_t word = stack[slot];
+        if (word >= code->address && word < code->address + code->size) {
+            engine_log("  stack[%d] app+0x%zx", slot, static_cast<size_t>(word - g_image.base));
+            ++reported;
+        }
+    }
     uintptr_t frame = machine.regs[29];
     for (int depth = 0; depth < 16 && frame != 0 && (frame & 7) == 0; ++depth) {
         uintptr_t next, ret;

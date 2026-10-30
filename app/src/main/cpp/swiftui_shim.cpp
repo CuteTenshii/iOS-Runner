@@ -264,16 +264,17 @@ SWIFTCC void label_init(SWIFT_OUT ViewNode** out, const void* title, void* title
     *out = node;
 }
 
-SWIFTCC void toggle_label_init(SWIFT_OUT ViewNode** out, BindingNode** binding, const void* label, void* label_context, void* label_type, void*) {
+// Binding<Bool> is concrete, so the compiler passes its three words directly.
+SWIFTCC void toggle_label_init(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void* label, void* label_context, void* label_type, void*) {
     auto* node = new_node(NodeKind::Toggle);
-    node->binding = static_cast<BindingNode*>(rt_swift_retain(*binding));
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
     evaluate_child(node, label, label_context, label_type);
     *out = node;
 }
 
-SWIFTCC void toggle_title_init(SWIFT_OUT ViewNode** out, const SwiftString* title, BindingNode** binding, void*, void*) {
+SWIFTCC void toggle_title_init(SWIFT_OUT ViewNode** out, const SwiftString* title, uint64_t, BindingNode* location, uint64_t, void*, void*) {
     auto* node = new_node(NodeKind::Toggle);
-    node->binding = static_cast<BindingNode*>(rt_swift_retain(*binding));
+    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
     *node->title = swift_string_to_utf8(*title);
     *out = node;
 }
@@ -327,9 +328,9 @@ SWIFTCC void on_change_modifier(SWIFT_OUT ViewNode** out, const void*, uint64_t,
     *out = node;
 }
 
-SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, BindingNode** item, uint64_t, uint64_t, const void* content, void* content_context, void* self_type, void*, void*, void*, void*, void*, SWIFT_CONTEXT void* self) {
+SWIFTCC void sheet_modifier(SWIFT_OUT ViewNode** out, const uint64_t* item, uint64_t, uint64_t, const void* content, void* content_context, void* self_type, void*, void*, void*, void*, void*, SWIFT_CONTEXT void* self) {
     auto* node = new_node(NodeKind::Sheet);
-    node->binding = static_cast<BindingNode*>(rt_swift_retain(*item));
+    node->binding = reinterpret_cast<BindingNode*>(rt_swift_retain(reinterpret_cast<void*>(item[1])));
     node->action = content;
     node->action_context = rt_swift_retain(content_context);
     add_self_child(node, self, self_type);
@@ -494,34 +495,52 @@ void binding_write(BindingNode* binding, void* value, void* type) {
     registrar_mark_dirty();
 }
 
-SWIFTCC void binding_wrapped_get(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT BindingNode** self) { binding_read(*self, out, generic_argument(metadata)); }
-SWIFTCC void binding_wrapped_set(void* value, void* metadata, SWIFT_CONTEXT BindingNode** self) {
+// Binding is frozen: transaction, location, then an inline copy of the value. The node is the location.
+struct BindingHeader {
+    uint64_t transaction;
+    BindingNode* location;
+};
+
+constexpr size_t kBindingValueOffset = sizeof(BindingHeader);
+
+void write_binding(void* out, BindingNode* node, void* type) {
+    auto* header = static_cast<BindingHeader*>(out);
+    header->transaction = 0;
+    header->location = node;
+    const auto* witnesses = witnesses_of(type);
+    const size_t mask = witnesses->flags & 0xff;
+    const size_t offset = (kBindingValueOffset + mask) & ~mask;
+    binding_read(node, static_cast<char*>(out) + offset, type);
+}
+
+SWIFTCC void binding_wrapped_get(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT BindingHeader* self) { binding_read(self->location, out, generic_argument(metadata)); }
+SWIFTCC void binding_wrapped_set(void* value, void* metadata, SWIFT_CONTEXT BindingHeader* self) {
     void* type = generic_argument(metadata);
-    binding_write(*self, value, type);
+    binding_write(self->location, value, type);
     witnesses_of(type)->destroy(value, type);
 }
 
-SWIFTCC void binding_get_set(SWIFT_OUT BindingNode** out, const void* getter, void* getter_context, const void* setter, void* setter_context, void*) {
+SWIFTCC void binding_get_set(SWIFT_OUT void* out, const void* getter, void* getter_context, const void* setter, void* setter_context, void* type) {
     auto* binding = new_binding(BindingKind::Closures);
     binding->getter = getter;
     binding->getter_context = getter_context;
     binding->setter = setter;
     binding->setter_context = setter_context;
-    *out = binding;
+    write_binding(out, binding, type);
 }
 
-SWIFTCC void lazy_state_projected(SWIFT_OUT BindingNode** out, void* metadata, SWIFT_CONTEXT char* self) {
+SWIFTCC void lazy_state_projected(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT char* self) {
     auto* binding = new_binding(BindingKind::State);
     binding->source = rt_swift_retain(state_box_for(self, metadata));
-    *out = binding;
+    write_binding(out, binding, generic_argument(metadata));
 }
 
-SWIFTCC void binding_member(SWIFT_OUT BindingNode** out, void* key_path, void* metadata, void*, SWIFT_CONTEXT BindingNode** self) {
+SWIFTCC void binding_member(SWIFT_OUT void* out, void* key_path, void* metadata, SWIFT_CONTEXT BindingHeader* self) {
     auto* binding = new_binding(BindingKind::BindingKeyPath);
-    binding->source = rt_swift_retain(*self);
+    binding->source = rt_swift_retain(self->location);
     binding->key_path = rt_swift_retain(key_path);
     binding->parent_type = generic_argument(metadata);
-    *out = binding;
+    write_binding(out, binding, key_path_value_type(key_path));
 }
 
 // Bindable keeps the observed object itself in its single word.
@@ -529,11 +548,11 @@ SWIFTCC void bindable_init(SWIFT_OUT void** out, void* object) { *out = object; 
 SWIFTCC void bindable_wrapped_get(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
 SWIFTCC void bindable_projected(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = rt_swift_retain(*self); }
 
-SWIFTCC void bindable_member(SWIFT_OUT BindingNode** out, void* key_path, void*, SWIFT_CONTEXT void** self) {
+SWIFTCC void bindable_member(SWIFT_OUT void* out, void* key_path, void*, SWIFT_CONTEXT void** self) {
     auto* binding = new_binding(BindingKind::ObjectKeyPath);
     binding->source = rt_swift_retain(*self);
     binding->key_path = rt_swift_retain(key_path);
-    *out = binding;
+    write_binding(out, binding, key_path_value_type(key_path));
 }
 
 constexpr uint64_t kEnvironmentImmediate = kImmediate;

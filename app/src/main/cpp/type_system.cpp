@@ -592,6 +592,7 @@ constexpr FrozenField kSecondArgument = {0, 0, 1, false};
 const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_layouts() {
     static const std::unordered_map<std::string_view, std::vector<FrozenField>> table = {
         {"_$s7SwiftUI15ModifiedContentVMn", {kFirstArgument, kSecondArgument}},
+        {"_$s7SwiftUI7BindingVMn", {kWord, kReference, kFirstArgument}},
         {"_$s7SwiftUI4TextVMn", {kWord, kWord, kWord, kReference}},
         {"_$s7SwiftUI12_FrameLayoutVMn", {kOptionalDouble, kOptionalDouble, kAlignment}},
         {"_$s7SwiftUI14_PaddingLayoutVMn", {kByte, kPadding}},

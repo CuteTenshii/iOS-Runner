@@ -6,3 +6,6 @@ void key_path_set(const void* key_path, void* root, void* new_value, void* value
 
 // Creates the object swift_getKeyPath returns.
 void* key_path_create(const void* pattern, const void* arguments);
+
+// The type of the value this key path reads, as recorded in its pattern.
+void* key_path_value_type(const void* key_path);
