@@ -453,6 +453,84 @@ SWIFTCC int64_t minimum_merge_run_length(int64_t count) {
     return (count & low_mask) == 0 ? high : high + 1;
 }
 
+// _HashTable is two words: the bitmap's address and the bucket mask.
+SWIFTCC int64_t hash_table_start_bucket(const uint64_t* words, uint64_t mask) {
+    for (uint64_t bucket = 0; bucket <= mask; ++bucket) {
+        if ((words[bucket / kWordBits] >> (bucket % kWordBits)) & 1) return static_cast<int64_t>(bucket);
+    }
+    return static_cast<int64_t>(mask + 1);
+}
+
+SWIFTCC int64_t hash_table_previous_hole(int64_t before, const uint64_t* words, uint64_t mask) {
+    uint64_t bucket = static_cast<uint64_t>(before);
+    for (;;) {
+        bucket = (bucket - 1) & mask;
+        if (!((words[bucket / kWordBits] >> (bucket % kWordBits)) & 1)) return static_cast<int64_t>(bucket);
+    }
+}
+
+constexpr size_t kOptionalIndexNil = 0;
+
+struct OptionalIndex {
+    uint64_t index;
+    uint64_t is_nil;
+};
+
+SWIFTCC OptionalIndex string_index_offset_limited(uint64_t index, int64_t distance, uint64_t limit, SwiftString self) {
+    const std::string text = swift_string_to_utf8(self);
+    size_t offset = index_offset(index);
+    const size_t bound = index_offset(limit);
+    for (int64_t i = 0; i < distance; ++i) {
+        if (offset == bound) return {kOptionalIndexNil, 1};
+        offset = next_scalar(text, offset);
+    }
+    for (int64_t i = 0; i > distance; --i) {
+        if (offset == bound) return {kOptionalIndexNil, 1};
+        offset = previous_scalar(text, offset);
+    }
+    return {make_index(offset), 0};
+}
+
+SWIFTCC SwiftString string_remove_at(uint64_t index, SWIFT_SELF SwiftString* self) {
+    std::string text = swift_string_to_utf8(*self);
+    const size_t start = index_offset(index);
+    const size_t end = next_scalar(text, start);
+    const std::string removed = text.substr(start, end - start);
+    text.erase(start, end - start);
+    *self = swift_string_from_utf8(text);
+    return swift_string_from_utf8(removed);
+}
+
+SWIFTCC void string_remove_subrange(uint64_t start, uint64_t end, SWIFT_SELF SwiftString* self) {
+    std::string text = swift_string_to_utf8(*self);
+    text.erase(index_offset(start), index_offset(end) - index_offset(start));
+    *self = swift_string_from_utf8(text);
+}
+
+SWIFTCC uint64_t substring_index_after(uint64_t index, uint64_t, uint64_t, SwiftString guts) {
+    return make_index(next_scalar(swift_string_to_utf8(guts), index_offset(index)));
+}
+
+SWIFTCC SwiftString substring_subscript(uint64_t index, uint64_t, uint64_t, SwiftString guts) {
+    const std::string text = swift_string_to_utf8(guts);
+    const size_t start = index_offset(index);
+    return swift_string_from_utf8(text.substr(start, next_scalar(text, start) - start));
+}
+
+SWIFTCC int64_t substring_utf8_distance(uint64_t from, uint64_t to, uint64_t, uint64_t, SwiftString) {
+    return static_cast<int64_t>(index_offset(to)) - static_cast<int64_t>(index_offset(from));
+}
+
+SWIFTCC bool character_is_whitespace(SwiftString character) {
+    const std::string text = swift_string_to_utf8(character);
+    return text == " " || text == "\n" || text == "\t" || text == "\r";
+}
+
+SWIFTCC SwiftString type_name(void* type, bool) {
+    const char* name = foreign_type_name(type);
+    return swift_string_from_utf8(name != nullptr ? name : "Type");
+}
+
 void* get_object_type(void* object) { return *static_cast<void**>(object); }
 
 constexpr size_t kClassSuperOffset = 8;
@@ -622,6 +700,17 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss11AnyHashableV13_rawHashValue4seedS2i_tF", reinterpret_cast<void*>(any_hashable_raw_hash)},
         {"$ss11AnyHashableV2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(any_hashable_equal)},
         {"$ss22_minimumMergeRunLengthyS2iF", reinterpret_cast<void*>(minimum_merge_run_length)},
+        {"swift_dynamicCast", reinterpret_cast<void*>(swift_cast)},
+        {"$ss10_HashTableV11startBucketAB0D0Vvg", reinterpret_cast<void*>(hash_table_start_bucket)},
+        {"$ss10_HashTableV12previousHole6beforeAB6BucketVAF_tF", reinterpret_cast<void*>(hash_table_previous_hole)},
+        {"$sSS5index_8offsetBy07limitedC0SS5IndexVSgAE_SiAEtF", reinterpret_cast<void*>(string_index_offset_limited)},
+        {"$sSS6remove2atSJSS5IndexV_tF", reinterpret_cast<void*>(string_remove_at)},
+        {"$sSS14removeSubrangeyySnySS5IndexVGF", reinterpret_cast<void*>(string_remove_subrange)},
+        {"$sSs5index5afterSS5IndexVAD_tF", reinterpret_cast<void*>(substring_index_after)},
+        {"$sSsySJSS5IndexVcig", reinterpret_cast<void*>(substring_subscript)},
+        {"$sSs8UTF8ViewV8distance4from2toSiSS5IndexV_AGtF", reinterpret_cast<void*>(substring_utf8_distance)},
+        {"$sSJ12isWhitespaceSbvg", reinterpret_cast<void*>(character_is_whitespace)},
+        {"$ss9_typeName_9qualifiedSSypXp_SbtF", reinterpret_cast<void*>(type_name)},
         {"swift_getObjectType", reinterpret_cast<void*>(get_object_type)},
         {"swift_dynamicCastObjCClass", reinterpret_cast<void*>(dynamic_cast_objc_class)},
         {"swift_arrayDestroy", reinterpret_cast<void*>(array_destroy)},
@@ -631,6 +720,7 @@ void* stdlib_symbol(std::string_view name) {
         {"swift_getEnumTagSinglePayloadGeneric", reinterpret_cast<void*>(get_enum_tag_single_payload_generic)},
         {"swift_storeEnumTagSinglePayloadGeneric", reinterpret_cast<void*>(store_enum_tag_single_payload_generic)},
         {"swift_getKeyPath", reinterpret_cast<void*>(key_path_create)},
+        {"swift_modifyAtReferenceWritableKeyPath", reinterpret_cast<void*>(key_path_begin_modify)},
         {"swift_getAtKeyPath", reinterpret_cast<void*>(get_at_key_path)},
         {"swift_willThrow", reinterpret_cast<void*>(swift_will_throw)},
         {"swift_deletedMethodError", reinterpret_cast<void*>(deleted_method_error)},

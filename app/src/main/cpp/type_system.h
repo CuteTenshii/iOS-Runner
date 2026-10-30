@@ -40,3 +40,9 @@ void* array_element_type(const void* metadata);
 
 // Metadata of Optional<T>.
 void* optional_metadata(void* payload);
+
+// Metadata for a plain retained object reference, as stored in an Any.
+void* any_object_metadata();
+
+// swift_dynamicCast: `as?` between Any, its contained types and Optional.
+bool swift_cast(void* destination, void* source, void* source_type, void* target_type, size_t flags);

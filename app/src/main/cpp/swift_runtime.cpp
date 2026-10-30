@@ -370,10 +370,10 @@ const ValueWitnessTable kBridgeObjectWitnesses = reference_witnesses<bridge_reta
 
 constexpr size_t kEmptyCollectionWords = 16;
 
-// Shared empty collections: count 0, immortal, with the all-ones bitmap word Dictionary and Set expect.
+// Shared empty collections: one bucket, marked empty by bit 0 of the bitmap; the other bits end every probe.
 uint64_t g_empty_array[kEmptyCollectionWords] = {0, kImmortal};
-uint64_t g_empty_dictionary[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 0, 0, ~0ULL};
-uint64_t g_empty_set[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 0, ~0ULL};
+uint64_t g_empty_dictionary[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 1, 1, ~1ULL};
+uint64_t g_empty_set[kEmptyCollectionWords] = {0, kImmortal, 0, 0, 0, 0, 1, ~1ULL};
 
 // Marker addresses: the guest and rt_app_main compare them, and nothing reads through them.
 char g_app_init_requirement;

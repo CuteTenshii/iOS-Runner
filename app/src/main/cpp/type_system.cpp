@@ -1567,9 +1567,9 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_updateClassMetadata2") return reinterpret_cast<void*>(rt_updateClassMetadata2);
     if (name.size() > 3 && name.substr(0, 2) == "$s" && name.back() == 'N') {
         const std::lock_guard guard(g_types_lock);
-        // Unlike nominal types, this symbol names the full metadata, one word before its address point.
+        // Unlike nominal types, these two symbols name the full metadata, one word before its address point.
         if (name == "$sytN") return reinterpret_cast<char*>(pod_type("yt", 0)) - sizeof(void*);
-        if (name == "$sypN") return any_type();
+        if (name == "$sypN") return reinterpret_cast<char*>(any_type()) - sizeof(void*);
         if (name == "$sSSN" || name == "$sSS8UTF8ViewVN" || name == "$ss11_StringGutsVN" || name == "$ss26DefaultStringInterpolationVN") return string_type();
         if (name == "$sSiN") return pod_type("Si", 8);
         if (name == "$sSbN") return named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254);
@@ -1670,4 +1670,68 @@ void* array_element_type(const void* metadata) {
 void* optional_metadata(void* payload) {
     const std::lock_guard guard(g_types_lock);
     return optional_of(static_cast<Metadata*>(payload));
+}
+
+void* any_object_metadata() {
+    const std::lock_guard guard(g_types_lock);
+    return native_type();
+}
+
+namespace {
+
+constexpr size_t kCastUnconditional = 1;
+constexpr size_t kCastTakeOnSuccess = 2;
+constexpr size_t kCastDestroyOnFailure = 4;
+constexpr size_t kAnyTypeWord = 3;
+
+}  // namespace
+
+bool swift_cast(void* destination, void* source, void* source_type, void* target_type, size_t flags) {
+    const auto* source_metadata = static_cast<Metadata*>(source_type);
+    void* value = source;
+    void* contained = source_type;
+    // Open an Any: its value sits inline, or in a box for large types.
+    if (source_metadata->kind == kKindExistential && layout_of(source_type)->kind == LayoutKind::OpaqueExistential) {
+        auto** words = static_cast<void**>(source);
+        contained = words[kAnyTypeWord];
+        if (contained == nullptr) goto fail;
+        if (witnesses_of(contained)->flags & kFlagNonInline) {
+            const size_t mask = witnesses_of(contained)->flags & 0xff;
+            value = static_cast<char*>(words[0]) + ((sizeof(HeapObject) + mask) & ~mask);
+        }
+    }
+    // An Optional target holds the value with no case to store, when it uses spare bits.
+    if (static_cast<Metadata*>(target_type)->kind == kKindOptional) {
+        Metadata* payload = layout_of(target_type)->payload;
+        if (payload == contained) {
+            witnesses_of(payload)->initialize_with_copy(destination, value, payload);
+            witnesses_of(payload)->store_enum_tag_single_payload(destination, 0, 1, payload);
+            if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+            return true;
+        }
+    }
+    if (contained == target_type) {
+        witnesses_of(target_type)->initialize_with_copy(destination, value, target_type);
+        if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+        return true;
+    }
+    if (static_cast<Metadata*>(target_type)->kind == kKindExistential && layout_of(target_type)->kind == LayoutKind::OpaqueExistential && witnesses_of(target_type)->size == 4 * kPointerSize) {
+        auto** words = static_cast<void**>(destination);
+        memset(words, 0, 4 * kPointerSize);
+        if (witnesses_of(contained)->flags & kFlagNonInline) {
+            engine_log("STOP: cast of a large value into Any");
+            abort();
+        }
+        witnesses_of(contained)->initialize_with_copy(destination, value, contained);
+        words[kAnyTypeWord] = contained;
+        if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+        return true;
+    }
+fail:
+    if (flags & kCastUnconditional) {
+        engine_log("STOP: an unconditional cast failed");
+        abort();
+    }
+    if (flags & kCastDestroyOnFailure) witnesses_of(source_type)->destroy(source, source_type);
+    return false;
 }

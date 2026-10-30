@@ -9,3 +9,11 @@ void* key_path_create(const void* pattern, const void* arguments);
 
 // The type of the value this key path reads, as recorded in its pattern.
 void* key_path_value_type(const void* key_path);
+
+struct KeyPathModification {
+    const void* resume;
+    void* value;
+};
+
+// swift_modifyAtReferenceWritableKeyPath: yields a temporary that resuming writes back.
+__attribute__((swiftcall)) KeyPathModification key_path_begin_modify(void** buffer, void* root, const void* key_path);

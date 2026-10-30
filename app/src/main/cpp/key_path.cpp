@@ -262,3 +262,36 @@ void* key_path_value_type(const void* key_path) {
     const auto target = reinterpret_cast<uintptr_t>(relative_target(path->pattern + kPatternValueTypeOffset));
     return resolve_mangled_type(reinterpret_cast<const char*>(target & ~static_cast<uintptr_t>(1)), static_cast<void* const*>(path->arguments));
 }
+
+namespace {
+
+// What swift_modifyAtReferenceWritableKeyPath keeps between yielding the value and being resumed.
+struct ModifyState {
+    const void* key_path;
+    void* root;
+    void* value;
+    void* type;
+};
+
+__attribute__((swiftcall)) void finish_modify(void** buffer, bool) {
+    auto* state = static_cast<ModifyState*>(*buffer);
+    key_path_set(state->key_path, state->root, state->value, state->type);
+    witnesses_of(state->type)->destroy(state->value, state->type);
+    free(state->value);
+    free(state);
+}
+
+constexpr size_t kWitnessSizeOffset = 0x40;
+
+}  // namespace
+
+__attribute__((swiftcall)) KeyPathModification key_path_begin_modify(void** buffer, void* root, const void* key_path) {
+    void* type = key_path_value_type(key_path);
+    size_t size;
+    memcpy(&size, static_cast<const char*>(static_cast<void**>(type)[-1]) + kWitnessSizeOffset, sizeof size);
+    auto* state = static_cast<ModifyState*>(calloc(1, sizeof(ModifyState)));
+    *state = {key_path, root, calloc(1, size == 0 ? 1 : size), type};
+    key_path_get(key_path, root, state->value, type);
+    *buffer = state;
+    return {reinterpret_cast<const void*>(finish_modify), state->value};
+}

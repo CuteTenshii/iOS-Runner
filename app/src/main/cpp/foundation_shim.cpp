@@ -47,6 +47,11 @@ struct NativeObject {
     uint64_t references;
 };
 
+struct AnyValue {
+    uint64_t buffer[3];
+    void* type;
+};
+
 struct NSStringObject {
     NativeObject header;
     std::string* text;
@@ -137,39 +142,85 @@ void* defaults_standard(void*, const char*) {
     return singleton;
 }
 
-void* defaults_string_for_key(void*, const char*, void* key) {
-    const auto found = defaults().values.find(nsstring_text(key));
-    return found == defaults().values.end() ? nullptr : new_nsstring(found->second);
+// Stored values carry their type in a one-letter prefix, so objects come back as what was saved.
+constexpr char kStoredString = 's';
+constexpr char kStoredBool = 'b';
+constexpr char kStoredInteger = 'i';
+
+struct NSNumberObject {
+    NativeObject header;
+    int64_t value;
+    bool is_bool;
+};
+
+void* g_nsnumber_class = nullptr;
+
+void* new_nsnumber(int64_t value, bool is_bool) {
+    auto* number = static_cast<NSNumberObject*>(calloc(1, sizeof(NSNumberObject)));
+    number->header.isa = g_nsnumber_class;
+    number->header.references = 1;
+    number->value = value;
+    number->is_bool = is_bool;
+    return number;
 }
 
-void* defaults_object_for_key(void* self, const char* selector, void* key) { return defaults_string_for_key(self, selector, key); }
+const std::string* stored_value(void* key) {
+    const auto found = defaults().values.find(nsstring_text(key));
+    return found == defaults().values.end() || found->second.empty() ? nullptr : &found->second;
+}
+
+void* defaults_string_for_key(void*, const char*, void* key) {
+    const auto* stored = stored_value(key);
+    return stored == nullptr || (*stored)[0] != kStoredString ? nullptr : new_nsstring(stored->substr(1));
+}
+
+void* defaults_object_for_key(void*, const char*, void* key) {
+    const auto* stored = stored_value(key);
+    if (stored == nullptr) return nullptr;
+    const std::string body = stored->substr(1);
+    switch ((*stored)[0]) {
+        case kStoredBool: return new_nsnumber(body == "1", true);
+        case kStoredInteger: return new_nsnumber(strtoll(body.c_str(), nullptr, 10), false);
+        default: return new_nsstring(body);
+    }
+}
 
 // Arrays are not persisted yet, so a missing value is the only answer this can give truthfully.
 void* defaults_string_array_for_key(void*, const char*, void*) { return nullptr; }
 
 bool defaults_bool_for_key(void*, const char*, void* key) {
-    const auto found = defaults().values.find(nsstring_text(key));
-    return found != defaults().values.end() && (found->second == "1" || found->second == "true");
+    const auto* stored = stored_value(key);
+    return stored != nullptr && stored->substr(1) == "1";
 }
 
 int64_t defaults_integer_for_key(void*, const char*, void* key) {
-    const auto found = defaults().values.find(nsstring_text(key));
-    return found == defaults().values.end() ? 0 : strtoll(found->second.c_str(), nullptr, 10);
+    const auto* stored = stored_value(key);
+    return stored == nullptr ? 0 : strtoll(stored->c_str() + 1, nullptr, 10);
 }
 
 void defaults_set_bool(void*, const char*, bool value, void* key) {
-    defaults().values[nsstring_text(key)] = value ? "1" : "0";
+    defaults().values[nsstring_text(key)] = std::string(1, kStoredBool) + (value ? "1" : "0");
     defaults().save();
 }
 
 void defaults_set_integer(void*, const char*, int64_t value, void* key) {
-    defaults().values[nsstring_text(key)] = std::to_string(value);
+    defaults().values[nsstring_text(key)] = kStoredInteger + std::to_string(value);
     defaults().save();
 }
 
 void defaults_set_object(void*, const char*, void* value, void* key) {
-    if (value == nullptr) defaults().values.erase(nsstring_text(key));
-    else defaults().values[nsstring_text(key)] = nsstring_text(value);
+    const void* isa = value != nullptr ? static_cast<NativeObject*>(value)->isa : nullptr;
+    if (value == nullptr) {
+        defaults().values.erase(nsstring_text(key));
+    } else if (isa == g_nsstring_class) {
+        defaults().values[nsstring_text(key)] = kStoredString + nsstring_text(value);
+    } else if (isa == g_nsnumber_class) {
+        const auto* number = static_cast<NSNumberObject*>(value);
+        defaults().values[nsstring_text(key)] = (number->is_bool ? kStoredBool : kStoredInteger) + std::to_string(number->value);
+    } else {
+        // Collections are not persisted yet; the app simply finds no saved value next launch.
+        engine_log("DEFAULTS: not saving a collection for %s", nsstring_text(key).c_str());
+    }
     defaults().save();
 }
 
@@ -778,6 +829,30 @@ __asm__(
 
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
 
+// Puts an Objective-C object into an Any as its Swift value, as the runtime's bridging does.
+SWIFTCC void bridge_any_object_to_any(__attribute__((swift_indirect_result)) AnyValue* out, void* object) {
+    memset(out, 0, sizeof *out);
+    const void* isa = object != nullptr ? static_cast<NativeObject*>(object)->isa : nullptr;
+    if (isa == g_nsstring_class) {
+        const SwiftString text = swift_string_from_utf8(nsstring_text(object));
+        memcpy(out->buffer, &text, sizeof text);
+        out->type = type_system_symbol("$sSSN");
+    } else if (isa == g_nsnumber_class) {
+        const auto* number = static_cast<NSNumberObject*>(object);
+        if (number->is_bool) {
+            const bool flag = number->value != 0;
+            memcpy(out->buffer, &flag, sizeof flag);
+            out->type = type_system_symbol("$sSbN");
+        } else {
+            memcpy(out->buffer, &number->value, sizeof number->value);
+            out->type = type_system_symbol("$sSiN");
+        }
+    } else {
+        out->buffer[0] = reinterpret_cast<uint64_t>(object);
+        out->type = type_system_symbol("$sBoWV") == nullptr ? nullptr : any_object_metadata();
+    }
+}
+
 void foundation_register_classes() {
     g_url_session_data_record.context_size = kUrlSessionContextBytes;
     g_url_session_data_record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(rt_url_session_data) - reinterpret_cast<intptr_t>(&g_url_session_data_record));
@@ -818,6 +893,7 @@ void foundation_register_classes() {
     objc_register_method("+[NSBundle bundleForClass:]", reinterpret_cast<const void*>(bundle_for_class));
     objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value));
     g_nsurl_class = objc_native_class("NSURL", destroy_nsstring);
+    g_nsnumber_class = objc_native_class("NSNumber", free);
     objc_register_method("-[NSFileManager createDirectoryAtURL:withIntermediateDirectories:attributes:error:]", reinterpret_cast<const void*>(file_manager_create_directory));
     objc_register_method("+[NSFileManager defaultManager]", reinterpret_cast<const void*>(file_manager_default));
     objc_register_method("-[NSFileManager fileExistsAtPath:]", reinterpret_cast<const void*>(file_exists_at_path));
@@ -892,6 +968,7 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation4DateV11FormatStyleV0bD0V11abbreviatedAGvgZ", reinterpret_cast<void*>(date_style_word)},
         {"$s10Foundation4DateV11FormatStyleV04TimeD0V9shortenedAGvgZ", reinterpret_cast<void*>(date_style_word)},
         {"$s10Foundation4DateV9formatted4date4timeSSAC11FormatStyleV0bG0V_AH04TimeG0VtF", reinterpret_cast<void*>(date_formatted)},
+        {"$ss018_bridgeAnyObjectToB0yypyXlSgF", reinterpret_cast<void*>(bridge_any_object_to_any)},
         {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
         {"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF", reinterpret_cast<void*>(string_bridge_to_objc)},
         {"$sSS10FoundationE36_unconditionallyBridgeFromObjectiveCySSSo8NSStringCSgFZ", reinterpret_cast<void*>(string_bridge_from_objc)},
