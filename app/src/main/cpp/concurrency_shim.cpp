@@ -224,13 +224,13 @@ __asm__(
     "  ldr x20, [x0, #24]\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
-    // x22 is the finished task's own context, whose parent word holds the state; a thrown error arrives in x21.
+    // x22 is the finished task's own context, whose parent word holds the state; a thrown error arrives in x20.
     ".globl rt_async_let_task_finished\n"
     "rt_async_let_task_finished:\n"
     "  stp x29, x30, [sp, #-16]!\n"
     "  mov x29, sp\n"
     "  ldr x0, [x22]\n"
-    "  mov x1, x21\n"
+    "  mov x1, x20\n"
     "  bl rt_async_let_note_finished\n"
     "  ldp x29, x30, [sp], #16\n"
     "  ret\n"
