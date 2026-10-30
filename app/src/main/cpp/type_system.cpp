@@ -1132,14 +1132,26 @@ private:
 
     void substitution() {
         for (;;) {
-            uint64_t repeat = 1;
-            if (cursor_ < end_ && *cursor_ >= '0' && *cursor_ <= '9') repeat = read_natural();
+            bool has_count = false;
+            uint64_t count = 0;
+            if (cursor_ < end_ && *cursor_ >= '0' && *cursor_ <= '9') {
+                count = read_natural();
+                has_count = true;
+            }
             if (cursor_ >= end_) { fail("truncated substitution"); return; }
             const char letter = *cursor_++;
+            if (letter == '_') {
+                // Indexes past the alphabet: `A_` is 26, `A<n>_` is n + 27.
+                const uint64_t index = has_count ? count + 27 : 26;
+                if (index >= substitutions_.size()) { fail("substitution out of range"); return; }
+                stack_.push_back(substitutions_[index]);
+                return;
+            }
             const bool last = letter >= 'A' && letter <= 'Z';
+            if (!last && !(letter >= 'a' && letter <= 'z')) { fail("malformed substitution"); return; }
             const uint64_t index = static_cast<uint64_t>(last ? letter - 'A' : letter - 'a');
             if (index >= substitutions_.size()) { fail("substitution out of range"); return; }
-            for (uint64_t i = 0; i < repeat; ++i) stack_.push_back(substitutions_[index]);
+            for (uint64_t i = 0; i < (has_count ? count : 1); ++i) stack_.push_back(substitutions_[index]);
             if (last) return;
         }
     }
@@ -1184,7 +1196,7 @@ extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t leng
     g_current_name = outer_name;
     g_current_length = outer_length;
     if (result == nullptr) {
-        engine_log("STOP: cannot resolve type \"%s\": %s", printable(name, length).c_str(), parser.failure().c_str());
+        engine_log("STOP: cannot resolve type: %s, in \"%s\"", parser.failure().c_str(), printable(name, length).c_str());
         abort();
     }
     return result;

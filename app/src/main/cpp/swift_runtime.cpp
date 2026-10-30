@@ -204,6 +204,41 @@ void rt_once(intptr_t* predicate, void (*function)(void*), void* context) {
     pthread_mutex_unlock(&lock);
 }
 
+constexpr size_t kOpaqueHeaderBytes = 8;
+constexpr size_t kGenericHeaderBytes = 8;
+constexpr size_t kGenericRequirementBytes = 12;
+constexpr uint32_t kFlagIsGeneric = 0x80;
+constexpr uint8_t kMarkerAccessFunction = 0xff;
+constexpr uint8_t kSymbolicAccessFunction = 0x09;
+
+// An opaque type's descriptor ends with accessors for its underlying types and their conformances.
+void* rt_get_opaque_conformance(void* const* arguments, const char* descriptor, size_t index) {
+    if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(descriptor)) != nullptr) {
+        return rt_swift_getWitnessTable(descriptor, const_cast<char*>(descriptor), nullptr);
+    }
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    const char* trailing = descriptor + kOpaqueHeaderBytes;
+    if (flags & kFlagIsGeneric) {
+        uint16_t params, requirements;
+        memcpy(&params, trailing, sizeof params);
+        memcpy(&requirements, trailing + sizeof params, sizeof requirements);
+        trailing += kGenericHeaderBytes + ((params + 3u) & ~3u) + requirements * kGenericRequirementBytes;
+    }
+    const char* entry = trailing + index * sizeof(int32_t);
+    int32_t offset;
+    memcpy(&offset, entry, sizeof offset);
+    // Each entry is a mangled reference to an accessor: 0xFF, 0x09, then a relative offset.
+    const char* name = entry + (offset & ~1);
+    if (static_cast<uint8_t>(name[0]) != kMarkerAccessFunction || static_cast<uint8_t>(name[1]) != kSymbolicAccessFunction) {
+        engine_log("STOP: unsupported opaque type conformance entry");
+        abort();
+    }
+    int32_t function_offset;
+    memcpy(&function_offset, name + 2, sizeof function_offset);
+    return reinterpret_cast<void* (*)(void* const*)>(const_cast<char*>(name + 2 + function_offset))(arguments);
+}
+
 void rt_dispatch_once(intptr_t* predicate, void* context, void (*function)(void*)) { rt_once(predicate, function, context); }
 
 void* rt_identity(void* value) { return value; }
@@ -559,6 +594,7 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_slowAlloc", +[](size_t size, size_t) { return malloc(size); }),
         SYM("swift_slowDealloc", +[](void* pointer, size_t, size_t) { free(pointer); }),
         SYM("swift_getWitnessTable", rt_swift_getWitnessTable),
+        SYM("swift_getOpaqueTypeConformance2", rt_get_opaque_conformance),
         SYM("swift_once", rt_once),
         SYM("dispatch_once_f", rt_dispatch_once),
         SYM("objc_opt_self", rt_identity),
