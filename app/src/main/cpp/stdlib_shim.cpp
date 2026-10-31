@@ -228,6 +228,8 @@ SWIFTCC void hasher_seed(SWIFT_OUT HasherState* out, int64_t seed) {
 }
 
 SWIFTCC void hasher_combine_word(uint64_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_uint16(uint16_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_uint32(uint32_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
 SWIFTCC void hasher_combine_byte(uint8_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
 
 SWIFTCC int64_t hasher_finalize(SWIFT_SELF HasherState* self) {
@@ -245,6 +247,10 @@ SWIFTCC int64_t hasher_hash_seed_word(int64_t seed, uint64_t value) {
     hasher_combine_word(value, &state);
     return hasher_finalize(&state);
 }
+
+// NSObject's default `hash` is the identity, and no shim overrides it.
+SWIFTCC void nsobject_hash_into(HasherState* hasher, SWIFT_SELF void* self) { hasher_combine_word(reinterpret_cast<uint64_t>(self), hasher); }
+SWIFTCC int64_t nsobject_raw_hash_value(int64_t seed, SWIFT_SELF void* self) { return hasher_hash_seed_word(seed, reinterpret_cast<uint64_t>(self)); }
 
 SWIFTCC void string_hash_into(HasherState* hasher, SwiftString value) {
     const std::string text = swift_string_to_utf8(value);
@@ -1057,6 +1063,14 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
+        // Signposts only feed Instruments: the ID stays null and the calls vanish.
+        {"$sSo18os_signpost_type_ta0A0E5eventABvgZ", reinterpret_cast<void*>(log_type_getter<0x00>)},
+        {"$sSo18os_signpost_type_ta0A0E5beginABvgZ", reinterpret_cast<void*>(log_type_getter<0x01>)},
+        {"$sSo18os_signpost_type_ta0A0E3endABvgZ", reinterpret_cast<void*>(log_type_getter<0x02>)},
+        {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
+        {"$s2os12OSSignpostIDV3log6objectACSo03OS_a1_D0C_yXltcfC", reinterpret_cast<void*>(+[](void*, void*) -> uint64_t { return 0; })},
+        {"$s2os0A9_signpost_3dso3log4name0B2IDySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VtF", reinterpret_cast<void*>(+[] {})},
+        {"$s2os0A9_signpost_3dso3log4name0B2ID__ySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VALs7CVarArg_pdtF", reinterpret_cast<void*>(+[] {})},
         {"$s2os6LoggerV9subsystem8categoryACSS_SStcfC", reinterpret_cast<void*>(logger_init)},
         {"$s2os6LoggerV9logObjectSo03OS_a1_C0Cvg", reinterpret_cast<void*>(logger_object)},
         {"$sSo13os_log_type_ta0A0E5errorABvgZ", reinterpret_cast<void*>(log_type_getter<0x10>)},
@@ -1155,8 +1169,15 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss18_DictionaryStorageC4copy8originalAByxq_Gs05__RawaB0C_tFZ", reinterpret_cast<void*>(dictionary_storage_copy)},
         {"$ss18_DictionaryStorageC6resize8original8capacity4moveAByxq_Gs05__RawaB0C_SiSbtFZ", reinterpret_cast<void*>(dictionary_storage_resize)},
         {"$ss6HasherV5_seedABSi_tcfC", reinterpret_cast<void*>(hasher_seed)},
+        {"$sSo8NSObjectC10ObjectiveCE2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(+[](void* left, void* right) { return left == right; })},
+        {"$sSo8NSObjectC10ObjectiveCE4hash4intoys6HasherVz_tF", reinterpret_cast<void*>(nsobject_hash_into)},
+        {"$sSo8NSObjectC10ObjectiveCE13_rawHashValue4seedS2i_tF", reinterpret_cast<void*>(nsobject_raw_hash_value)},
+        {"$sSO9hashValueSivg", reinterpret_cast<void*>(+[](uint64_t identifier) -> uint64_t { return identifier >> 4; })},
         {"$ss6HasherV8_combineyySuF", reinterpret_cast<void*>(hasher_combine_word)},
         {"$ss6HasherV8_combineyys5UInt8VF", reinterpret_cast<void*>(hasher_combine_byte)},
+        {"$ss6HasherV8_combineyys6UInt16VF", reinterpret_cast<void*>(hasher_combine_uint16)},
+        {"$ss6HasherV8_combineyys6UInt32VF", reinterpret_cast<void*>(hasher_combine_uint32)},
+        {"$ss6HasherV8_combineyys6UInt64VF", reinterpret_cast<void*>(hasher_combine_word)},
         {"$ss6HasherV9_finalizeSiyF", reinterpret_cast<void*>(hasher_finalize)},
         {"$ss6HasherV5_hash4seed_S2i_s6UInt64VtFZ", reinterpret_cast<void*>(hasher_hash_seed_word)},
         {"$sSS4hash4intoys6HasherVz_tF", reinterpret_cast<void*>(string_hash_into)},

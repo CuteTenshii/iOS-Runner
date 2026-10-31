@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -2507,6 +2508,7 @@ struct DataTask {
     std::string* headers;
     std::string* body;
     void* completion;
+    void* response;
 };
 
 void* new_data_task(std::string url, std::string method, std::string headers, std::string body, void* completion) {
@@ -2562,6 +2564,7 @@ void* session_task_request_delegate(void*, const char*, void* request) { return 
 void run_data_task(void* raw) {
     auto* task = static_cast<DataTask*>(raw);
     const AsyncDataResult result = perform_request(*task->url, *task->method, *task->headers, *task->body);
+    task->response = result.response;
     if (task->completion == nullptr) {
         run_delegate_task(task, result);
         return;
@@ -2580,6 +2583,7 @@ int64_t http_response_expected_length(void*, const char*) { return -1; }
 
 void session_task_resume(void* self, const char*) { dispatch_enqueue(run_data_task, self); }
 void session_task_cancel(void*, const char*) {}
+void* session_task_response(void* self, const char*) { return static_cast<DataTask*>(self)->response; }
 
 SWIFTCC void date_unbridge(__attribute__((swift_indirect_result)) double* out, void* object) {
     double seconds = 0;
@@ -2665,6 +2669,24 @@ void queue_add_operation(void*, const char*, void* operation) {
     rt_swift_retain(operation);
     dispatch_enqueue(run_operation, operation);
 }
+
+void* session_delegate_queue(void*, const char*) { return framework_singleton("NSOperationQueue"); }
+
+// A guest subclass's instance has no room for the base class's state, so cancellation lives here.
+std::set<const void*>& cancelled_operations() {
+    static std::set<const void*> operations;
+    return operations;
+}
+
+void* operation_init(void* self, const char*) {
+    cancelled_operations().erase(self);
+    return self;
+}
+void operation_mark_cancelled(void* self, const char*) { cancelled_operations().insert(self); }
+bool operation_is_cancelled(void* self, const char*) { return cancelled_operations().count(self) != 0; }
+
+// Nothing observes key paths here: these calls only exist to notify observers.
+void object_key_change_ignored(void*, const char*, void*) {}
 
 struct BlockOperation {
     NativeObject header;
@@ -2886,6 +2908,7 @@ void foundation_register_classes() {
     objc_register_method("-[NSObject autorelease]", reinterpret_cast<const void*>(return_self));
     objc_register_method("-[NSUserDefaults initWithSuiteName:]", reinterpret_cast<const void*>(return_self_with_argument));
     objc_register_method("+[NSProcessInfo processInfo]", reinterpret_cast<const void*>(process_info_shared));
+    objc_register_method("-[NSProcessInfo physicalMemory]", reinterpret_cast<const void*>(+[](void*, const char*) -> uint64_t { return static_cast<uint64_t>(sysconf(_SC_PHYS_PAGES)) * static_cast<uint64_t>(sysconf(_SC_PAGESIZE)); }));
     objc_register_method("-[NSProcessInfo operatingSystemVersion]", reinterpret_cast<const void*>(process_info_version));
     objc_register_method("-[NSBundle bundleURL]", reinterpret_cast<const void*>(bundle_url));
     objc_register_method("-[NSBundle resourceURL]", reinterpret_cast<const void*>(bundle_url));
@@ -2908,6 +2931,10 @@ void foundation_register_classes() {
     objc_register_method("-[NSURLSession dataTaskWithRequest:completionHandler:]", reinterpret_cast<const void*>(session_task_request));
     objc_register_method("-[NSURLSessionDataTask resume]", reinterpret_cast<const void*>(session_task_resume));
     objc_register_method("-[NSURLSessionDataTask cancel]", reinterpret_cast<const void*>(session_task_cancel));
+    objc_register_method("-[NSURLSessionDataTask response]", reinterpret_cast<const void*>(session_task_response));
+    objc_register_method("-[NSURLSession delegateQueue]", reinterpret_cast<const void*>(session_delegate_queue));
+    objc_register_method("-[NSURLSessionDataTask setPrefersIncrementalDelivery:]", reinterpret_cast<const void*>(url_cache_set_word));
+    objc_register_method("-[NSURLSessionDataTask setPriority:]", reinterpret_cast<const void*>(url_cache_set_word));
     objc_register_method("-[NSISO8601DateFormatter setFormatOptions:]", reinterpret_cast<const void*>(formatter_ignore_word));
     objc_register_method("-[NSISO8601DateFormatter dateFromString:]", reinterpret_cast<const void*>(iso_formatter_date));
     objc_register_method("-[NSDateFormatter setDateFormat:]", reinterpret_cast<const void*>(date_formatter_set_format));
@@ -2937,6 +2964,12 @@ void foundation_register_classes() {
     objc_register_method("+[NSBlockOperation blockOperationWithBlock:]", reinterpret_cast<const void*>(block_operation_with_block));
     objc_register_method("-[NSBlockOperation start]", reinterpret_cast<const void*>(block_operation_start));
     objc_register_method("-[NSOperation setQueuePriority:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperation init]", reinterpret_cast<const void*>(operation_init));
+    objc_register_method("-[NSOperation cancel]", reinterpret_cast<const void*>(operation_mark_cancelled));
+    objc_register_method("-[NSOperation isCancelled]", reinterpret_cast<const void*>(operation_is_cancelled));
+    objc_register_method("-[NSOperationQueue setSuspended:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSObject willChangeValueForKey:]", reinterpret_cast<const void*>(object_key_change_ignored));
+    objc_register_method("-[NSObject didChangeValueForKey:]", reinterpret_cast<const void*>(object_key_change_ignored));
     objc_register_method("-[NSOperation setQualityOfService:]", reinterpret_cast<const void*>(operation_ignore_word));
     objc_register_method("-[NSLock lock]", reinterpret_cast<const void*>(lock_nothing));
     objc_register_method("-[NSLock unlock]", reinterpret_cast<const void*>(lock_nothing));

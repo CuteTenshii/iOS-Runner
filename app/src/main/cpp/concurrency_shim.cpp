@@ -716,6 +716,7 @@ void* concurrency_symbol(std::string_view name) {
     }();
     (void)registered;
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$sS2cEycfC", reinterpret_cast<void*>(+[] {})},
         {"$sScM6sharedScMvgZ", reinterpret_cast<void*>(main_actor_shared)},
         {"$sScP13userInitiatedScPvgZ", reinterpret_cast<void*>(task_priority_user_initiated)},
         {"$sScP8rawValues5UInt8Vvg", reinterpret_cast<void*>(task_priority_raw_value)},
