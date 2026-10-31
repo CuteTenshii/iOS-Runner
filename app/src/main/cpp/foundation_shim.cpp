@@ -1527,9 +1527,17 @@ void* web_view_init(void* self, const char*, double, double, double, double, voi
 void* web_view_configuration(void* self, const char*) { return web_views()[self].configuration; }
 
 // Bridged requests only need to carry their URL into loadRequest:.
+// A bridged request reads as its URL; the full request stays here for URLSession to find.
+std::unordered_map<void*, URLRequestBox*>& bridged_requests() {
+    static std::unordered_map<void*, URLRequestBox*> requests;
+    return requests;
+}
+
 SWIFTCC void* url_request_bridge_to_objc(SWIFT_CTX URLRequestBox** self) {
     auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->url));
     object->header.isa = g_nsurl_class;
+    rt_swift_retain(*self);
+    bridged_requests()[object] = *self;
     return object;
 }
 
@@ -2513,14 +2521,51 @@ void* new_data_task(std::string url, std::string method, std::string headers, st
 
 void* session_task_url(void*, const char*, void* url, void* completion) { return new_data_task(nsstring_text(url), "GET", "", "", completion); }
 
-void* session_task_request(void*, const char*, void* request, void* completion) {
-    auto** box = reinterpret_cast<URLRequestBox**>(static_cast<char*>(request) + sizeof(NativeObject));
-    return new_data_task(*(*box)->url, *(*box)->method, *(*box)->headers, *(*box)->body, completion);
+void* task_for_request(void* request, void* completion) {
+    const auto found = bridged_requests().find(request);
+    if (found == bridged_requests().end()) return new_data_task(nsstring_text(request), "GET", "", "", completion);
+    const URLRequestBox* box = found->second;
+    return new_data_task(*box->url, *box->method, *box->headers, *box->body, completion);
 }
+
+void* session_task_request(void*, const char*, void* request, void* completion) { return task_for_request(request, completion); }
+
+void disposition_handler(void*, int64_t) {}
+
+// A completion block for didReceiveResponse: the transfer has already finished, so the answer changes nothing.
+struct GlobalBlock {
+    void* isa;
+    int32_t flags, reserved;
+    void* invoke;
+    const void* descriptor;
+};
+
+constexpr int32_t kBlockGlobalFlag = 1 << 28;
+const uintptr_t kBlockDescriptor[2] = {0, sizeof(GlobalBlock)};
+GlobalBlock g_disposition_block = {nullptr, kBlockGlobalFlag, 0, reinterpret_cast<void*>(disposition_handler), kBlockDescriptor};
+
+using MessageSend = void (*)(void*, const char*, void*, void*, void*, void*);
+
+void run_delegate_task(DataTask* task, const AsyncDataResult& result) {
+    auto send = reinterpret_cast<MessageSend>(objc_runtime_symbol("objc_msgSend"));
+    void* session = framework_singleton("NSURLSession");
+    void* delegate = g_url_session_delegate;
+    if (result.response != nullptr) {
+        send(delegate, "URLSession:dataTask:didReceiveResponse:completionHandler:", session, task, result.response, &g_disposition_block);
+        send(delegate, "URLSession:dataTask:didReceiveData:", session, task, make_nsdata(data_bytes(result.data.range, result.data.storage)), nullptr);
+    }
+    send(delegate, "URLSession:task:didCompleteWithError:", session, task, result.error, nullptr);
+}
+
+void* session_task_request_delegate(void*, const char*, void* request) { return task_for_request(request, nullptr); }
 
 void run_data_task(void* raw) {
     auto* task = static_cast<DataTask*>(raw);
     const AsyncDataResult result = perform_request(*task->url, *task->method, *task->headers, *task->body);
+    if (task->completion == nullptr) {
+        run_delegate_task(task, result);
+        return;
+    }
     struct Literal {
         void* isa;
         int32_t flags, reserved;
@@ -2529,6 +2574,9 @@ void run_data_task(void* raw) {
     void* data = result.error == nullptr ? make_nsdata(data_bytes(result.data.range, result.data.storage)) : nullptr;
     static_cast<Literal*>(task->completion)->invoke(task->completion, data, result.response, result.error);
 }
+
+void session_ignore_word(void*, const char*, void*) {}
+int64_t http_response_expected_length(void*, const char*) { return -1; }
 
 void session_task_resume(void* self, const char*) { dispatch_enqueue(run_data_task, self); }
 void session_task_cancel(void*, const char*) {}
@@ -2596,6 +2644,40 @@ void* url_cache_init(void* self, const char*, uint64_t, uint64_t, void*) { retur
 void* url_cache_shared(void*, const char*) { return framework_singleton("NSURLCache"); }
 void url_cache_ignore(void*, const char*) {}
 void url_cache_set_word(void*, const char*, uint64_t) {}
+
+// Operation queues run on the guest thread, like every Dispatch queue: operations go through its run loop.
+void operation_ignore_word(void*, const char*, int64_t) {}
+
+struct Block0 {
+    void* isa;
+    int32_t flags, reserved;
+    void (*invoke)(void*);
+};
+
+void run_operation_block(void* block) { static_cast<Block0*>(block)->invoke(block); }
+void queue_add_block(void*, const char*, void* block) { dispatch_enqueue(run_operation_block, darwin_block_copy(block)); }
+
+void run_operation(void* operation) {
+    objc_send(operation, "start", nullptr);
+}
+
+void queue_add_operation(void*, const char*, void* operation) {
+    rt_swift_retain(operation);
+    dispatch_enqueue(run_operation, operation);
+}
+
+struct BlockOperation {
+    NativeObject header;
+    void* block;
+};
+
+void* block_operation_with_block(void*, const char*, void* block) {
+    auto* operation = static_cast<BlockOperation*>(objc_framework_object("NSBlockOperation"));
+    operation->block = darwin_block_copy(block);
+    return operation;
+}
+
+void block_operation_start(void* self, const char*) { run_operation_block(static_cast<BlockOperation*>(self)->block); }
 
 void* iso_formatter_date(void*, const char*, void* text) {
     double seconds = 0;
@@ -2787,6 +2869,9 @@ void foundation_register_classes() {
     objc_register_method("-[NSFileManager copyItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_copy));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtPath:error:]", reinterpret_cast<const void*>(file_manager_contents_path));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:]", reinterpret_cast<const void*>(file_manager_contents_url));
+    objc_register_method("-[NSURLSession setSessionDescription:]", reinterpret_cast<const void*>(session_ignore_word));
+    objc_register_method("-[NSURLSession dataTaskWithRequest:]", reinterpret_cast<const void*>(session_task_request_delegate));
+    objc_register_method("-[NSHTTPURLResponse expectedContentLength]", reinterpret_cast<const void*>(http_response_expected_length));
     objc_register_method("-[NSURLSession dataTaskWithURL:completionHandler:]", reinterpret_cast<const void*>(session_task_url));
     objc_register_method("-[NSURLSession dataTaskWithRequest:completionHandler:]", reinterpret_cast<const void*>(session_task_request));
     objc_register_method("-[NSURLSessionDataTask resume]", reinterpret_cast<const void*>(session_task_resume));
@@ -2811,6 +2896,16 @@ void foundation_register_classes() {
     objc_register_method("-[NSURLCache setDiskCapacity:]", reinterpret_cast<const void*>(url_cache_set_word));
     objc_register_method("-[NSURLCache setMemoryCapacity:]", reinterpret_cast<const void*>(url_cache_set_word));
     objc_register_method("-[NSURLSessionConfiguration setURLCache:]", reinterpret_cast<const void*>(url_cache_set_word));
+    objc_register_method("-[NSOperationQueue setMaxConcurrentOperationCount:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperationQueue setQualityOfService:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperationQueue setUnderlyingQueue:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperationQueue setName:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperationQueue addOperationWithBlock:]", reinterpret_cast<const void*>(queue_add_block));
+    objc_register_method("-[NSOperationQueue addOperation:]", reinterpret_cast<const void*>(queue_add_operation));
+    objc_register_method("+[NSBlockOperation blockOperationWithBlock:]", reinterpret_cast<const void*>(block_operation_with_block));
+    objc_register_method("-[NSBlockOperation start]", reinterpret_cast<const void*>(block_operation_start));
+    objc_register_method("-[NSOperation setQueuePriority:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSOperation setQualityOfService:]", reinterpret_cast<const void*>(operation_ignore_word));
     objc_register_method("+[NSURLSession sharedSession]", reinterpret_cast<const void*>(url_session_shared));
     objc_register_method("+[UIDevice currentDevice]", reinterpret_cast<const void*>(device_current));
     objc_register_method("-[UIDevice systemName]", reinterpret_cast<const void*>(device_system_name));

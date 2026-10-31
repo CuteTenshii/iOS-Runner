@@ -777,6 +777,8 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     if (symbol == "_$s8Dispatch0A4TimeVMn") return pod_type("DispatchTime", 8);
     if (symbol == "_$sSS10FoundationE8EncodingVMn") return pod_type("String.Encoding", 8);
     // Holds a continuation, which isn't reference counted; the arguments stay for resume to find its value type.
+    // A task group is a raw pointer to storage in its creator's frame.
+    if (symbol == "_$sScGMn" || symbol == "_$sScgMn") return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0, arguments);
     if (symbol == "_$sScCMn") return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0, arguments);
     // Payload-free framework enums are plain tag words; a reference's layout would read small tags as Optional.none.
     if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
@@ -1112,6 +1114,15 @@ private:
                     Node node;
                     node.tag = Node::Tag::Nominal;
                     node.nominal.foreign_symbol = "$CheckedContinuation";
+                    stack_.push_back(node);
+                    return;
+                }
+                // Task, TaskGroup, ThrowingTaskGroup, AsyncStream, AsyncThrowingStream and CancellationError.
+                if (strchr("TGgSsE", concurrency) != nullptr) {
+                    static const std::map<char, const char*> kSymbols = {{'T', "_$sScTMn"}, {'G', "_$sScGMn"}, {'g', "_$sScgMn"}, {'S', "_$sScSMn"}, {'s', "_$sScsMn"}, {'E', "_$sScEMn"}};
+                    Node node;
+                    node.tag = Node::Tag::Nominal;
+                    node.nominal.foreign_symbol = kSymbols.at(concurrency);
                     stack_.push_back(node);
                     return;
                 }
@@ -1983,6 +1994,171 @@ extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_co
     return nullptr;
 }
 
+// Generic class instantiation, per the Swift ABI: fixed metadata words, then immediate members, then extra data.
+constexpr size_t kClassNegativeSizeOffset = 24;
+constexpr size_t kClassPositiveSizeOffset = 28;
+constexpr size_t kClassImmediateMembersOffset = 32;
+constexpr size_t kClassSuperclassTypeOffset = 20;
+constexpr size_t kPatternDestroyOffset = 12;
+constexpr size_t kPatternIvarDestroyerOffset = 16;
+constexpr size_t kPatternClassFlagsOffset = 20;
+constexpr size_t kPatternRoOffset = 24;
+constexpr size_t kPatternMetaclassOffset = 26;
+constexpr size_t kPatternMetaclassRoOffset = 28;
+constexpr size_t kClassPatternTrailerOffset = 32;
+constexpr uint32_t kPatternHasImmediateMembers = 1u << 31;
+constexpr size_t kPartialPatternBytes = 8;
+constexpr size_t kClassFixedWords = 10;
+constexpr size_t kClassFlagsWord = 5;
+constexpr size_t kClassDataWord = 4;
+constexpr size_t kClassDescriptionWord = 8;
+constexpr size_t kClassIvarDestroyerWord = 9;
+constexpr size_t kSwiftClassDataBits = 3;
+
+void copy_partial_pattern(void** target, const char* partial) {
+    uint16_t offset, size;
+    memcpy(&offset, partial + 4, sizeof offset);
+    memcpy(&size, partial + 6, sizeof size);
+    memcpy(target + offset, relative_address(partial), size * sizeof(void*));
+}
+
+uint32_t read_u32_at(const char* at) {
+    uint32_t value;
+    memcpy(&value, at, sizeof value);
+    return value;
+}
+
+extern "C" void* rt_allocateGenericClassMetadata(const char* descriptor, void* const* arguments, const char* pattern) {
+    const uint32_t negative = read_u32_at(descriptor + kClassNegativeSizeOffset);
+    const uint32_t positive = read_u32_at(descriptor + kClassPositiveSizeOffset);
+    const uint32_t immediate = read_u32_at(descriptor + kClassImmediateMembersOffset);
+    const uint32_t flags = read_u32_at(pattern + kPatternFlagsOffset);
+    const char* trailer = pattern + kClassPatternTrailerOffset;
+    const char* immediate_pattern = nullptr;
+    if (flags & kPatternHasImmediateMembers) {
+        immediate_pattern = trailer;
+        trailer += kPartialPatternBytes;
+    }
+    const char* extra_pattern = flags & kPatternHasExtraData ? trailer : nullptr;
+    size_t extra_words = 0;
+    if (extra_pattern != nullptr) {
+        uint16_t offset, size;
+        memcpy(&offset, extra_pattern + 4, sizeof offset);
+        memcpy(&size, extra_pattern + 6, sizeof size);
+        extra_words = offset + size;
+    }
+    auto* block = static_cast<void**>(calloc(negative + positive + extra_words, sizeof(void*)));
+    void** metadata = block + negative;
+    void** extra = metadata + positive;
+    metadata[-2] = const_cast<char*>(relative_address(pattern + kPatternDestroyOffset));
+    metadata[-1] = const_cast<void*>(static_cast<const void*>(witnesses_of(native_type())));
+    metadata[kClassDescriptionWord] = const_cast<char*>(descriptor);
+    metadata[kClassIvarDestroyerWord] = const_cast<char*>(relative_address(pattern + kPatternIvarDestroyerOffset));
+    memcpy(&metadata[kClassFlagsWord], pattern + kPatternClassFlagsOffset, sizeof(uint32_t));
+    const uint32_t class_size = (negative + positive) * sizeof(void*);
+    const uint32_t address_point = negative * sizeof(void*);
+    memcpy(static_cast<void*>(metadata + 7), &class_size, sizeof class_size);
+    memcpy(reinterpret_cast<char*>(metadata + 7) + sizeof class_size, &address_point, sizeof address_point);
+    void** members = metadata + positive - immediate;
+    memcpy(members, arguments, key_argument_count(descriptor) * sizeof(void*));
+    if (immediate_pattern != nullptr) copy_partial_pattern(members, immediate_pattern);
+    if (extra_pattern != nullptr) {
+        copy_partial_pattern(extra, extra_pattern);
+        uint16_t ro, meta, meta_ro;
+        memcpy(&ro, pattern + kPatternRoOffset, sizeof ro);
+        memcpy(&meta, pattern + kPatternMetaclassOffset, sizeof meta);
+        memcpy(&meta_ro, pattern + kPatternMetaclassRoOffset, sizeof meta_ro);
+        auto* extra_bytes = reinterpret_cast<char*>(extra);
+        metadata[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra_bytes + ro) | kSwiftClassDataBits);
+        auto** metaclass = reinterpret_cast<void**>(extra_bytes + meta);
+        metaclass[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra_bytes + meta_ro) | kSwiftClassDataBits);
+        metadata[0] = metaclass;
+    }
+    return metadata;
+}
+
+constexpr uint32_t kClassHasVTable = 0x80000000;
+constexpr uint32_t kClassHasOverrides = 0x40000000;
+constexpr size_t kVTableHeaderBytes = 8;
+constexpr size_t kMethodDescriptorBytes = 8;
+constexpr size_t kMethodImplementationOffset = 4;
+constexpr size_t kOverrideEntryBytes = 12;
+
+const char* indirect_relative(const char* field) {
+    int32_t offset;
+    memcpy(&offset, field, sizeof offset);
+    if (offset == 0) return nullptr;
+    const char* target = field + (offset & ~1);
+    return offset & 1 ? *reinterpret_cast<const char* const*>(target) : target;
+}
+
+// Where a class descriptor's trailing vtable starts: after its generic requirements.
+const char* class_vtable_header(const char* descriptor) {
+    const char* cursor = descriptor + kClassGenericHeaderOffset;
+    if (read_u32_at(descriptor) & kDescriptorGeneric) {
+        uint16_t params, requirements;
+        memcpy(&params, cursor + kNumParamsOffset, sizeof params);
+        memcpy(&requirements, cursor + kNumRequirementsOffset, sizeof requirements);
+        cursor += kGenericHeaderBytes + ((params + 3u) & ~3u) + requirements * kRequirementBytes;
+    }
+    return cursor;
+}
+
+// Fills the class's own slots from its descriptor, then applies the overrides of inherited ones.
+void install_class_vtable(void** metadata, const char* descriptor) {
+    const uint32_t flags = read_u32_at(descriptor);
+    if (!(flags & (kClassHasVTable | kClassHasOverrides))) return;
+    const char* cursor = class_vtable_header(descriptor);
+    if (flags & kClassHasVTable) {
+        const uint32_t offset = read_u32_at(cursor);
+        const uint32_t size = read_u32_at(cursor + 4);
+        cursor += kVTableHeaderBytes;
+        for (uint32_t i = 0; i < size; ++i) {
+            const char* implementation = relative_address(cursor + kMethodImplementationOffset);
+            metadata[offset + i] = const_cast<char*>(implementation);
+            cursor += kMethodDescriptorBytes;
+        }
+    }
+    if (!(flags & kClassHasOverrides)) return;
+    const uint32_t count = read_u32_at(cursor);
+    cursor += sizeof(uint32_t);
+    for (uint32_t i = 0; i < count; ++i, cursor += kOverrideEntryBytes) {
+        const char* base = indirect_relative(cursor);
+        const char* method = indirect_relative(cursor + 4);
+        if (base == nullptr || method == nullptr || unresolved_symbol_at(reinterpret_cast<uintptr_t>(base)) != nullptr) continue;
+        const char* header = class_vtable_header(base);
+        const uint32_t base_offset = read_u32_at(header);
+        const size_t index = static_cast<size_t>(method - (header + kVTableHeaderBytes)) / kMethodDescriptorBytes;
+        metadata[base_offset + index] = const_cast<char*>(relative_address(cursor + 8));
+    }
+}
+
+extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_count, const void* const* field_layouts, size_t* field_offsets);
+
+// Completes a generic class: finds its superclass, inherits that class's slots, then lays out its fields.
+extern "C" void* rt_initClassMetadata2(char* metadata, size_t flags, size_t field_count, const void* const* field_layouts, size_t* field_offsets) {
+    auto** words = reinterpret_cast<void**>(metadata);
+    const auto* descriptor = static_cast<const char*>(words[kClassDescriptionWord]);
+    const uint32_t positive = read_u32_at(descriptor + kClassPositiveSizeOffset);
+    const uint32_t immediate = read_u32_at(descriptor + kClassImmediateMembersOffset);
+    void* const* arguments = words + positive - immediate;
+    if (const char* name = relative_address(descriptor + kClassSuperclassTypeOffset)) {
+        size_t length = 0;
+        while (name[length] != 0) {
+            const auto byte = static_cast<uint8_t>(name[length]);
+            length += byte >= 1 && byte <= 0x17 ? 5 : 1;
+        }
+        auto** super = static_cast<void**>(rt_getTypeByMangledNameInContext2(name, length, descriptor, arguments));
+        words[1] = super;
+        if (super != nullptr && unresolved_symbol_at(reinterpret_cast<uintptr_t>(super)) == nullptr && super[kClassDescriptionWord] != nullptr) {
+            const uint32_t super_positive = read_u32_at(static_cast<const char*>(super[kClassDescriptionWord]) + kClassPositiveSizeOffset);
+            memcpy(words + kClassFixedWords, super + kClassFixedWords, (super_positive - kClassFixedWords) * sizeof(void*));
+        }
+    }
+    install_class_vtable(words, descriptor);
+    return rt_updateClassMetadata2(metadata, flags, field_count, field_layouts, field_offsets);
+}
+
 constexpr size_t kAccessorPoolSize = 256 * 1024;
 constexpr size_t kAccessorStubSize = 32;
 
@@ -2066,6 +2242,8 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_getGenericMetadata") return reinterpret_cast<void*>(rt_getGenericMetadata);
     if (name == "swift_allocateGenericValueMetadata") return reinterpret_cast<void*>(rt_allocateGenericValueMetadata);
     if (name == "swift_getOpaqueTypeMetadata") return reinterpret_cast<void*>(rt_getOpaqueTypeMetadata);
+    if (name == "swift_allocateGenericClassMetadata") return reinterpret_cast<void*>(rt_allocateGenericClassMetadata);
+    if (name == "swift_initClassMetadata2") return reinterpret_cast<void*>(rt_initClassMetadata2);
     if (name == "swift_checkMetadataState") return reinterpret_cast<void*>(rt_checkMetadataState);
     if (name == "swift_initEnumMetadataSingleCase") return reinterpret_cast<void*>(rt_initEnumMetadataSingleCase);
     if (name == "swift_initEnumMetadataSinglePayload") return reinterpret_cast<void*>(rt_initEnumMetadataSinglePayload);

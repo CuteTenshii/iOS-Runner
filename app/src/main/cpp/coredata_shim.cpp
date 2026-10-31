@@ -196,7 +196,7 @@ SWIFTCC void* predicate_init(SwiftString format, void* arguments, SWIFT_CONTEXT 
     memcpy(&count, static_cast<char*>(arguments) + kArrayCountOffset, sizeof count);
     if (count > 0) {
         const auto* first = reinterpret_cast<const CVarArgExistential*>(static_cast<char*>(arguments) + kArrayElementsOffset);
-        *predicate->value = foundation_object_text(first->buffer[0]);
+        *predicate->value = first->type == type_system_symbol("$sSSN") ? swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(first->buffer)) : foundation_object_text(first->buffer[0]);
     }
     return predicate;
 }

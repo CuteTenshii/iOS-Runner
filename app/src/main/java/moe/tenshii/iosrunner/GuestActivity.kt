@@ -66,6 +66,7 @@ class GuestActivity : Activity() {
         showMessage(getString(R.string.status_starting))
 
         current = this
+        recordUncaughtExceptions()
         val found = AppLibrary(this).find(intent.getStringExtra(EXTRA_APP).orEmpty())
         if (found == null) {
             finish()
@@ -74,6 +75,16 @@ class GuestActivity : Activity() {
         val logPath = logFile(this).path
         val language = preferredLanguage(found.directory)
         Thread({ nativeRun(found.directory.path, found.executable, logPath, language) }, "guest-launcher").start()
+    }
+
+    // logcat can be empty on some phones, and the engine's log is where a failed run gets read.
+    private fun recordUncaughtExceptions() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        val log = java.io.File(cacheDir, "engine.log")
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching { log.appendText("HOST EXCEPTION on ${thread.name}: ${error.stackTraceToString()}\n") }
+            previous?.uncaughtException(thread, error)
+        }
     }
 
     override fun onDestroy() {

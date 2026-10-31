@@ -147,6 +147,11 @@ extern "C" void rt_checked_begin(void* result, const void* body, void* body_cont
 }
 
 AsyncFunctionPointer g_checked_continuation_record;
+AsyncFunctionPointer g_group_await_all_record;
+AsyncFunctionPointer g_group_next_record;
+
+// The iterator is just the group's one word.
+__attribute__((swiftcall)) void group_make_iterator(__attribute__((swift_indirect_result)) void** out, void*, __attribute__((swift_context)) void** self) { *out = *self; }
 
 void* cancellation_handler_add(const void*, void*) { return nullptr; }
 void cancellation_handler_remove(void*) {}
@@ -218,6 +223,7 @@ struct TaskGroupState {
     void* waiter_result = nullptr;
     const void* waiter_resume = nullptr;
     void* waiter_context = nullptr;
+    void* drain_context = nullptr;
 };
 
 // A child's context parent word points here, as an async let's does.
@@ -257,6 +263,16 @@ void task_group_destroy(void** group) { delete static_cast<TaskGroupState*>(grou
 extern "C" void rt_group_note_finished(GroupChildContext* child, void* error) {
     TaskGroupState* group = child->group;
     --group->pending;
+    // awaitAllRemainingTasks: results are dropped, and its caller continues after the last one.
+    if (group->drain_context != nullptr) {
+        if (group->pending <= 0) {
+            void* context = group->drain_context;
+            group->drain_context = nullptr;
+            ready_tasks().push_back({static_cast<AsyncContextHeader*>(context)->resume_parent, nullptr, nullptr, context, true, g_current_task});
+        }
+        delete child;
+        return;
+    }
     if (group->waiter_resume != nullptr) {
         const ReadyTask resume{group->waiter_resume, error, nullptr, group->waiter_context, true, g_current_task};
         if (error == nullptr) group_write_result(group->waiter_result, child->result, group->result_type);
@@ -269,9 +285,17 @@ extern "C" void rt_group_note_finished(GroupChildContext* child, void* error) {
 }
 
 // Returns true if there's an answer already, with any thrown error in `*error`.
+// Returns true if nothing is left to wait for.
+extern "C" bool rt_group_drain(void** group_slot, void* context) {
+    auto* group = static_cast<TaskGroupState*>(group_slot[0]);
+    group->finished.clear();
+    if (group->pending <= 0) return true;
+    group->drain_context = context;
+    return false;
+}
+
 extern "C" bool rt_group_wait(void* out, void** group_slot, const void* resume, void** context, void* caller, void** error) {
     auto* group = static_cast<TaskGroupState*>(group_slot[0]);
-    // The resume function finds the caller's frame through this context's parent word.
     context[0] = caller;
     context[1] = const_cast<void*>(resume);
     if (!group->finished.empty()) {
@@ -288,7 +312,8 @@ extern "C" bool rt_group_wait(void* out, void** group_slot, const void* resume, 
     }
     group->waiter_result = out;
     group->waiter_resume = resume;
-    group->waiter_context = context;
+    // The resume function runs in the caller's frame, so that is what x22 must hold.
+    group->waiter_context = caller;
     return false;
 }
 
@@ -531,7 +556,41 @@ __asm__(
     "  bl rt_group_note_finished\n"
     "  ldp x29, x30, [sp], #16\n"
     "  ret\n"
-    // (result, group, resume function, resume context): parks, or continues at once with the context in x22.
+    // (result, group, resume function, resume context): parks, or continues at once in the caller's frame, still in x22.
+    // awaitAllRemainingTasks, an ordinary async function: self (x20) holds the group, and x22 is its own context.
+    ".globl rt_group_await_all\n"
+    "rt_group_await_all:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  ldr x0, [x20]\n"
+    "  mov x1, x22\n"
+    "  bl rt_group_drain\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  cbz w0, 1f\n"
+    "  mov x20, xzr\n"
+    "  ldr x16, [x22, #8]\n"
+    "  br x16\n"
+    "1:\n"
+    "  ret\n"
+    // Iterator.next, also an ordinary async function: (result), with self in x20 holding the group.
+    ".globl rt_group_iterator_next\n"
+    "rt_group_iterator_next:\n"
+    "  stp x29, x30, [sp, #-48]!\n"
+    "  mov x29, sp\n"
+    "  ldr x1, [x20]\n"
+    "  ldr x2, [x22, #8]\n"
+    "  add x3, sp, #16\n"
+    "  mov x4, x22\n"
+    "  add x5, sp, #32\n"
+    "  bl rt_group_wait\n"
+    "  cbz w0, 1f\n"
+    "  ldr x20, [sp, #32]\n"
+    "  ldr x16, [x22, #8]\n"
+    "  ldp x29, x30, [sp], #48\n"
+    "  br x16\n"
+    "1:\n"
+    "  ldp x29, x30, [sp], #48\n"
+    "  ret\n"
     ".globl rt_group_wait_entry\n"
     "rt_group_wait_entry:\n"
     "  stp x29, x30, [sp, #-48]!\n"
@@ -542,7 +601,7 @@ __asm__(
     "  bl rt_group_wait\n"
     "  cbz w0, 1f\n"
     "  ldr x20, [sp, #32]\n"
-    "  ldp x16, x22, [sp, #16]\n"
+    "  ldr x16, [sp, #16]\n"
     "  ldp x29, x30, [sp], #48\n"
     "  br x16\n"
     "1:\n"
@@ -591,6 +650,8 @@ __asm__(
 
 extern "C" void rt_task_switch();
 extern "C" void rt_group_wait_entry();
+extern "C" void rt_group_await_all();
+extern "C" void rt_group_iterator_next();
 extern "C" void rt_continuation_await();
 extern "C" void rt_async_let_wait();
 extern "C" void rt_clock_sleep();
@@ -647,6 +708,10 @@ void* concurrency_symbol(std::string_view name) {
         g_clock_sleep_record.context_size = sizeof(AsyncContextHeader);
         g_checked_continuation_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_with_checked_continuation) - reinterpret_cast<const char*>(&g_checked_continuation_record.function));
         g_checked_continuation_record.context_size = sizeof(ContinuationContext);
+        g_group_await_all_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_group_await_all) - reinterpret_cast<const char*>(&g_group_await_all_record.function));
+        g_group_await_all_record.context_size = sizeof(AsyncContextHeader);
+        g_group_next_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_group_iterator_next) - reinterpret_cast<const char*>(&g_group_next_record.function));
+        g_group_next_record.context_size = sizeof(AsyncContextHeader);
         return true;
     }();
     (void)registered;
@@ -681,6 +746,13 @@ void* concurrency_symbol(std::string_view name) {
         {"$sScC6resume8throwingyq_n_tF", reinterpret_cast<void*>(checked_resume_throwing)},
         {"$ss31withCheckedThrowingContinuation9isolation8function_xScA_pSgYi_SSyScCyxs5Error_pGXEtYaKlFTu", &g_checked_continuation_record},
         {"$ss23withCheckedContinuation9isolation8function_xScA_pSgYi_SSyScCyxs5NeverOGXEtYalFTu", &g_checked_continuation_record},
+        {"$sScG22awaitAllRemainingTasksyyYaF", reinterpret_cast<void*>(rt_group_await_all)},
+        {"$sScG22awaitAllRemainingTasksyyYaFTu", &g_group_await_all_record},
+        {"$sScG22awaitAllRemainingTasks9isolationyScA_pSgYi_tYaF", reinterpret_cast<void*>(rt_group_await_all)},
+        {"$sScG22awaitAllRemainingTasks9isolationyScA_pSgYi_tYaFTu", &g_group_await_all_record},
+        {"$sScG17makeAsyncIteratorScG0C0Vyx_GyF", reinterpret_cast<void*>(group_make_iterator)},
+        {"$sScG8IteratorV4nextxSgyYaF", reinterpret_cast<void*>(rt_group_iterator_next)},
+        {"$sScG8IteratorV4nextxSgyYaFTu", &g_group_next_record},
         {"swift_taskGroup_initialize", reinterpret_cast<void*>(task_group_initialize)},
         {"swift_taskGroup_destroy", reinterpret_cast<void*>(task_group_destroy)},
         {"swift_taskGroup_wait_next_throwing", reinterpret_cast<void*>(rt_group_wait_entry)},
