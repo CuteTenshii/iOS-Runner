@@ -873,6 +873,10 @@ std::vector<void*> key_arguments_for(const char* descriptor, const std::vector<v
 Metadata* metadata_for_descriptor(const NominalReference& nominal, const std::vector<void*>& parameters) {
     if (nominal.foreign_symbol != nullptr) return foreign_nominal(nominal.foreign_symbol, parameters);
     const auto* descriptor = static_cast<const char*>(nominal.descriptor);
+    if (descriptor == nullptr) {
+        engine_log("STOP: a mangled name refers to a type with no descriptor, in \"%s\"", printable(g_current_name, g_current_length).c_str());
+        abort();
+    }
     const std::vector<void*> arguments = key_arguments_for(descriptor, parameters);
     int32_t offset;
     memcpy(&offset, descriptor + 12, sizeof offset);
@@ -2068,10 +2072,10 @@ extern "C" void* rt_allocateGenericClassMetadata(const char* descriptor, void* c
         memcpy(&ro, pattern + kPatternRoOffset, sizeof ro);
         memcpy(&meta, pattern + kPatternMetaclassOffset, sizeof meta);
         memcpy(&meta_ro, pattern + kPatternMetaclassRoOffset, sizeof meta_ro);
-        auto* extra_bytes = reinterpret_cast<char*>(extra);
-        metadata[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra_bytes + ro) | kSwiftClassDataBits);
-        auto** metaclass = reinterpret_cast<void**>(extra_bytes + meta);
-        metaclass[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra_bytes + meta_ro) | kSwiftClassDataBits);
+        // These three offsets are in words from the start of the extra data.
+        metadata[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra + ro) | kSwiftClassDataBits);
+        auto** metaclass = reinterpret_cast<void**>(extra + meta);
+        metaclass[kClassDataWord] = reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(extra + meta_ro) | kSwiftClassDataBits);
         metadata[0] = metaclass;
     }
     return metadata;

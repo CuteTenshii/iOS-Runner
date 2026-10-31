@@ -11,6 +11,7 @@ iOSRunner is an Android app (arm64 only, `minSdk` 30) that runs iOS `.ipa` files
 ./gradlew :app:testDebugUnitTest             # JVM unit tests (only the template test so far)
 ./gradlew :app:testDebugUnitTest --tests 'moe.tenshii.iosrunner.ExampleUnitTest'
 adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+tools/lint.zsh                               # clang-format and clang-tidy; --fix applies the formatting
 ```
 
 `tools/host-test.sh <ipa>` builds the engine as a static arm64 binary and runs an app under `qemu-aarch64`, with no phone. The host build poisons guest allocations with `0x5b`, and imports the engine can't resolve are printed as `UNRESOLVED:` lines. It is the fastest way to check a change to the engine, and these environment variables extend it:
@@ -36,7 +37,8 @@ On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-a
 - An import nobody implements gets a `PROT_NONE` guard address that remembers its name. Calling or reading it stops the run with `STOP: called unimplemented function` or `accessed unimplemented data`, so missing APIs show up by name. Some code also compares against these addresses to identify framework protocols and conformances, and many are harmless metadata references, so the "not implemented" count overstates what's missing.
 - `engine.cpp` owns the guest thread, crash reports and the action queue.
 - `swift_runtime.cpp` covers refcounting, witness tables and dispatch thunks. `type_system.cpp` covers metadata, the mangled-name parser and casts.
-- `stdlib_shim`, `foundation_shim`, `concurrency_shim`, `objc_runtime`, `codable_shim`, `regex_shim`, `key_path` and `swiftui_shim` implement the libraries of the same name.
+- `stdlib_shim`, `foundation_shim`, `concurrency_shim`, `objc_runtime`, `codable_shim`, `regex_shim`, `key_path`, `coredata_shim`, `combine_shim`, `dispatch_shim` and `swiftui_shim` implement the libraries of the same name.
+- `__isPlatformVersionAtLeast` answers as the app's deployment target, so apps take the paths that need no weak imports. Unknown messages to `UI*` classes log `UIKIT: ignoring` and return nil, since the host draws the interface; every other unknown message stops the run.
 - `swiftui_shim.cpp` has resilient views build `ViewNode` boxes, walks the app's view values by reflection, and emits a JSON tree. `GuestActivity` sends actions back by id, and each action re-renders the tree.
 - `concurrency_shim.cpp` runs every task on the one guest thread, from a ready queue plus sleep timers drained by the render loop.
 

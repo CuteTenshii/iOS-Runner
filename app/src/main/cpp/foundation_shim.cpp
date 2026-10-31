@@ -2679,6 +2679,38 @@ void* block_operation_with_block(void*, const char*, void* block) {
 
 void block_operation_start(void* self, const char*) { run_operation_block(static_cast<BlockOperation*>(self)->block); }
 
+// Every guest task runs on one thread, so a lock is never contended.
+void lock_nothing(void*, const char*) {}
+
+// NSCache that keeps everything: nothing here reacts to memory pressure.
+struct CacheObject {
+    NativeObject header;
+    std::unordered_map<void*, void*>* entries;
+};
+
+std::unordered_map<void*, void*>& cache_entries(void* self) {
+    auto* cache = static_cast<CacheObject*>(self);
+    if (cache->entries == nullptr) cache->entries = new std::unordered_map<void*, void*>();
+    return *cache->entries;
+}
+
+void* cache_object_for_key(void* self, const char*, void* key) {
+    auto& entries = cache_entries(self);
+    const auto found = entries.find(key);
+    return found == entries.end() ? nullptr : found->second;
+}
+
+void cache_set_object(void* self, const char*, void* value, void* key) {
+    rt_swift_retain(value);
+    rt_swift_retain(key);
+    cache_entries(self)[key] = value;
+}
+
+void cache_set_object_cost(void* self, const char* selector, void* value, void* key, uint64_t) { cache_set_object(self, selector, value, key); }
+void cache_remove_object(void* self, const char*, void* key) { cache_entries(self).erase(key); }
+void cache_remove_all(void* self, const char*) { cache_entries(self).clear(); }
+void cache_ignore_word(void*, const char*, uint64_t) {}
+
 void* iso_formatter_date(void*, const char*, void* text) {
     double seconds = 0;
     return text != nullptr && foundation_parse_iso8601(nsstring_text(text), seconds) ? new_date_object(seconds) : nullptr;
@@ -2906,6 +2938,19 @@ void foundation_register_classes() {
     objc_register_method("-[NSBlockOperation start]", reinterpret_cast<const void*>(block_operation_start));
     objc_register_method("-[NSOperation setQueuePriority:]", reinterpret_cast<const void*>(operation_ignore_word));
     objc_register_method("-[NSOperation setQualityOfService:]", reinterpret_cast<const void*>(operation_ignore_word));
+    objc_register_method("-[NSLock lock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSLock unlock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSRecursiveLock lock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSRecursiveLock unlock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSCondition lock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSCondition unlock]", reinterpret_cast<const void*>(lock_nothing));
+    objc_register_method("-[NSCache objectForKey:]", reinterpret_cast<const void*>(cache_object_for_key));
+    objc_register_method("-[NSCache setObject:forKey:]", reinterpret_cast<const void*>(cache_set_object));
+    objc_register_method("-[NSCache setObject:forKey:cost:]", reinterpret_cast<const void*>(cache_set_object_cost));
+    objc_register_method("-[NSCache removeObjectForKey:]", reinterpret_cast<const void*>(cache_remove_object));
+    objc_register_method("-[NSCache removeAllObjects]", reinterpret_cast<const void*>(cache_remove_all));
+    objc_register_method("-[NSCache setTotalCostLimit:]", reinterpret_cast<const void*>(cache_ignore_word));
+    objc_register_method("-[NSCache setCountLimit:]", reinterpret_cast<const void*>(cache_ignore_word));
     objc_register_method("+[NSURLSession sharedSession]", reinterpret_cast<const void*>(url_session_shared));
     objc_register_method("+[UIDevice currentDevice]", reinterpret_cast<const void*>(device_current));
     objc_register_method("-[UIDevice systemName]", reinterpret_cast<const void*>(device_system_name));

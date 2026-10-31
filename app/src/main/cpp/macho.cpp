@@ -361,7 +361,10 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
         void* address = resolve(lookup);
         const bool found = address != nullptr;
         uint64_t target = reinterpret_cast<uint64_t>(address);
-        if (!found && !weak) {
+        // A weak function stays null for its availability check, but a weak type can still be named in layouts.
+        const size_t name_length = strlen(name);
+        const bool weak_type = name_length > 2 && strcmp(name + name_length - 2, "Mn") == 0;
+        if (!found && (!weak || weak_type)) {
             target = guard_address(name);
             if (target == 0) {
                 error = "too many unresolved imports";

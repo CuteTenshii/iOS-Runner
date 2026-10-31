@@ -198,6 +198,30 @@ uint64_t dispatch_time_after(uint64_t when, int64_t delta) {
 void dispatch_sync_block(void*, void* block) { static_cast<BlockLiteral*>(block)->invoke(block); }
 void dispatch_ignored(void*) {}
 
+// A source is its handler. Memory pressure and signals never fire here; a timer fires once at its deadline.
+struct Source {
+    void* isa;
+    uint64_t references;
+    void* handler;
+    uint64_t deadline;
+    bool scheduled;
+};
+
+void* source_create() { return objc_framework_object("OS_dispatch_source"); }
+SWIFTCC void* make_inert_source(void*, void*, SWIFT_CONTEXT void*) { return source_create(); }
+SWIFTCC void source_set_handler(void*, void*, void* handler, void*, SWIFT_CONTEXT Source* self) { self->handler = darwin_block_copy(handler); }
+SWIFTCC void source_ignore_handler(void*, void*, void*, void*, SWIFT_CONTEXT void*) {}
+SWIFTCC void timer_schedule(const uint64_t* deadline, void*, void*, void*, SWIFT_CONTEXT Source* self) {
+    self->deadline = *deadline;
+    self->scheduled = true;
+}
+SWIFTCC void source_resume(void*, SWIFT_CONTEXT Source* self) {
+    if (!self->scheduled || self->handler == nullptr) return;
+    self->scheduled = false;
+    delayed_work().insert({static_cast<int64_t>(self->deadline), {self->handler, nullptr, nullptr}});
+}
+SWIFTCC void source_cancel(void*, SWIFT_CONTEXT Source* self) { self->scheduled = false; }
+
 const int32_t kQosClassDefault = 0;
 const int32_t kQosClassUserInitiated = 1;
 const int32_t kQosClassUtility = 2;
@@ -237,6 +261,16 @@ void* dispatch_symbol(std::string_view name) {
         symbol, reinterpret_cast<void*>(target) \
     }
     static const std::unordered_map<std::string_view, void*> table = {
+        ENTRY("$sSo18OS_dispatch_sourceC8DispatchE24makeMemoryPressureSource9eventMask5queueSo0a1_b1_C15_memorypressure_pAbCE0fG5EventV_So0a1_b1_K0CSgtFZ", make_inert_source),
+        ENTRY("$sSo18OS_dispatch_sourceC8DispatchE16makeSignalSource6signal5queueSo0a1_b1_c1_H0_ps5Int32V_So0a1_b1_I0CSgtFZ", make_inert_source),
+        ENTRY("$sSo18OS_dispatch_sourceC8DispatchE15makeTimerSource5flags5queueSo0a1_b1_C6_timer_pAbCE0F5FlagsV_So0a1_b1_I0CSgtFZ", make_inert_source),
+        ENTRY("$sSo18OS_dispatch_sourceP8DispatchE15setEventHandler3qos5flags7handleryAC0D3QoSV_AC0D13WorkItemFlagsVyyXBSgtF", source_set_handler),
+        ENTRY("$sSo18OS_dispatch_sourceP8DispatchE16setCancelHandler3qos5flags7handleryAC0D3QoSV_AC0D13WorkItemFlagsVyyXBSgtF", source_ignore_handler),
+        ENTRY("$sSo24OS_dispatch_source_timerP8DispatchE8schedule8deadline9repeating6leewayyAC0E4TimeV_AC0eJ8IntervalOAKtF", timer_schedule),
+        ENTRY("$sSo18OS_dispatch_sourceP8DispatchE6resumeyyF", source_resume),
+        ENTRY("$sSo18OS_dispatch_sourceP8DispatchE6cancelyyF", source_cancel),
+        ENTRY("$sSo18OS_dispatch_sourceC8DispatchE19MemoryPressureEventV7warningAEvgZ", immediate_indirect),
+        ENTRY("$sSo18OS_dispatch_sourceC8DispatchE19MemoryPressureEventV8criticalAEvgZ", immediate_indirect),
         ENTRY("$sSo17OS_dispatch_queueC8DispatchE4mainABvgZ", queue_main),
         ENTRY("$sSo17OS_dispatch_queueC8DispatchE6global3qosAbC0D3QoSV0G6SClassO_tFZ", queue_global),
         ENTRY("$sSo17OS_dispatch_queueC8DispatchE5label3qos10attributes20autoreleaseFrequency6targetABSS_AC0D3QoSVAbCE10AttributesVAbCE011AutoreleaseI0OABSgtcfC", queue_label_init),

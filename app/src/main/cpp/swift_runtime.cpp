@@ -504,10 +504,11 @@ DECLARE_THUNK_PAIR(x2)
 DECLARE_THUNK_PAIR(x8)
 DECLARE_THUNK_PAIR(x9)
 DECLARE_THUNK_PAIR(x10)
-    DECLARE_THUNK_PAIR(x19) DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
-        DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
+DECLARE_THUNK_PAIR(x19)
+DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
+    DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
 
-            const void* find_witness(const char* conformance, const void* requirement) {
+        const void* find_witness(const char* conformance, const void* requirement) {
     const auto witnesses = resilient_witnesses(conformance);
     for (uint32_t i = 0; i < witnesses.count; ++i) {
         const char* entry = witnesses.entries + i * 8;

@@ -1,6 +1,12 @@
 #include "symbols.h"
 
 #include <malloc.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +90,13 @@ void darwin_log_impl(...) {}
 // The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
 bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
+double darwin_absolute_time() {
+    constexpr double kSecondsFrom1970To2001 = 978307200.0;
+    timespec now{};
+    clock_gettime(CLOCK_REALTIME, &now);
+    return static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_nsec) / 1e9 - kSecondsFrom1970To2001;
+}
+
 void* darwin_dlsym(void*, const char* name) { return resolve_symbol(name); }
 
 // The runner presents itself as the app's deployment target: every app must work there, without weak imports.
@@ -118,6 +131,94 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"os_log_type_enabled", reinterpret_cast<void*>(darwin_log_type_enabled)},
         {"_os_log_impl", reinterpret_cast<void*>(darwin_log_impl)},
         {"_availability_version_check", reinterpret_cast<void*>(darwin_availability_version_check)},
+        {"acos", reinterpret_cast<void*>(static_cast<double (*)(double)>(::acos))},
+        {"asin", reinterpret_cast<void*>(static_cast<double (*)(double)>(::asin))},
+        {"atan", reinterpret_cast<void*>(static_cast<double (*)(double)>(::atan))},
+        {"acosh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::acosh))},
+        {"asinh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::asinh))},
+        {"atanh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::atanh))},
+        {"cos", reinterpret_cast<void*>(static_cast<double (*)(double)>(::cos))},
+        {"cosh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::cosh))},
+        {"sin", reinterpret_cast<void*>(static_cast<double (*)(double)>(::sin))},
+        {"sinh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::sinh))},
+        {"tan", reinterpret_cast<void*>(static_cast<double (*)(double)>(::tan))},
+        {"tanh", reinterpret_cast<void*>(static_cast<double (*)(double)>(::tanh))},
+        {"exp", reinterpret_cast<void*>(static_cast<double (*)(double)>(::exp))},
+        {"exp2", reinterpret_cast<void*>(static_cast<double (*)(double)>(::exp2))},
+        {"expm1", reinterpret_cast<void*>(static_cast<double (*)(double)>(::expm1))},
+        {"log", reinterpret_cast<void*>(static_cast<double (*)(double)>(::log))},
+        {"log10", reinterpret_cast<void*>(static_cast<double (*)(double)>(::log10))},
+        {"log1p", reinterpret_cast<void*>(static_cast<double (*)(double)>(::log1p))},
+        {"log2", reinterpret_cast<void*>(static_cast<double (*)(double)>(::log2))},
+        {"cbrt", reinterpret_cast<void*>(static_cast<double (*)(double)>(::cbrt))},
+        {"erf", reinterpret_cast<void*>(static_cast<double (*)(double)>(::erf))},
+        {"erfc", reinterpret_cast<void*>(static_cast<double (*)(double)>(::erfc))},
+        {"sqrt", reinterpret_cast<void*>(static_cast<double (*)(double)>(::sqrt))},
+        {"ceil", reinterpret_cast<void*>(static_cast<double (*)(double)>(::ceil))},
+        {"floor", reinterpret_cast<void*>(static_cast<double (*)(double)>(::floor))},
+        {"round", reinterpret_cast<void*>(static_cast<double (*)(double)>(::round))},
+        {"trunc", reinterpret_cast<void*>(static_cast<double (*)(double)>(::trunc))},
+        {"fabs", reinterpret_cast<void*>(static_cast<double (*)(double)>(::fabs))},
+        {"rint", reinterpret_cast<void*>(static_cast<double (*)(double)>(::rint))},
+        {"nearbyint", reinterpret_cast<void*>(static_cast<double (*)(double)>(::nearbyint))},
+        {"acosf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::acosf))},
+        {"asinf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::asinf))},
+        {"atanf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::atanf))},
+        {"acoshf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::acoshf))},
+        {"asinhf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::asinhf))},
+        {"atanhf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::atanhf))},
+        {"cosf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::cosf))},
+        {"coshf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::coshf))},
+        {"sinf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::sinf))},
+        {"sinhf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::sinhf))},
+        {"tanf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::tanf))},
+        {"tanhf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::tanhf))},
+        {"expf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::expf))},
+        {"exp2f", reinterpret_cast<void*>(static_cast<float (*)(float)>(::exp2f))},
+        {"expm1f", reinterpret_cast<void*>(static_cast<float (*)(float)>(::expm1f))},
+        {"logf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::logf))},
+        {"log10f", reinterpret_cast<void*>(static_cast<float (*)(float)>(::log10f))},
+        {"log1pf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::log1pf))},
+        {"log2f", reinterpret_cast<void*>(static_cast<float (*)(float)>(::log2f))},
+        {"cbrtf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::cbrtf))},
+        {"erff", reinterpret_cast<void*>(static_cast<float (*)(float)>(::erff))},
+        {"erfcf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::erfcf))},
+        {"sqrtf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::sqrtf))},
+        {"ceilf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::ceilf))},
+        {"floorf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::floorf))},
+        {"roundf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::roundf))},
+        {"truncf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::truncf))},
+        {"fabsf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::fabsf))},
+        {"rintf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::rintf))},
+        {"nearbyintf", reinterpret_cast<void*>(static_cast<float (*)(float)>(::nearbyintf))},
+        {"atan2", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::atan2))},
+        {"pow", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::pow))},
+        {"hypot", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::hypot))},
+        {"fmod", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::fmod))},
+        {"fmin", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::fmin))},
+        {"fmax", reinterpret_cast<void*>(static_cast<double (*)(double, double)>(::fmax))},
+        {"atan2f", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::atan2f))},
+        {"powf", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::powf))},
+        {"hypotf", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::hypotf))},
+        {"fmodf", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::fmodf))},
+        {"fminf", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::fminf))},
+        {"fmaxf", reinterpret_cast<void*>(static_cast<float (*)(float, float)>(::fmaxf))},
+        {"CFAbsoluteTimeGetCurrent", reinterpret_cast<void*>(darwin_absolute_time)},
+        {"arc4random", reinterpret_cast<void*>(arc4random)},
+        {"access", reinterpret_cast<void*>(access)},
+        {"chmod", reinterpret_cast<void*>(chmod)},
+        {"close", reinterpret_cast<void*>(close)},
+        {"dup", reinterpret_cast<void*>(dup)},
+        {"dup2", reinterpret_cast<void*>(dup2)},
+        {"fsync", reinterpret_cast<void*>(fsync)},
+        {"getenv", reinterpret_cast<void*>(getenv)},
+        {"getcwd", reinterpret_cast<void*>(getcwd)},
+        {"atof", reinterpret_cast<void*>(atof)},
+        {"calloc", reinterpret_cast<void*>(calloc)},
+        {"abort", reinterpret_cast<void*>(abort)},
+        {"exit", reinterpret_cast<void*>(exit)},
+        {"gettimeofday", reinterpret_cast<void*>(gettimeofday)},
+        {"clock_gettime", reinterpret_cast<void*>(clock_gettime)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
         {"__isPlatformVersionAtLeast", reinterpret_cast<void*>(platform_version_at_least)},
         {"fopen", reinterpret_cast<void*>(fopen)},
