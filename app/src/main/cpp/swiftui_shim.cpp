@@ -646,12 +646,12 @@ SWIFTCC void view_transition(SWIFT_OUT void* out, uint64_t transition, void* sel
 }
 
 SWIFTCC void view_on_appear(SWIFT_OUT void* out, const void* action, void* context, void* self_type, void*, SWIFT_CONTEXT void* self) {
-    const void* const modifier[] = {action, context, nullptr, nullptr};
+    const void* const modifier[] = {action, rt_swift_retain(context), nullptr, nullptr};
     write_modified_content(out, self, self_type, modifier, sizeof modifier);
 }
 
 SWIFTCC void view_on_disappear(SWIFT_OUT void* out, const void* action, void* context, void* self_type, void*, SWIFT_CONTEXT void* self) {
-    const void* const modifier[] = {nullptr, nullptr, action, context};
+    const void* const modifier[] = {nullptr, nullptr, action, rt_swift_retain(context)};
     write_modified_content(out, self, self_type, modifier, sizeof modifier);
 }
 
@@ -759,10 +759,15 @@ SWIFTCC void view_searchable(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* lo
     *out = node;
 }
 
-SWIFTCC void view_on_change_perform(SWIFT_OUT ViewNode** out, const void*, const void*, void*, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
-    auto* node = new_node(NodeKind::OnChange);
-    add_self_child(node, self, self_type);
-    *out = node;
+// ModifiedContent<Self, _ValueActionModifier<V>>: the watched value, then the action.
+SWIFTCC void view_on_change_perform(SWIFT_OUT char* out, void* value, const void* action, void* context, void* self_type, void* value_type, void*, void*, SWIFT_CONTEXT void* self) {
+    const auto* content = witnesses_of(self_type);
+    content->initialize_with_copy(out, self, self_type);
+    char* modifier = out + ((content->size + 7) & ~static_cast<size_t>(7));
+    const auto* watched = witnesses_of(value_type);
+    watched->initialize_with_copy(modifier, value, value_type);
+    const void* const closure[] = {action, rt_swift_retain(context)};
+    memcpy(modifier + ((watched->size + 7) & ~static_cast<size_t>(7)), closure, sizeof closure);
 }
 
 // A transition only animates a view in and out, which the tree doesn't show.
@@ -1985,8 +1990,13 @@ struct AppearanceAction {
 
 std::vector<AppearanceAction> g_pending_appear;
 
-void* g_selection_value = nullptr;
-void* g_selection_type = nullptr;
+struct ChangeAction {
+    AppearanceAction action;
+    void* value;
+    void* type;
+};
+
+std::vector<ChangeAction> g_pending_changes;
 
 bool values_equal(void* left, void* right, void* type) {
     if (type == string_metadata()) {
@@ -1994,6 +2004,35 @@ bool values_equal(void* left, void* right, void* type) {
     }
     return memcmp(left, right, witnesses_of(type)->size) == 0;
 }
+
+void* copy_of_value(const void* value, void* type) {
+    void* copy = calloc(1, witnesses_of(type)->size + 1);
+    witnesses_of(type)->initialize_with_copy(copy, const_cast<void*>(value), type);
+    return copy;
+}
+
+// `.onChange` compares against the previous render, so the first render never fires it.
+void watch_value_change(const std::string& path, char* modifier, void* modifier_type) {
+    static std::map<std::string, void*> last_values;
+    const auto fields = type_fields(modifier_type);
+    void* type = fields[0].type;
+    void* current = modifier + fields[0].offset;
+    const auto found = last_values.find(path);
+    if (found == last_values.end()) {
+        last_values[path] = copy_of_value(current, type);
+        return;
+    }
+    if (values_equal(found->second, current, type)) return;
+    witnesses_of(type)->destroy(found->second, type);
+    free(found->second);
+    found->second = copy_of_value(current, type);
+    const auto* action = reinterpret_cast<const AppearanceAction*>(modifier + fields[1].offset);
+    rt_swift_retain(action->context);
+    g_pending_changes.push_back({*action, copy_of_value(current, type), type});
+}
+
+void* g_selection_value = nullptr;
+void* g_selection_type = nullptr;
 
 std::string text_color_name(uint64_t style) {
     switch ((style & kTextColorMask) >> kTextColorShift) {
@@ -2377,6 +2416,7 @@ Nodes render(void* value, void* type, const std::string& path, int depth) {
                 const auto* action = reinterpret_cast<const AppearanceAction*>(modifier_value);
                 if (action->function != nullptr && started_tasks().insert(path + "#appear").second) g_pending_appear.push_back(*action);
             }
+            if (modifier != nullptr && strcmp(modifier, "_$s7SwiftUI20_ValueActionModifierVMn") == 0) watch_value_change(path, modifier_value, fields[1].type);
             if (const char* custom = find_conformance(fields[1].type, kViewModifierSymbol)) {
                 return render_custom_modifier(custom, modifier_value, fields[1].type, std::move(content), path, depth);
             }
@@ -2536,6 +2576,15 @@ void render_tree() {
     appeared.swap(g_pending_appear);
     for (const auto& action : appeared) {
         rt_call_witness(action.function, nullptr, action.context, nullptr, nullptr);
+        g_tree_dirty.store(true, std::memory_order_relaxed);
+    }
+    std::vector<ChangeAction> changes;
+    changes.swap(g_pending_changes);
+    for (const auto& change : changes) {
+        rt_call_witness(change.action.function, nullptr, change.action.context, change.value, nullptr);
+        rt_swift_release(change.action.context);
+        witnesses_of(change.type)->destroy(change.value, change.type);
+        free(change.value);
         g_tree_dirty.store(true, std::memory_order_relaxed);
     }
 }
