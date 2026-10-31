@@ -769,7 +769,8 @@ size_t witness_word_count(const std::string& symbol) {
 
 Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, const std::vector<void*>& arguments) {
     if (symbol == "_$ss11AnyHashableVMn") return named_type("AnyHashable", kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, 5 * kPointerSize, kPointerSize, kPointerExtraInhabitants);
-    if ((symbol == "_$s7SwiftUI19_ConditionalContentVMn" || symbol == "_$s7SwiftUI19_ConditionalContentV7StorageOMn") && arguments.size() >= 2) {
+    // Result has _ConditionalContent's shape: the larger of two payloads, then which one it holds.
+    if ((symbol == "_$s7SwiftUI19_ConditionalContentVMn" || symbol == "_$s7SwiftUI19_ConditionalContentV7StorageOMn" || symbol == "_$ss6ResultOMn") && arguments.size() >= 2) {
         return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
@@ -1347,6 +1348,20 @@ private:
             case 'S':
                 if (cursor_ >= end_) {
                     fail("truncated standard type");
+                    return;
+                }
+                // `S2S` repeats the standard type that follows the count.
+                if (*cursor_ >= '2' && *cursor_ <= '9') {
+                    const uint64_t count = read_natural();
+                    if (cursor_ >= end_) {
+                        fail("truncated standard type");
+                        return;
+                    }
+                    const char repeated = *cursor_++;
+                    for (uint64_t i = 0; i < count; ++i) {
+                        standard(repeated);
+                        if (!failure_.empty()) return;
+                    }
                     return;
                 }
                 standard(*cursor_++);

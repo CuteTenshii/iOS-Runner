@@ -95,7 +95,10 @@ std::string key_name(const ContainerBox* box, const void* key, void* key_type) {
 // A container's metadata has the key type as its first generic argument.
 void* key_type_of(const void* container_metadata) { return static_cast<void* const*>(container_metadata)[2]; }
 
-void* decoding_error(const std::string& what) { return foundation_make_error("The data couldn't be read: " + what, 4864); }
+void* decoding_error(const std::string& what) {
+    engine_log("CODABLE: %s", what.c_str());
+    return foundation_make_error("The data couldn't be read: " + what, 4864);
+}
 
 using InitFromDecoder = SWIFTCC void (*)(SWIFT_OUT void*, CoderExistential*, void*, void*, SWIFT_CTX void*, SWIFT_ERROR void**);
 using EncodeToEncoder = SWIFTCC void (*)(CoderExistential*, void*, void*, SWIFT_CTX const void*, SWIFT_ERROR void**);
@@ -106,6 +109,8 @@ constexpr size_t kWitnessStoreEnumTagOffset = 0x38;
 
 // Optional's tag goes through its payload's witness, which knows the spare bits it can use.
 void store_optional_tag(void* out, void* payload, bool none) {
+    // Compiled code reads a nil String? as all zeros, wherever the witness puts its own tag.
+    if (none) memset(out, 0, size_of(payload));
     using Store = void (*)(void*, uint32_t, uint32_t, void*);
     Store store;
     memcpy(&store, static_cast<const char*>(static_cast<void* const*>(payload)[-1]) + kWitnessStoreEnumTagOffset, sizeof store);

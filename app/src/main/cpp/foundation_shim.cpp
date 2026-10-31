@@ -2591,6 +2591,12 @@ bool scanner_scan_hex(void* self, const char*, uint64_t* out) {
     return true;
 }
 
+// The host's HTTP stack does its own caching, so a URL cache is an object nothing is ever stored in.
+void* url_cache_init(void* self, const char*, uint64_t, uint64_t, void*) { return self; }
+void* url_cache_shared(void*, const char*) { return framework_singleton("NSURLCache"); }
+void url_cache_ignore(void*, const char*) {}
+void url_cache_set_word(void*, const char*, uint64_t) {}
+
 void* iso_formatter_date(void*, const char*, void* text) {
     double seconds = 0;
     return text != nullptr && foundation_parse_iso8601(nsstring_text(text), seconds) ? new_date_object(seconds) : nullptr;
@@ -2799,6 +2805,12 @@ void foundation_register_classes() {
     objc_register_method("-[NSScanner initWithString:]", reinterpret_cast<const void*>(scanner_init));
     objc_register_method("+[NSScanner scannerWithString:]", reinterpret_cast<const void*>(scanner_with_string));
     objc_register_method("-[NSScanner scanHexLongLong:]", reinterpret_cast<const void*>(scanner_scan_hex));
+    objc_register_method("-[NSURLCache initWithMemoryCapacity:diskCapacity:diskPath:]", reinterpret_cast<const void*>(url_cache_init));
+    objc_register_method("+[NSURLCache sharedURLCache]", reinterpret_cast<const void*>(url_cache_shared));
+    objc_register_method("-[NSURLCache removeAllCachedResponses]", reinterpret_cast<const void*>(url_cache_ignore));
+    objc_register_method("-[NSURLCache setDiskCapacity:]", reinterpret_cast<const void*>(url_cache_set_word));
+    objc_register_method("-[NSURLCache setMemoryCapacity:]", reinterpret_cast<const void*>(url_cache_set_word));
+    objc_register_method("-[NSURLSessionConfiguration setURLCache:]", reinterpret_cast<const void*>(url_cache_set_word));
     objc_register_method("+[NSURLSession sharedSession]", reinterpret_cast<const void*>(url_session_shared));
     objc_register_method("+[UIDevice currentDevice]", reinterpret_cast<const void*>(device_current));
     objc_register_method("-[UIDevice systemName]", reinterpret_cast<const void*>(device_system_name));

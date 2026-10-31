@@ -709,6 +709,7 @@ std::string enum_case_name(const void* value, const void* type) {
 }
 
 constexpr size_t kValueWitnessStrideOffset = 72;
+constexpr uint64_t kCollectionAddressMask = 0x00fffffffffffff8ULL;
 
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
@@ -831,6 +832,180 @@ SWIFTCC SwiftString string_describing(const void* value, void* type) {
 
 SWIFTCC SwiftString string_from_c_string(const char* text) { return swift_string_from_utf8(text); }
 
+// os.Logger is one placeholder word: logging goes nowhere, and os_log_type_enabled already answers false.
+SWIFTCC void logger_init(SWIFT_OUT uint64_t* out) { *out = 1ULL << 63; }
+SWIFTCC uint64_t logger_object() { return 1ULL << 63; }
+template <uint8_t Level>
+SWIFTCC uint8_t log_type_getter() { return Level; }
+
+void array_take_forward(char* to, char* from, size_t count, void* type) {
+    const auto* witnesses = witnesses_of(type);
+    for (size_t i = 0; i < count; ++i) witnesses->initialize_with_take(to + i * witnesses->stride, from + i * witnesses->stride, type);
+}
+
+void array_take_backward(char* to, char* from, size_t count, void* type) {
+    const auto* witnesses = witnesses_of(type);
+    for (size_t i = count; i-- > 0;) witnesses->initialize_with_take(to + i * witnesses->stride, from + i * witnesses->stride, type);
+}
+
+// A box holds its type, then the value at the alignment the type needs.
+struct BoxHeader {
+    void* metadata;
+    std::atomic<uint64_t> references;
+    void* type;
+};
+
+size_t box_value_offset(void* type) {
+    const size_t mask = witnesses_of(type)->flags & 0xff;
+    return (sizeof(BoxHeader) + mask) & ~mask;
+}
+
+void destroy_boxed(void* raw) {
+    auto* box = static_cast<BoxHeader*>(raw);
+    if (box->type != nullptr) witnesses_of(box->type)->destroy(static_cast<char*>(raw) + box_value_offset(box->type), box->type);
+    free(raw);
+}
+
+struct BoxMetadataLayout {
+    void (*destroyer)(void*);
+    const void* witnesses;
+    uint64_t kind;
+};
+
+const BoxMetadataLayout kBoxLayout = {destroy_boxed, nullptr, 0};
+
+struct BoxPair {
+    void* box;
+    void* value;
+};
+
+BoxPair alloc_box(void* type) {
+    const size_t offset = box_value_offset(type);
+    auto* raw = static_cast<char*>(calloc(1, offset + witnesses_of(type)->size + 1));
+    auto* box = reinterpret_cast<BoxHeader*>(raw);
+    box->metadata = const_cast<uint64_t*>(&kBoxLayout.kind);
+    new (&box->references) std::atomic<uint64_t>(1);
+    box->type = type;
+    return {box, raw + offset};
+}
+
+void* project_box(void* box) { return static_cast<char*>(box) + box_value_offset(static_cast<BoxHeader*>(box)->type); }
+
+constexpr size_t kSuperclassOffset = 8;
+
+// Walks a class's ancestry; a framework superclass is a guard address that can't be read, only compared.
+bool class_inherits(const void* cls, const void* target) {
+    while (cls != nullptr) {
+        if (cls == target) return true;
+        if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(cls)) != nullptr) return false;
+        memcpy(&cls, static_cast<const char*>(cls) + kSuperclassOffset, sizeof cls);
+    }
+    return false;
+}
+
+void* dynamic_cast_class(void* object, const void* target) {
+    if (object == nullptr) return nullptr;
+    const void* cls;
+    memcpy(&cls, object, sizeof cls);
+    return class_inherits(cls, target) ? object : nullptr;
+}
+
+void* dynamic_cast_class_unconditional(void* object, const void* target, const char*, uint32_t, uint32_t) {
+    void* result = dynamic_cast_class(object, target);
+    if (result == nullptr) {
+        engine_log("STOP: an unconditional class cast failed");
+        abort();
+    }
+    return result;
+}
+
+const void* dynamic_cast_metatype(const void* type, const void* target) { return class_inherits(type, target) ? type : nullptr; }
+void* identity_cast(void* object) { return object; }
+
+constexpr uint64_t kKindExistentialMetadata = 0x303;
+
+// Only a class existential's value carries its own dynamic type here.
+void* dynamic_type_of(void* value, void* type, bool) {
+    if (*static_cast<uint64_t*>(type) == kKindExistentialMetadata) {
+        void* object;
+        memcpy(&object, value, sizeof object);
+        void* cls;
+        memcpy(&cls, object, sizeof cls);
+        return cls;
+    }
+    return type;
+}
+
+bool is_uniquely_referenced(void* object) { return object != nullptr && static_cast<BoxHeader*>(object)->references.load(std::memory_order_relaxed) == 1; }
+
+void release_n(void* object, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) rt_swift_release(object);
+}
+
+void* retain_n(void* object, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) rt_swift_retain(object);
+    return object;
+}
+
+// Weak references are strong here: an object stays alive rather than a read finding it gone, which only costs memory.
+void* weak_init(void** slot, void* object) {
+    *slot = rt_swift_retain(object);
+    return slot;
+}
+
+void* weak_assign(void** slot, void* object) {
+    rt_swift_retain(object);
+    rt_swift_release(*slot);
+    *slot = object;
+    return slot;
+}
+
+void* weak_load_strong(void** slot) { return rt_swift_retain(*slot); }
+void weak_destroy(void** slot) { rt_swift_release(*slot); }
+
+void* weak_copy_init(void** slot, void** from) {
+    *slot = rt_swift_retain(*from);
+    return slot;
+}
+
+void* weak_take_init(void** slot, void** from) {
+    *slot = *from;
+    return slot;
+}
+
+void* weak_copy_assign(void** slot, void** from) { return weak_assign(slot, *from); }
+
+void* weak_take_assign(void** slot, void** from) {
+    rt_swift_release(*slot);
+    *slot = *from;
+    return slot;
+}
+
+bool escaping_closure_check(const void*, const void*, int32_t, int32_t, int32_t) { return false; }
+
+[[noreturn]] void unexpected_error(void*, const char*, int64_t, bool, const char*, int64_t, bool, const char*, int64_t, bool, uint64_t) {
+    engine_log("STOP: an error reached a try! expression");
+    abort();
+}
+
+// A sequence of Characters, which in this runtime means a String or an array of them.
+SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWIFT_SELF SwiftString* self) {
+    std::string text = swift_string_to_utf8(*self);
+    if (type == type_system_symbol("$sSSN")) {
+        text += swift_string_to_utf8(*static_cast<const SwiftString*>(sequence));
+    } else if (void* element = array_element_type(type)) {
+        uint64_t word;
+        memcpy(&word, sequence, sizeof word);
+        char* elements;
+        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kCollectionAddressMask), element, &elements);
+        for (size_t i = 0; i < count; ++i) text += swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(elements + i * sizeof(SwiftString)));
+    } else {
+        engine_log("STOP: append(contentsOf:) on a sequence other than String or Array");
+        abort();
+    }
+    *self = swift_string_from_utf8(text);
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -864,6 +1039,14 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
+        {"$s2os6LoggerV9subsystem8categoryACSS_SStcfC", reinterpret_cast<void*>(logger_init)},
+        {"$s2os6LoggerV9logObjectSo03OS_a1_C0Cvg", reinterpret_cast<void*>(logger_object)},
+        {"$sSo13os_log_type_ta0A0E5errorABvgZ", reinterpret_cast<void*>(log_type_getter<0x10>)},
+        {"$sSo13os_log_type_ta0A0E4infoABvgZ", reinterpret_cast<void*>(log_type_getter<0x01>)},
+        {"$sSo13os_log_type_ta0A0E5debugABvgZ", reinterpret_cast<void*>(log_type_getter<0x02>)},
+        {"$sSo13os_log_type_ta0A0E7defaultABvgZ", reinterpret_cast<void*>(log_type_getter<0x00>)},
+        {"$sSo13os_log_type_ta0A0E5faultABvgZ", reinterpret_cast<void*>(log_type_getter<0x11>)},
+        {"$sSS6append10contentsOfyx_tSTRzSJ7ElementRtzlF", reinterpret_cast<void*>(string_append_sequence)},
         {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
         {"$sSS10describingSSx_tclufC", reinterpret_cast<void*>(string_describing)},
         {"$sSS7cStringSSSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},
@@ -888,6 +1071,39 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss11AnyHashableV13_rawHashValue4seedS2i_tF", reinterpret_cast<void*>(any_hashable_raw_hash)},
         {"$ss11AnyHashableV2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(any_hashable_equal)},
         {"$ss22_minimumMergeRunLengthyS2iF", reinterpret_cast<void*>(minimum_merge_run_length)},
+        {"swift_arrayInitWithTakeFrontToBack", reinterpret_cast<void*>(array_take_forward)},
+        {"swift_arrayInitWithTakeBackToFront", reinterpret_cast<void*>(array_take_backward)},
+        {"swift_allocBox", reinterpret_cast<void*>(alloc_box)},
+        {"swift_projectBox", reinterpret_cast<void*>(project_box)},
+        {"swift_dynamicCastClass", reinterpret_cast<void*>(dynamic_cast_class)},
+        {"swift_dynamicCastClassUnconditional", reinterpret_cast<void*>(dynamic_cast_class_unconditional)},
+        {"swift_dynamicCastMetatype", reinterpret_cast<void*>(dynamic_cast_metatype)},
+        {"swift_dynamicCastObjCClassUnconditional", reinterpret_cast<void*>(identity_cast)},
+        {"swift_dynamicCastObjCProtocolConditional", reinterpret_cast<void*>(identity_cast)},
+        {"swift_dynamicCastObjCProtocolUnconditional", reinterpret_cast<void*>(identity_cast)},
+        {"swift_getDynamicType", reinterpret_cast<void*>(dynamic_type_of)},
+        {"swift_isUniquelyReferenced_native", reinterpret_cast<void*>(is_uniquely_referenced)},
+        {"swift_isUniquelyReferencedNonObjC_nonNull", reinterpret_cast<void*>(is_uniquely_referenced)},
+        {"swift_release_n", reinterpret_cast<void*>(release_n)},
+        {"swift_unknownObjectRelease_n", reinterpret_cast<void*>(release_n)},
+        {"swift_unknownObjectRetain_n", reinterpret_cast<void*>(retain_n)},
+        {"swift_unownedRetain", reinterpret_cast<void*>(rt_swift_retain)},
+        {"swift_unownedRelease", reinterpret_cast<void*>(rt_swift_release)},
+        {"swift_unownedRetainStrong", reinterpret_cast<void*>(rt_swift_retain)},
+        {"swift_weakInit", reinterpret_cast<void*>(weak_init)},
+        {"swift_weakAssign", reinterpret_cast<void*>(weak_assign)},
+        {"swift_weakLoadStrong", reinterpret_cast<void*>(weak_load_strong)},
+        {"swift_weakDestroy", reinterpret_cast<void*>(weak_destroy)},
+        {"swift_unknownObjectWeakInit", reinterpret_cast<void*>(weak_init)},
+        {"swift_unknownObjectWeakAssign", reinterpret_cast<void*>(weak_assign)},
+        {"swift_unknownObjectWeakLoadStrong", reinterpret_cast<void*>(weak_load_strong)},
+        {"swift_unknownObjectWeakDestroy", reinterpret_cast<void*>(weak_destroy)},
+        {"swift_unknownObjectWeakCopyInit", reinterpret_cast<void*>(weak_copy_init)},
+        {"swift_unknownObjectWeakTakeInit", reinterpret_cast<void*>(weak_take_init)},
+        {"swift_unknownObjectWeakCopyAssign", reinterpret_cast<void*>(weak_copy_assign)},
+        {"swift_unknownObjectWeakTakeAssign", reinterpret_cast<void*>(weak_take_assign)},
+        {"swift_isEscapingClosureAtFileLocation", reinterpret_cast<void*>(escaping_closure_check)},
+        {"swift_unexpectedError", reinterpret_cast<void*>(unexpected_error)},
         {"swift_dynamicCast", reinterpret_cast<void*>(swift_cast)},
         {"$ss10_HashTableV11startBucketAB0D0Vvg", reinterpret_cast<void*>(hash_table_start_bucket)},
         {"$ss10_HashTableV12previousHole6beforeAB6BucketVAF_tF", reinterpret_cast<void*>(hash_table_previous_hole)},
