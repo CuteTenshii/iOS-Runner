@@ -1,0 +1,16 @@
+# The shims are hand-written against the Swift ABI, so casts, raw pointers and unusual signatures are the job.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-narrowing-conversions,
+  clang-analyzer-*,
+  -clang-analyzer-optin.*,
+  performance-*,
+  -performance-no-int-to-ptr,
+  misc-unused-*,
+  misc-redundant-expression
+HeaderFilterRegex: 'app/src/main/cpp/.*\.h$'

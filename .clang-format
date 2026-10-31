@@ -1,0 +1,14 @@
+# Matches the engine's existing style; lines are left to wrap by judgment.
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+IndentWidth: 4
+AccessModifierOffset: -4
+ColumnLimit: 0
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+IncludeBlocks: Preserve
+SortIncludes: true
