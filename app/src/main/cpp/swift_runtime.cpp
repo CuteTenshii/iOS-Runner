@@ -499,6 +499,7 @@ __asm__(
 #define DECLARE_THUNK_PAIR(reg)        \
     extern "C" void rt_retain_##reg(); \
     extern "C" void rt_release_##reg();
+// clang-format off
 DECLARE_THUNK_PAIR(x1)
 DECLARE_THUNK_PAIR(x2)
 DECLARE_THUNK_PAIR(x8)
@@ -506,6 +507,7 @@ DECLARE_THUNK_PAIR(x9)
 DECLARE_THUNK_PAIR(x10)
 DECLARE_THUNK_PAIR(x19)
 DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
+    // clang-format on
     DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
 
         const void* find_witness(const char* conformance, const void* requirement) {

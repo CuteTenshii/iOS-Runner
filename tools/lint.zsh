@@ -12,7 +12,7 @@ if [[ $1 == --fix ]]; then
     clang-format -i $FILES
     exit 0
 fi
-status=0
-clang-format --dry-run --Werror $FILES || status=1
-clang-tidy --quiet $SRC/*.cpp -- --target=aarch64-linux-android30 --sysroot=$BIN/../sysroot -std=c++20 -DIOSRUNNER_HOST || status=1
-exit $status
+result=0
+clang-format --dry-run --Werror $FILES || result=1
+clang-tidy --quiet $SRC/*.cpp -- --target=aarch64-linux-android30 --sysroot=$BIN/../sysroot -std=c++20 -DIOSRUNNER_HOST || result=1
+exit $result
