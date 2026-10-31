@@ -14,7 +14,6 @@
 #include "objc_runtime.h"
 #include "swift_abi.h"
 
-
 extern "C" void* darwin_block_copy(const void*);
 extern "C" void rt_registrar_mark_dirty_c();
 
@@ -101,7 +100,6 @@ SWIFTCC void time_now(SWIFT_OUT uint64_t* out) { *out = static_cast<uint64_t>(mo
 SWIFTCC void time_from_uptime(SWIFT_OUT uint64_t* out, uint64_t nanoseconds) { *out = nanoseconds; }
 SWIFTCC uint64_t time_uptime(SWIFT_CONTEXT const uint64_t* self) { return *self; }
 SWIFTCC void time_plus_seconds(SWIFT_OUT uint64_t* out, const uint64_t* time, double seconds) { *out = *time + static_cast<uint64_t>(seconds * kNanosecondsPerSecond); }
-
 
 struct GroupState {
     int64_t entered = 0;

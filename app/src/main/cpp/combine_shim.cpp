@@ -13,7 +13,6 @@
 #include "key_path.h"
 #include "swift_abi.h"
 
-
 extern "C" void rt_registrar_mark_dirty_c();
 
 namespace {

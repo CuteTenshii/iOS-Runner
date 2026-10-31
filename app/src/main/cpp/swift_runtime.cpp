@@ -15,9 +15,9 @@
 
 #include "engine.h"
 #include "macho.h"
+#include "swift_abi.h"
 #include "swiftui_shim.h"
 #include "type_system.h"
-#include "swift_abi.h"
 
 namespace {
 // Swift keeps flags and discriminators in the top byte of bridged references.
@@ -277,7 +277,7 @@ template <size_t Size>
 constexpr ValueWitnessTable pod_witnesses() {
     return {pod_copy<Size>, +[](void*, void*) {}, pod_copy<Size>, pod_copy<Size>, pod_copy<Size>, pod_copy<Size>,
             pod_get_tag<Size>, pod_store_tag<Size>, Size, Size == 0 ? 1 : Size,
-            static_cast<uint32_t>(Size == 0 ? 0 : Size - 1), 0};
+            static_cast<uint32_t>(Size == 0 ? 0 : Size - 1), 0, nullptr, nullptr, nullptr};
 }
 
 using RetainFunction = void* (*)(void*);
@@ -320,7 +320,7 @@ constexpr ValueWitnessTable reference_witnesses() {
         +[](void* value, uint32_t tag, uint32_t empty_cases, void*) {
             if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
         },
-        8, 8, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer)};
+        8, 8, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer), nullptr, nullptr, nullptr};
 }
 
 void* bridge_retain(void* raw) { return rt_swift_bridgeObjectRetain(raw); }
@@ -365,7 +365,7 @@ const ValueWitnessTable kClosureWitnesses = {
     +[](void* value, uint32_t tag, uint32_t empty_cases, void*) {
         if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
     },
-    16, 16, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer)};
+    16, 16, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer), nullptr, nullptr, nullptr};
 const ValueWitnessTable kInt8Witnesses = pod_witnesses<1>();
 const ValueWitnessTable kInt16Witnesses = pod_witnesses<2>();
 const ValueWitnessTable kInt128Witnesses = pod_witnesses<16>();

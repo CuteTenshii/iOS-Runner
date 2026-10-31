@@ -15,6 +15,8 @@ extern "C" void rt_swift_release(void*);
 extern "C" void* rt_call_witness(const void* function, void* out, void* self, void* type, void* table);
 // Swift destructors take self in x20, this runtime's in x0, so the object goes in both.
 extern "C" void rt_call_destroyer(void* destroyer, void* object);
+// The storage every empty Swift array shares.
+uint64_t* empty_array_singleton();
 
 struct ValueWitnessTable {
     void* (*initialize_buffer_with_copy)(void*, void*, void*);

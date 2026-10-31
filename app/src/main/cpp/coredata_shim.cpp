@@ -20,8 +20,6 @@
 #include "swift_abi.h"
 #include "type_system.h"
 
-
-
 namespace {
 constexpr size_t kRoNameOffset = 24;
 constexpr size_t kRoBasePropertiesOffset = 64;

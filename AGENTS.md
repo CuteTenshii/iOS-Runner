@@ -36,10 +36,11 @@ On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-a
 - `macho.cpp` maps the binary and applies chained fixups. Each import is asked of `resolve_symbol` in `symbols.cpp`, which tries each shim's symbol table in turn.
 - An import nobody implements gets a `PROT_NONE` guard address that remembers its name. Calling or reading it stops the run with `STOP: called unimplemented function` or `accessed unimplemented data`, so missing APIs show up by name. Some code also compares against these addresses to identify framework protocols and conformances, and many are harmless metadata references, so the "not implemented" count overstates what's missing.
 - `engine.cpp` owns the guest thread, crash reports and the action queue.
-- `swift_runtime.cpp` covers refcounting, witness tables and dispatch thunks. `type_system.cpp` covers metadata, the mangled-name parser and casts.
+- `swift_runtime.cpp` covers refcounting, witness tables and dispatch thunks. The type system is `type_witnesses`, `type_builders`, `type_mangling`, `type_metadata` and `type_system` (lookup and casts). `swift_abi.h` holds what every shim shares about the ABI: calling convention macros, value witnesses and object layout.
 - `stdlib_shim`, `foundation_shim`, `concurrency_shim`, `objc_runtime`, `codable_shim`, `regex_shim`, `key_path`, `coredata_shim`, `combine_shim`, `dispatch_shim` and `swiftui_shim` implement the libraries of the same name.
 - `__isPlatformVersionAtLeast` answers as the app's deployment target, so apps take the paths that need no weak imports. Unknown messages to `UI*` classes log `UIKIT: ignoring` and return nil, since the host draws the interface; every other unknown message stops the run.
-- `swiftui_shim.cpp` has resilient views build `ViewNode` boxes, walks the app's view values by reflection, and emits a JSON tree. `GuestActivity` sends actions back by id, and each action re-renders the tree.
+- The large shims are split by theme into `<name>_*.cpp` with a private `<name>_internal.h`: `foundation_*`, `stdlib_*` and `swiftui_*`. Each part registers its own symbols, and `<name>_shim.cpp` merges them.
+- `swiftui_views` and `swiftui_modifiers` have resilient views build `ViewNode` boxes, walks the app's view values by reflection, and emits a JSON tree. `GuestActivity` sends actions back by id, and each action re-renders the tree.
 - `concurrency_shim.cpp` runs every task on the one guest thread, from a ready queue plus sleep timers drained by the render loop.
 
 ### Writing shims
@@ -47,7 +48,7 @@ On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-a
 Shims are hand-written against the Swift ABI, so most bugs are ABI mismatches:
 - Use `__attribute__((swiftcall))` with `swift_indirect_result` (x8), `swift_context` (x20) and `swift_error_result` (x21).
 - **Read the call site in the guest's disassembly before writing a shim.** Don't derive registers from the signature alone: `self` of a loadable struct is often an ordinary argument, as with `Font.monospaced()` in `x0`, and generic parameters and witness tables come in non-obvious orders. Disassemble with `llvm-objdump --macho -d`.
-- Types the app reaches through metadata need the layout its compiled code expects. `frozen_layouts()` in `type_system.cpp` lists these; any other framework value type defaults to one retained reference. Class metadata needs an instance size at `+0x30`, because guest code reads it before `swift_allocObject`.
+- Types the app reaches through metadata need the layout its compiled code expects. `frozen_layouts()` in `type_builders.cpp` lists these; any other framework value type defaults to one retained reference. Class metadata needs an instance size at `+0x30`, because guest code reads it before `swift_allocObject`.
 - Heap corruption often appears later as an allocator abort on an unrelated thread. Reproduce it with `IOSRUNNER_EFENCE=1` instead of reasoning from the crash site.
 
 ## Testing against real services

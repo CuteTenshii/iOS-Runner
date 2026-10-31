@@ -101,7 +101,6 @@ void continuation_resume_with_error(char* task, void* error) {
     continuation_resume(task);
 }
 
-
 // CheckedContinuation is the unsafe one, with the checking left out.
 SWIFTCC void checked_continuation_init(SWIFT_OUT void** out, void* unsafe_continuation) { *out = unsafe_continuation; }
 

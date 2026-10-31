@@ -19,7 +19,6 @@
 #include "symbols.h"
 #include "type_system.h"
 
-
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 
 namespace {
