@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -14,6 +15,7 @@
 #include "macho.h"
 #include "stdlib_shim.h"
 #include "swift_runtime.h"
+#include "symbols.h"
 #include "type_system.h"
 
 #define SWIFTCC __attribute__((swiftcall))
@@ -71,6 +73,8 @@ ContainerBox* make_container(Json* node, void* key_witnesses) {
 }
 
 const void* witness_in(void* table, const char* requirement) {
+    // A framework conformance is only a placeholder: it has no witnesses to find.
+    if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(static_cast<void**>(table)[0])) != nullptr) return nullptr;
     return swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), requirement);
 }
 
@@ -95,6 +99,28 @@ void* decoding_error(const std::string& what) { return foundation_make_error("Th
 
 using InitFromDecoder = SWIFTCC void (*)(SWIFT_OUT void*, CoderExistential*, void*, void*, SWIFT_CTX void*, SWIFT_ERROR void**);
 using EncodeToEncoder = SWIFTCC void (*)(CoderExistential*, void*, void*, SWIFT_CTX const void*, SWIFT_ERROR void**);
+
+constexpr uint64_t kOptionalKind = 0x202;
+constexpr size_t kFirstGenericWord = 2;
+constexpr size_t kWitnessStoreEnumTagOffset = 0x38;
+
+// Optional's tag goes through its payload's witness, which knows the spare bits it can use.
+void store_optional_tag(void* out, void* payload, bool none) {
+    using Store = void (*)(void*, uint32_t, uint32_t, void*);
+    Store store;
+    memcpy(&store, static_cast<const char*>(static_cast<void* const*>(payload)[-1]) + kWitnessStoreEnumTagOffset, sizeof store);
+    store(out, none ? 1 : 0, 1, payload);
+}
+
+bool json_seconds(const Json& node, double& seconds) {
+    if (node.kind == Json::Kind::Integer)
+        seconds = static_cast<double>(node.integer);
+    else if (node.kind == Json::Kind::Number)
+        seconds = node.number;
+    else
+        return false;
+    return true;
+}
 
 void decode_value(void* type, Json* node, void* out, void** error) {
     if (type == type_system_symbol("$sSSN")) {
@@ -127,8 +153,47 @@ void decode_value(void* type, Json* node, void* out, void** error) {
             *error = decoding_error("expected a number");
             return;
         }
-        memcpy(out, &node->number, sizeof node->number);
+        const double number = node->kind == Json::Kind::Integer ? static_cast<double>(node->integer) : node->number;
+        memcpy(out, &number, sizeof number);
         return;
+    }
+    if (type == type_system_symbol("$sSuN")) {
+        if (node->kind != Json::Kind::Integer) {
+            *error = decoding_error("expected an integer");
+            return;
+        }
+        memcpy(out, &node->integer, sizeof node->integer);
+        return;
+    }
+    if (*static_cast<const uint64_t*>(type) == kOptionalKind) {
+        void* payload = static_cast<void**>(type)[kFirstGenericWord];
+        if (node->kind == Json::Kind::Null) {
+            store_optional_tag(out, payload, true);
+            return;
+        }
+        decode_value(payload, node, out, error);
+        if (*error == nullptr) store_optional_tag(out, payload, false);
+        return;
+    }
+    if (const char* name = foreign_type_name(type)) {
+        if (strcmp(name, "_$s10Foundation3URLVMn") == 0) {
+            if (node->kind != Json::Kind::String) {
+                *error = decoding_error("expected a URL string");
+                return;
+            }
+            void* url = foundation_make_url(node->text);
+            memcpy(out, &url, sizeof url);
+            return;
+        }
+        if (strcmp(name, "_$s10Foundation4DateVMn") == 0) {
+            double seconds = 0;
+            if (node->kind == Json::Kind::String ? !foundation_parse_iso8601(node->text, seconds) : !json_seconds(*node, seconds)) {
+                *error = decoding_error("expected a date");
+                return;
+            }
+            memcpy(out, &seconds, sizeof seconds);
+            return;
+        }
     }
     if (void* element = array_element_type(type)) {
         if (node->kind != Json::Kind::Array) {
@@ -166,6 +231,8 @@ void decode_value(void* type, Json* node, void* out, void** error) {
     void* table = swift_runtime_find_conformance(type, decodable);
     const auto init = reinterpret_cast<InitFromDecoder>(const_cast<void*>(witness_in(table, "_$sSe4fromxs7Decoder_p_tKcfCTq")));
     if (init == nullptr) {
+        const char* name = foreign_type_name(type);
+        engine_log("CODABLE: no decoder for %s, kind %llx, from JSON kind %d", name != nullptr ? name : "(app type)", static_cast<unsigned long long>(*static_cast<uint64_t*>(type)), static_cast<int>(node->kind));
         *error = decoding_error("this type is not Decodable");
         return;
     }
@@ -335,6 +402,107 @@ SWIFTCC OptionalInt keyed_decode_optional_int(const void* key, void* container_t
     return out;
 }
 
+// decodeIfPresent<T>: absent and null both give nil, and the result is T? in place.
+SWIFTCC void keyed_decode_if_present_generic(SWIFT_OUT void* out, void*, const void* key, void* container_type, void* type, void*, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+    Json* node = optional_member(*self, key, container_type);
+    if (node == nullptr) {
+        store_optional_tag(out, type, true);
+        return;
+    }
+    decode_value(type, node, out, error);
+    if (*error == nullptr) store_optional_tag(out, type, false);
+}
+
+constexpr uint8_t kOptionalBoolNone = 2;
+
+SWIFTCC uint8_t keyed_decode_optional_bool(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+    Json* node = optional_member(*self, key, container_type);
+    if (node == nullptr) return kOptionalBoolNone;
+    uint8_t out = 0;
+    decode_value(type_system_symbol("$sSbN"), node, &out, error);
+    return out;
+}
+
+SWIFTCC double keyed_decode_double(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+    double out = 0;
+    if (Json* node = required_member(*self, key, container_type, error)) decode_value(type_system_symbol("$sSdN"), node, &out, error);
+    return out;
+}
+
+SWIFTCC bool keyed_contains(const void* key, void* container_type, SWIFT_CTX ContainerBox** self) { return (*self)->node->member(key_name(*self, key, key_type_of(container_type))) != nullptr; }
+
+SWIFTCC bool keyed_decode_nil(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void**) { return optional_member(*self, key, container_type) == nullptr; }
+
+SWIFTCC void keyed_nested(SWIFT_OUT ContainerBox** out, void*, const void* key, void* container_type, void*, void* key_witnesses, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+    Json* node = required_member(*self, key, container_type, error);
+    if (node != nullptr) *out = make_container(node, key_witnesses);
+}
+
+// Single-value and unkeyed containers are existentials over a node; unkeyed keeps its position in the buffer.
+SWIFTCC void decoder_value_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void**) { *out = coder_for(*self); }
+
+SWIFTCC void decoder_unkeyed_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+    if ((*self)->kind != Json::Kind::Array) {
+        *error = decoding_error("expected an array");
+        return;
+    }
+    *out = coder_for(*self);
+}
+
+SWIFTCC void* coding_path_empty(void*, void*, SWIFT_CTX void*) { return resolve_symbol("_swiftEmptyArrayStorage"); }
+SWIFTCC void* decoder_user_info(void*, void*, SWIFT_CTX void*) { return resolve_symbol("_swiftEmptyDictionarySingleton"); }
+
+SWIFTCC bool value_decode_nil(void*, void*, SWIFT_CTX Json** self) { return (*self)->kind == Json::Kind::Null; }
+
+SWIFTCC bool value_decode_bool(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+    uint8_t out = 0;
+    decode_value(type_system_symbol("$sSbN"), *self, &out, error);
+    return out != 0;
+}
+
+SWIFTCC int64_t value_decode_int(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+    int64_t out = 0;
+    decode_value(type_system_symbol("$sSiN"), *self, &out, error);
+    return out;
+}
+
+SWIFTCC double value_decode_double(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+    double out = 0;
+    decode_value(type_system_symbol("$sSdN"), *self, &out, error);
+    return out;
+}
+
+SWIFTCC SwiftString value_decode_string(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+    SwiftString out{0, 0};
+    decode_value(type_system_symbol("$sSSN"), *self, &out, error);
+    return out;
+}
+
+SWIFTCC void value_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) { decode_value(type, *self, out, error); }
+
+// The position lives in the existential's second buffer word, which the guest passes back by address.
+int64_t& unkeyed_position(CoderExistential* self) { return *reinterpret_cast<int64_t*>(&self->padding[0]); }
+
+SWIFTCC bool unkeyed_is_at_end(void*, void*, SWIFT_CTX CoderExistential* self) { return unkeyed_position(self) >= static_cast<int64_t>(self->node->items.size()); }
+SWIFTCC int64_t unkeyed_current_index(void*, void*, SWIFT_CTX CoderExistential* self) { return unkeyed_position(self); }
+
+struct OptionalCount {
+    int64_t value;
+    uint64_t is_nil;
+};
+
+SWIFTCC OptionalCount unkeyed_count(void*, void*, SWIFT_CTX CoderExistential* self) { return {static_cast<int64_t>(self->node->items.size()), 0}; }
+
+SWIFTCC void unkeyed_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CTX CoderExistential* self, SWIFT_ERROR void** error) {
+    int64_t& position = unkeyed_position(self);
+    if (position >= static_cast<int64_t>(self->node->items.size())) {
+        *error = decoding_error("the array has no more values");
+        return;
+    }
+    decode_value(type, &self->node->items[static_cast<size_t>(position)], out, error);
+    if (*error == nullptr) ++position;
+}
+
 Json& new_member(const ContainerBox* box, const void* key, void* container_type) {
     box->node->members.emplace_back(key_name(box, key, key_type_of(container_type)), Json{});
     return box->node->members.back().second;
@@ -400,6 +568,33 @@ SWIFTCC void raw_representable_encode(CoderExistential* encoder, void* type, voi
 
 void* codable_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeyqd__Sgqd__m_xtKSeRd__lF", reinterpret_cast<void*>(keyed_decode_if_present_generic)},
+        {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeySbSgSbm_xtKF", reinterpret_cast<void*>(keyed_decode_optional_bool)},
+        {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeySuSgSum_xtKF", reinterpret_cast<void*>(keyed_decode_optional_int)},
+        {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeys5Int64VSgAFm_xtKF", reinterpret_cast<void*>(keyed_decode_optional_int)},
+        {"$ss22KeyedDecodingContainerV6decode_6forKeyS2dm_xtKF", reinterpret_cast<void*>(keyed_decode_double)},
+        {"$ss22KeyedDecodingContainerV6decode_6forKeys5Int64VAFm_xtKF", reinterpret_cast<void*>(keyed_decode_int)},
+        {"$ss22KeyedDecodingContainerV8containsySbxF", reinterpret_cast<void*>(keyed_contains)},
+        {"$ss22KeyedDecodingContainerV9decodeNil6forKeySbx_tKF", reinterpret_cast<void*>(keyed_decode_nil)},
+        {"$ss22KeyedDecodingContainerV06nestedC07keyedBy6forKeyAByqd__Gqd__m_xtKs06CodingH0Rd__lF", reinterpret_cast<void*>(keyed_nested)},
+        {"$ss22KeyedDecodingContainerV10codingPathSays9CodingKey_pGvg", reinterpret_cast<void*>(coding_path_empty)},
+        {"$ss7DecoderP20singleValueContainers06Singlec8DecodingD0_pyKFTj", reinterpret_cast<void*>(decoder_value_container)},
+        {"$ss7DecoderP16unkeyedContainers015UnkeyedDecodingC0_pyKFTj", reinterpret_cast<void*>(decoder_unkeyed_container)},
+        {"$ss7DecoderP10codingPathSays9CodingKey_pGvgTj", reinterpret_cast<void*>(coding_path_empty)},
+        {"$ss7DecoderP8userInfoSDys010CodingUserC3KeyVypGvgTj", reinterpret_cast<void*>(decoder_user_info)},
+        {"$ss28SingleValueDecodingContainerP10codingPathSays9CodingKey_pGvgTj", reinterpret_cast<void*>(coding_path_empty)},
+        {"$ss28SingleValueDecodingContainerP9decodeNilSbyFTj", reinterpret_cast<void*>(value_decode_nil)},
+        {"$ss28SingleValueDecodingContainerP6decodeyS2bmKFTj", reinterpret_cast<void*>(value_decode_bool)},
+        {"$ss28SingleValueDecodingContainerP6decodeyS2imKFTj", reinterpret_cast<void*>(value_decode_int)},
+        {"$ss28SingleValueDecodingContainerP6decodeyS2umKFTj", reinterpret_cast<void*>(value_decode_int)},
+        {"$ss28SingleValueDecodingContainerP6decodeyS2dmKFTj", reinterpret_cast<void*>(value_decode_double)},
+        {"$ss28SingleValueDecodingContainerP6decodeyS2SmKFTj", reinterpret_cast<void*>(value_decode_string)},
+        {"$ss28SingleValueDecodingContainerP6decodeyqd__qd__mKSeRd__lFTj", reinterpret_cast<void*>(value_decode_generic)},
+        {"$ss24UnkeyedDecodingContainerP7isAtEndSbvgTj", reinterpret_cast<void*>(unkeyed_is_at_end)},
+        {"$ss24UnkeyedDecodingContainerP12currentIndexSivgTj", reinterpret_cast<void*>(unkeyed_current_index)},
+        {"$ss24UnkeyedDecodingContainerP5countSiSgvgTj", reinterpret_cast<void*>(unkeyed_count)},
+        {"$ss24UnkeyedDecodingContainerP10codingPathSays9CodingKey_pGvgTj", reinterpret_cast<void*>(coding_path_empty)},
+        {"$ss24UnkeyedDecodingContainerP6decodeyqd__qd__mKSeRd__lFTj", reinterpret_cast<void*>(unkeyed_decode_generic)},
         {"$s10Foundation11JSONDecoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation11JSONEncoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation11JSONDecoderCACycfc", reinterpret_cast<void*>(coder_init)},
