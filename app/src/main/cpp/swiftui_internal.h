@@ -318,11 +318,12 @@ void* bool_metadata();
 void* int_metadata();
 void dismiss_presented_sheet();
 
-using SymbolTable = std::unordered_map<std::string_view, void*>;
 void add_swiftui_render_symbols(SymbolTable& table);
 void add_swiftui_views_symbols(SymbolTable& table);
 void add_swiftui_state_symbols(SymbolTable& table);
 void add_swiftui_modifiers_symbols(SymbolTable& table);
 void add_swiftui_layout_symbols(SymbolTable& table);
+
+void make_disclosure(ViewNode** out, const void* label, void* label_context, void* label_type, const void* content, void* content_context, void* content_type);
 
 }  // namespace swiftui

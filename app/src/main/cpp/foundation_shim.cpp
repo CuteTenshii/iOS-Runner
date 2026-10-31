@@ -32,6 +32,25 @@ void foundation_register_classes() {
     register_foundation_session_classes();
 }
 
+static SymbolTable all_foundation_symbols() {
+    SymbolTable all = {
+        {"$s10Foundation3URLV13DirectoryHintO13inferFromPathyA2EmFWC", const_cast<int32_t*>(&kDirectoryHintInferFromPath)},
+        {"$s10Foundation23LocalizedStringResourceV17BundleDescriptionO8forClassyAEyXlXpcAEmFWC", const_cast<int32_t*>(&kBundleDescriptionForClass)},
+        {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_request_record},
+        {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_url_record},
+        {"$sSo9WKWebViewC6WebKitE19callAsyncJavaScript_9arguments2in12contentWorldypSgSS_SDySSypGSo11WKFrameInfoCSgSo09WKContentL0CtYaKFTu", &g_web_script_record},
+        {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
+    };
+    add_foundation_string_symbols(all);
+    add_foundation_objects_symbols(all);
+    add_foundation_url_symbols(all);
+    add_foundation_session_symbols(all);
+    add_foundation_request_symbols(all);
+    add_foundation_date_symbols(all);
+    add_foundation_web_symbols(all);
+    return all;
+}
+
 void* foundation_symbol(std::string_view name) {
     // UIKit and Foundation name their notifications with NSString constants holding the same text.
     constexpr std::string_view kNotificationSuffix = "Notification";
@@ -44,24 +63,6 @@ void* foundation_symbol(std::string_view name) {
         }
         return &slot;
     }
-    static const SymbolTable table = [] {
-        SymbolTable all = {
-            {"$s10Foundation3URLV13DirectoryHintO13inferFromPathyA2EmFWC", const_cast<int32_t*>(&kDirectoryHintInferFromPath)},
-            {"$s10Foundation23LocalizedStringResourceV17BundleDescriptionO8forClassyAEyXlXpcAEmFWC", const_cast<int32_t*>(&kBundleDescriptionForClass)},
-            {"$sSo12NSURLSessionC10FoundationE4data3for8delegateAC4DataV_So13NSURLResponseCtAC10URLRequestV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_request_record},
-            {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKFTu", &g_url_session_url_record},
-            {"$sSo9WKWebViewC6WebKitE19callAsyncJavaScript_9arguments2in12contentWorldypSgSS_SDySSypGSo11WKFrameInfoCSgSo09WKContentL0CtYaKFTu", &g_web_script_record},
-            {"kCLLocationAccuracyKilometer", const_cast<double*>(&kLocationAccuracyKilometer)},
-        };
-        add_foundation_string_symbols(all);
-        add_foundation_objects_symbols(all);
-        add_foundation_url_symbols(all);
-        add_foundation_session_symbols(all);
-        add_foundation_request_symbols(all);
-        add_foundation_date_symbols(all);
-        add_foundation_web_symbols(all);
-        return all;
-    }();
-    const auto found = table.find(name);
-    return found == table.end() ? nullptr : found->second;
+    static const SymbolTable table = all_foundation_symbols();
+    return lookup_symbol(table, name);
 }

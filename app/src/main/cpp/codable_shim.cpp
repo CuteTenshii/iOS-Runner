@@ -124,7 +124,7 @@ void decode_value(void* type, Json* node, void* out, void** error) {
         memcpy(out, &text, sizeof text);
         return;
     }
-    if (type == type_system_symbol("$sSiN")) {
+    if (type == type_system_symbol("$sSiN") || type == type_system_symbol("$sSuN")) {
         if (node->kind != Json::Kind::Integer) {
             *error = decoding_error("expected an integer");
             return;
@@ -147,14 +147,6 @@ void decode_value(void* type, Json* node, void* out, void** error) {
         }
         const double number = node->kind == Json::Kind::Integer ? static_cast<double>(node->integer) : node->number;
         memcpy(out, &number, sizeof number);
-        return;
-    }
-    if (type == type_system_symbol("$sSuN")) {
-        if (node->kind != Json::Kind::Integer) {
-            *error = decoding_error("expected an integer");
-            return;
-        }
-        memcpy(out, &node->integer, sizeof node->integer);
         return;
     }
     if (*static_cast<const uint64_t*>(type) == kOptionalKind) {
@@ -292,14 +284,7 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
 // JSONDecoder and JSONEncoder hold no state this runtime honours, so one plain object serves as both.
 void* coder_class_metadata() {
     static void* block[12] = {};
-    if (block[0] == nullptr) {
-        block[0] = reinterpret_cast<void*>(free);
-        const uint32_t instance_size = 16;
-        const uint16_t alignment_mask = 7;
-        memcpy(reinterpret_cast<char*>(block + 2) + 0x30, &instance_size, sizeof instance_size);
-        memcpy(reinterpret_cast<char*>(block + 2) + 0x34, &alignment_mask, sizeof alignment_mask);
-    }
-    return block + 2;
+    return sized_class_metadata(block, reinterpret_cast<void*>(free), 16);
 }
 
 struct MetadataResponse {

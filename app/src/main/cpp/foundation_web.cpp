@@ -124,23 +124,13 @@ std::string value_to_json(void* value, void* type) {
         return out + "]";
     }
     if (void* value_type = dictionary_value_type(type)) {
-        const char* storage = storage_of();
-        const int scale = static_cast<int8_t>(storage[kDictionaryScaleOffset]);
-        const char* keys;
-        const char* values;
-        memcpy(&keys, storage + kDictionaryKeysOffset, sizeof keys);
-        memcpy(&values, storage + kDictionaryValuesOffset, sizeof values);
-        const char* bitmap = storage + kDictionaryBitmapOffset;
         const size_t stride = stride_of(value_type);
         std::string out = "{";
-        for (size_t bucket = 0; bucket < (1ULL << scale); ++bucket) {
-            uint64_t word;
-            memcpy(&word, bitmap + bucket / kBitsPerWord * sizeof word, sizeof word);
-            if (!((word >> (bucket % kBitsPerWord)) & 1)) continue;
+        visit_dictionary_buckets(storage_of(), [&](const char* keys, const char* values, size_t bucket) {
             if (out.size() > 1) out += ',';
             out += json_quote(swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(keys + bucket * sizeof(SwiftString)))) + ":";
             out += value_to_json(const_cast<char*>(values) + bucket * stride, value_type);
-        }
+        });
         return out + "}";
     }
     engine_log("STOP: a script argument of a type this runtime cannot convert");

@@ -389,14 +389,7 @@ DataValue make_data(const std::string& bytes) {
 // __DataStorage allocated by the guest's inlined Data initializers, which read its size from the class.
 void* data_storage_class_metadata() {
     static void* block[12] = {};
-    if (block[0] == nullptr) {
-        block[0] = reinterpret_cast<void*>(destroy_data_storage);
-        const uint32_t instance_size = sizeof(DataStorage);
-        const uint16_t alignment_mask = 7;
-        memcpy(reinterpret_cast<char*>(block + 2) + 0x30, &instance_size, sizeof instance_size);
-        memcpy(reinterpret_cast<char*>(block + 2) + 0x34, &alignment_mask, sizeof alignment_mask);
-    }
-    return block + 2;
+    return sized_class_metadata(block, reinterpret_cast<void*>(destroy_data_storage), sizeof(DataStorage));
 }
 
 struct DataMetadataResponse {

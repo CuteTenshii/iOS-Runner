@@ -164,7 +164,7 @@ SWIFTCC void list_init(SWIFT_OUT ViewNode** out, const void* closure, void* cont
     *out = node;
 }
 
-SWIFTCC void button_init(SWIFT_OUT ViewNode** out, const void* action, void* action_context, const void* label, void* label_context, void* label_type, void*) {
+void make_button(ViewNode** out, const void* action, void* action_context, const void* label, void* label_context, void* label_type) {
     auto* node = new_node(NodeKind::Button);
     node->action = action;
     node->action_context = rt_swift_retain(action_context);
@@ -172,12 +172,12 @@ SWIFTCC void button_init(SWIFT_OUT ViewNode** out, const void* action, void* act
     *out = node;
 }
 
+SWIFTCC void button_init(SWIFT_OUT ViewNode** out, const void* action, void* action_context, const void* label, void* label_context, void* label_type, void*) {
+    make_button(out, action, action_context, label, label_context, label_type);
+}
+
 SWIFTCC void button_role_init(SWIFT_OUT ViewNode** out, uint64_t, const void* action, void* action_context, const void* label, void* label_context, void* label_type, void*) {
-    auto* node = new_node(NodeKind::Button);
-    node->action = action;
-    node->action_context = rt_swift_retain(action_context);
-    evaluate_child(node, label, label_context, label_type);
-    *out = node;
+    make_button(out, action, action_context, label, label_context, label_type);
 }
 
 SWIFTCC void label_init(SWIFT_OUT ViewNode** out, const void* title, void* title_context, const void* icon, void* icon_context, void* title_type, void* icon_type, void*, void*) {
@@ -306,11 +306,15 @@ SWIFTCC void async_image_init(SWIFT_OUT ViewNode** out, const void*, double, voi
 
 const int32_t kImageResizingStretch = 1;
 
-SWIFTCC void disclosure_init(SWIFT_OUT ViewNode** out, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
+void make_disclosure(ViewNode** out, const void* label, void* label_context, void* label_type, const void* content, void* content_context, void* content_type) {
     auto* node = new_node(NodeKind::Disclosure);
     evaluate_child(node, label, label_context, label_type);
     evaluate_child(node, content, content_context, content_type);
     *out = node;
+}
+
+SWIFTCC void disclosure_init(SWIFT_OUT ViewNode** out, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
+    make_disclosure(out, label, label_context, label_type, content, content_context, content_type);
 }
 
 SWIFTCC void labeled_content_view(SWIFT_OUT ViewNode** out, const SwiftString* title, const void* content, void* content_context, void* content_type) {

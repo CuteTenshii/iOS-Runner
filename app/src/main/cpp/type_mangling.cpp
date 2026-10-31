@@ -435,18 +435,12 @@ private:
             node.type = foreign_nominal(base.nominal.foreign_symbol, arguments);
         } else {
             const auto* descriptor = static_cast<const char*>(base.nominal.descriptor);
-            uint32_t flags;
-            memcpy(&flags, descriptor, sizeof flags);
-            const char* trailing = descriptor + 2 * sizeof(int32_t);
-            if (flags & kDescriptorGeneric) {
-                uint16_t params, requirements;
-                memcpy(&params, trailing, sizeof params);
-                memcpy(&requirements, trailing + 2, sizeof requirements);
-                const char* requirement_list = trailing + kGenericHeaderSize + ((params + 3u) & ~3u);
+            const OpaqueRequirements found = opaque_requirements(descriptor);
+            if (found.count != 0) {
                 context_for_requirements_ = descriptor;
-                append_key_witnesses(requirement_list, requirements, arguments);
-                trailing = requirement_list + requirements * kGenericRequirementSize;
+                append_key_witnesses(found.list, found.count, arguments);
             }
+            const char* trailing = found.list + found.count * kGenericRequirementSize;
             int32_t offset;
             memcpy(&offset, trailing + ordinal * sizeof(int32_t), sizeof offset);
             const char* underlying = trailing + ordinal * sizeof(int32_t) + offset;

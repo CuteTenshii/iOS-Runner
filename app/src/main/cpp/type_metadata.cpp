@@ -233,15 +233,8 @@ extern "C" MetadataResponse rt_getOpaqueTypeMetadata(size_t, void* const* argume
         const std::lock_guard guard(g_types_lock);
         return {foreign_nominal(symbol, {}), 0};
     }
-    uint32_t flags;
-    memcpy(&flags, descriptor, sizeof flags);
-    const char* trailing = descriptor + 2 * sizeof(int32_t);
-    if (flags & kDescriptorGeneric) {
-        uint16_t params, requirements;
-        memcpy(&params, trailing, sizeof params);
-        memcpy(&requirements, trailing + 2, sizeof requirements);
-        trailing += kGenericHeaderSize + ((params + 3u) & ~3u) + requirements * kGenericRequirementSize;
-    }
+    const OpaqueRequirements found = opaque_requirements(descriptor);
+    const char* trailing = found.list + found.count * kGenericRequirementSize;
     const char* underlying = relative_address(trailing + ordinal * sizeof(int32_t));
     const size_t length = mangled_name_length(underlying);
     return {static_cast<Metadata*>(rt_getTypeByMangledNameInContext2(underlying, length, descriptor, arguments)), 0};

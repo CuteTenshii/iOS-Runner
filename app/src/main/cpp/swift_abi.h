@@ -2,6 +2,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <string_view>
+#include <unordered_map>
 
 // What every shim shares about the Swift ABI on arm64: calling convention, object layout and value witnesses.
 #define SWIFTCC __attribute__((swiftcall))
@@ -56,6 +59,29 @@ inline bool is_not_object(const void* raw) {
     return reinterpret_cast<uintptr_t>(raw) < kFirstValidAddress || reinterpret_cast<intptr_t>(raw) < 0;
 }
 
+// Assembly bridges into Swift, which keep x20 for the caller: the target arrives in x0 and moves to x16.
+#define SWIFT_CALL_PROLOGUE         \
+    "  stp x29, x30, [sp, #-32]!\n" \
+    "  mov x29, sp\n"               \
+    "  str x20, [sp, #16]\n"        \
+    "  mov x16, x0\n"
+#define SWIFT_CALL_EPILOGUE       \
+    "  blr x16\n"                 \
+    "  ldr x20, [sp, #16]\n"      \
+    "  ldp x29, x30, [sp], #32\n" \
+    "  ret\n"
+
+// Class metadata in a zeroed static block. The guest reads the instance size at +0x30 before allocating.
+inline void* sized_class_metadata(void** block, void* destroyer, uint32_t instance_size) {
+    if (block[0] == nullptr) {
+        block[0] = destroyer;
+        const uint16_t alignment_mask = 7;
+        memcpy(reinterpret_cast<char*>(block + 2) + 0x30, &instance_size, sizeof instance_size);
+        memcpy(reinterpret_cast<char*>(block + 2) + 0x34, &alignment_mask, sizeof alignment_mask);
+    }
+    return block + 2;
+}
+
 // A symbolic reference in a mangled name is a marker byte and a 4-byte offset.
 inline size_t mangled_name_length(const char* name) {
     size_t length = 0;
@@ -64,6 +90,14 @@ inline size_t mangled_name_length(const char* name) {
         length += byte >= 1 && byte <= 0x17 ? 5 : 1;
     }
     return length;
+}
+
+// A shim's exported symbols, by mangled name.
+using SymbolTable = std::unordered_map<std::string_view, void*>;
+
+inline void* lookup_symbol(const SymbolTable& table, std::string_view name) {
+    const auto found = table.find(name);
+    return found == table.end() ? nullptr : found->second;
 }
 
 constexpr uint64_t kImmortal = 1ULL << 63;

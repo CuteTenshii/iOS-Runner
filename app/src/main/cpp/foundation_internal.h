@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -413,7 +414,6 @@ std::string foundation_object_text(void* object);
 
 namespace foundation {
 
-using SymbolTable = std::unordered_map<std::string_view, void*>;
 void add_foundation_string_symbols(SymbolTable& table);
 void add_foundation_objects_symbols(SymbolTable& table);
 void add_foundation_url_symbols(SymbolTable& table);
@@ -429,3 +429,7 @@ void register_foundation_url_classes();
 void register_foundation_session_classes();
 
 }  // namespace foundation
+
+std::string percent_decoded(const std::string& text);
+// Calls `visit` for each occupied bucket of a native dictionary's storage.
+void visit_dictionary_buckets(const char* storage, const std::function<void(const char* keys, const char* values, size_t bucket)>& visit);

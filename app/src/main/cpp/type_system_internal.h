@@ -202,4 +202,21 @@ extern "C" void* rt_initClassMetadata2(char* metadata, size_t flags, size_t fiel
 constexpr size_t kAccessorPoolSize = 256 * 1024;
 constexpr size_t kAccessorStubSize = 32;
 
+struct OpaqueRequirements {
+    const char* list;
+    uint16_t count;
+};
+
+// An opaque type descriptor's generic requirements; its underlying type names follow them.
+inline OpaqueRequirements opaque_requirements(const char* descriptor) {
+    uint32_t flags;
+    memcpy(&flags, descriptor, sizeof flags);
+    const char* trailing = descriptor + 2 * sizeof(int32_t);
+    if (!(flags & kDescriptorGeneric)) return {trailing, 0};
+    uint16_t params, count;
+    memcpy(&params, trailing, sizeof params);
+    memcpy(&count, trailing + 2, sizeof count);
+    return {trailing + kGenericHeaderSize + ((params + 3u) & ~3u), count};
+}
+
 }  // namespace type_system

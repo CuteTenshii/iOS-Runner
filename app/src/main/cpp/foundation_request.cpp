@@ -393,11 +393,7 @@ constexpr size_t kAnyHashableStride = 40;
 constexpr size_t kAnyStride = 32;
 
 // The session's headers are a [AnyHashable: Any] of strings, read directly from its native storage.
-void session_set_headers(void*, const char*, void* wrapper) {
-    g_session_headers.clear();
-    if (wrapper == nullptr) return;
-    const auto bits = reinterpret_cast<uint64_t>(static_cast<BridgedCollection*>(wrapper)->value);
-    const auto* storage = reinterpret_cast<const char*>(bits & kBridgePointerMask);
+void visit_dictionary_buckets(const char* storage, const std::function<void(const char* keys, const char* values, size_t bucket)>& visit) {
     const int scale = static_cast<int8_t>(storage[kDictionaryScaleOffset]);
     const char* keys;
     const char* values;
@@ -407,11 +403,20 @@ void session_set_headers(void*, const char*, void* wrapper) {
     for (size_t bucket = 0; bucket < (1ULL << scale); ++bucket) {
         uint64_t word;
         memcpy(&word, bitmap + bucket / kBitsPerWord * sizeof word, sizeof word);
-        if (!((word >> (bucket % kBitsPerWord)) & 1)) continue;
+        if ((word >> (bucket % kBitsPerWord)) & 1) visit(keys, values, bucket);
+    }
+}
+
+void session_set_headers(void*, const char*, void* wrapper) {
+    g_session_headers.clear();
+    if (wrapper == nullptr) return;
+    const auto bits = reinterpret_cast<uint64_t>(static_cast<BridgedCollection*>(wrapper)->value);
+    const auto* storage = reinterpret_cast<const char*>(bits & kBridgePointerMask);
+    visit_dictionary_buckets(storage, [](const char* keys, const char* values, size_t bucket) {
         const std::string name = swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(keys + bucket * kAnyHashableStride));
         const std::string value = swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(values + bucket * kAnyStride));
         g_session_headers += name + ": " + value + "\n";
-    }
+    });
 }
 
 SWIFTCC void url_error_code(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }

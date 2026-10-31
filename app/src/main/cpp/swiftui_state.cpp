@@ -80,10 +80,7 @@ SWIFTCC void disclosure_string(SWIFT_OUT ViewNode** out, const SwiftString* titl
 }
 
 SWIFTCC void disclosure_expanded(SWIFT_OUT ViewNode** out, uint64_t, BindingNode*, uint64_t, const void* content, void* content_context, const void* label, void* label_context, void* label_type, void* content_type) {
-    auto* node = new_node(NodeKind::Disclosure);
-    evaluate_child(node, label, label_context, label_type);
-    evaluate_child(node, content, content_context, content_type);
-    *out = node;
+    make_disclosure(out, label, label_context, label_type, content, content_context, content_type);
 }
 
 SWIFTCC void labeled_strings(SWIFT_OUT ViewNode** out, const SwiftString* title, const SwiftString* value) {
@@ -115,17 +112,23 @@ size_t lazy_state_location_offset(void* metadata) {
 
 void* state_value(StateBox* state) { return state->value; }
 
+StateBox* new_state_box(void* type) {
+    const size_t size = witnesses_of(type)->size;
+    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
+    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
+    new (&state->header.references) std::atomic<uint64_t>(1);
+    state->type = type;
+    state->value = calloc(1, size == 0 ? 1 : size);
+    return state;
+}
+
 // The first read fixes the state: a thunk runs once, and later copies of the view share the box.
 StateBox* state_box_for(char* self, void* metadata) {
     void* type = generic_argument(metadata);
     auto** location = reinterpret_cast<StateBox**>(self + lazy_state_location_offset(metadata));
     if (*location != nullptr) return *location;
     const auto* witnesses = witnesses_of(type);
-    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
-    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
-    new (&state->header.references) std::atomic<uint64_t>(1);
-    state->type = type;
-    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    StateBox* state = new_state_box(type);
     const size_t payload = witnesses->size < 2 * sizeof(void*) ? 2 * sizeof(void*) : witnesses->size;
     if (static_cast<uint8_t>(self[payload]) == kStorageCaseThunk) {
         const void* thunk;
@@ -395,11 +398,7 @@ StateBox* plain_state_box(char* self, void* type) {
     auto** location = reinterpret_cast<StateBox**>(self + state_location_offset(type));
     if (*location != nullptr) return *location;
     const auto* witnesses = witnesses_of(type);
-    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
-    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
-    new (&state->header.references) std::atomic<uint64_t>(1);
-    state->type = type;
-    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    StateBox* state = new_state_box(type);
     witnesses->initialize_with_copy(state->value, self, type);
     *location = state;
     return state;
@@ -430,11 +429,7 @@ SWIFTCC void state_projected(SWIFT_OUT void* out, void* metadata, SWIFT_CONTEXT 
 
 SWIFTCC void binding_constant(SWIFT_OUT void* out, void* value, void* type) {
     const auto* witnesses = witnesses_of(type);
-    auto* state = static_cast<StateBox*>(calloc(1, sizeof(StateBox)));
-    state->header.metadata = const_cast<uint64_t*>(&kStateMetadata.kind);
-    new (&state->header.references) std::atomic<uint64_t>(1);
-    state->type = type;
-    state->value = calloc(1, witnesses->size == 0 ? 1 : witnesses->size);
+    StateBox* state = new_state_box(type);
     witnesses->initialize_with_take(state->value, value, type);
     auto* binding = new_binding(BindingKind::State);
     binding->source = state;

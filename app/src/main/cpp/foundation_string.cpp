@@ -260,17 +260,7 @@ SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, 
 }
 
 SWIFTCC OptionalSwiftString string_removing_percent(void*, void*, SWIFT_CONTEXT const SwiftString* self) {
-    const std::string text = swift_string_to_utf8(*self);
-    std::string out;
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == '%' && i + 2 < text.size() && isxdigit(static_cast<unsigned char>(text[i + 1])) && isxdigit(static_cast<unsigned char>(text[i + 2]))) {
-            out += static_cast<char>(strtol(text.substr(i + 1, 2).c_str(), nullptr, 16));
-            i += 2;
-        } else {
-            out += text[i];
-        }
-    }
-    const SwiftString value = swift_string_from_utf8(out);
+    const SwiftString value = swift_string_from_utf8(percent_decoded(swift_string_to_utf8(*self)));
     return {value.count_and_flags, value.object};
 }
 

@@ -90,8 +90,7 @@ SWIFTCC void view_tab_item(SWIFT_OUT ViewNode** out, const void* label, void* la
     *out = node;
 }
 
-// Binding<Bool> arrives as {transaction, location, value}; the closure builds the presented view each time.
-SWIFTCC void view_sheet_presented(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void*, void*, const void* content, void* content_context, void* self_type, void* content_type, void*, SWIFT_CONTEXT void* self) {
+void make_presented_sheet(ViewNode** out, BindingNode* location, const void* content, void* content_context, void* content_type, void* self, void* self_type) {
     auto* node = new_node(NodeKind::PresentedSheet);
     node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
     node->action = content;
@@ -101,14 +100,13 @@ SWIFTCC void view_sheet_presented(SWIFT_OUT ViewNode** out, uint64_t, BindingNod
     *out = node;
 }
 
+// Binding<Bool> arrives as {transaction, location, value}; the closure builds the presented view each time.
+SWIFTCC void view_sheet_presented(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void*, void*, const void* content, void* content_context, void* self_type, void* content_type, void*, SWIFT_CONTEXT void* self) {
+    make_presented_sheet(out, location, content, content_context, content_type, self, self_type);
+}
+
 SWIFTCC void view_navigation_destination(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, const void* content, void* content_context, void* self_type, void* content_type, void*, SWIFT_CONTEXT void* self) {
-    auto* node = new_node(NodeKind::PresentedSheet);
-    node->binding = static_cast<BindingNode*>(rt_swift_retain(location));
-    node->action = content;
-    node->action_context = rt_swift_retain(content_context);
-    node->content_type = content_type;
-    add_self_child(node, self, self_type);
-    *out = node;
+    make_presented_sheet(out, location, content, content_context, content_type, self, self_type);
 }
 
 void make_alert(ViewNode** out, std::string title, BindingNode* location, const void* actions, void* actions_context, void* actions_type, void* self_type, void* self) {

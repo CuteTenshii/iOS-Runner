@@ -2,34 +2,35 @@
 
 using namespace stdlib;
 
+static SymbolTable all_stdlib_symbols() {
+    SymbolTable all = {
+        {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
+        {"$s2os12OSSignpostIDV3log6objectACSo03OS_a1_D0C_yXltcfC", reinterpret_cast<void*>(+[](void*, void*) -> uint64_t { return 0; })},
+        {"$s2os0A9_signpost_3dso3log4name0B2IDySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VtF", reinterpret_cast<void*>(+[] {})},
+        {"$s2os0A9_signpost_3dso3log4name0B2ID__ySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VALs7CVarArg_pdtF", reinterpret_cast<void*>(+[] {})},
+        {"swift_unownedRetain", reinterpret_cast<void*>(rt_swift_retain)},
+        {"swift_unownedRelease", reinterpret_cast<void*>(rt_swift_release)},
+        {"swift_unownedRetainStrong", reinterpret_cast<void*>(rt_swift_retain)},
+        {"swift_dynamicCast", reinterpret_cast<void*>(swift_cast)},
+        {"swift_getKeyPath", reinterpret_cast<void*>(key_path_create)},
+        {"swift_modifyAtReferenceWritableKeyPath", reinterpret_cast<void*>(key_path_begin_modify)},
+        {"$sSo8NSObjectC10ObjectiveCE2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(+[](void* left, void* right) { return left == right; })},
+        {"$sSO9hashValueSivg", reinterpret_cast<void*>(+[](uint64_t identifier) -> uint64_t { return identifier >> 4; })},
+    };
+    add_stdlib_runtime_symbols(all);
+    add_stdlib_strings_symbols(all);
+    add_stdlib_collections_symbols(all);
+    return all;
+}
+
 void* stdlib_symbol(std::string_view name) {
     static const bool registered = [] {
         register_foreign_witness("_$sSis23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(int_description));
         return true;
     }();
     (void)registered;
-    static const SymbolTable table = [] {
-        SymbolTable all = {
-            {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
-            {"$s2os12OSSignpostIDV3log6objectACSo03OS_a1_D0C_yXltcfC", reinterpret_cast<void*>(+[](void*, void*) -> uint64_t { return 0; })},
-            {"$s2os0A9_signpost_3dso3log4name0B2IDySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VtF", reinterpret_cast<void*>(+[] {})},
-            {"$s2os0A9_signpost_3dso3log4name0B2ID__ySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VALs7CVarArg_pdtF", reinterpret_cast<void*>(+[] {})},
-            {"swift_unownedRetain", reinterpret_cast<void*>(rt_swift_retain)},
-            {"swift_unownedRelease", reinterpret_cast<void*>(rt_swift_release)},
-            {"swift_unownedRetainStrong", reinterpret_cast<void*>(rt_swift_retain)},
-            {"swift_dynamicCast", reinterpret_cast<void*>(swift_cast)},
-            {"swift_getKeyPath", reinterpret_cast<void*>(key_path_create)},
-            {"swift_modifyAtReferenceWritableKeyPath", reinterpret_cast<void*>(key_path_begin_modify)},
-            {"$sSo8NSObjectC10ObjectiveCE2eeoiySbAB_ABtFZ", reinterpret_cast<void*>(+[](void* left, void* right) { return left == right; })},
-            {"$sSO9hashValueSivg", reinterpret_cast<void*>(+[](uint64_t identifier) -> uint64_t { return identifier >> 4; })},
-        };
-        add_stdlib_runtime_symbols(all);
-        add_stdlib_strings_symbols(all);
-        add_stdlib_collections_symbols(all);
-        return all;
-    }();
-    const auto found = table.find(name);
-    return found == table.end() ? nullptr : found->second;
+    static const SymbolTable table = all_stdlib_symbols();
+    return lookup_symbol(table, name);
 }
 
 extern "C" void (*storage_destroyer_for(const char* symbol))(void*) {

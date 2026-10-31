@@ -735,38 +735,22 @@ void render_tree() {
 __asm__(
     ".text\n"
     ".globl rt_call_make_ui_view\n"
-    "rt_call_make_ui_view:\n"
-    "  stp x29, x30, [sp, #-32]!\n"
-    "  mov x29, sp\n"
-    "  str x20, [sp, #16]\n"
-    "  mov x16, x0\n"
+    "rt_call_make_ui_view:\n" SWIFT_CALL_PROLOGUE
     "  mov x0, x1\n"
     "  mov x20, x2\n"
     "  mov x1, x3\n"
-    "  mov x2, x4\n"
-    "  blr x16\n"
-    "  ldr x20, [sp, #16]\n"
-    "  ldp x29, x30, [sp], #32\n"
-    "  ret\n");
+    "  mov x2, x4\n" SWIFT_CALL_EPILOGUE);
 
 // ViewModifier.body(content:): the placeholder content in x0, self in x20, then Self and its witness table.
 __asm__(
     ".text\n"
     ".globl rt_call_modifier_body\n"
-    "rt_call_modifier_body:\n"
-    "  stp x29, x30, [sp, #-32]!\n"
-    "  mov x29, sp\n"
-    "  str x20, [sp, #16]\n"
-    "  mov x16, x0\n"
+    "rt_call_modifier_body:\n" SWIFT_CALL_PROLOGUE
     "  mov x8, x1\n"
     "  mov x0, x2\n"
     "  mov x20, x3\n"
     "  mov x1, x4\n"
-    "  mov x2, x5\n"
-    "  blr x16\n"
-    "  ldr x20, [sp, #16]\n"
-    "  ldp x29, x30, [sp], #32\n"
-    "  ret\n");
+    "  mov x2, x5\n" SWIFT_CALL_EPILOGUE);
 
 // withMutation(of:keyPath:_:): the closure is in x2/x3; x8 and the error register x21 pass straight through.
 __asm__(

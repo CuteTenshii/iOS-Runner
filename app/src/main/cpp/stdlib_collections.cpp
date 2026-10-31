@@ -29,20 +29,23 @@ size_t bitmap_bytes(int scale) {
 
 size_t alignment_mask(const ValueWitnessTable* witnesses) { return witnesses->flags & 0xff; }
 
+void init_hashed_header(char* raw, void* metadata, int scale, int32_t age, int64_t seed, bool has_seed) {
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    header->metadata = metadata;
+    new (&header->references) std::atomic<uint64_t>(1);
+    header->capacity = static_cast<int64_t>(static_cast<double>(1ULL << scale) * kMaximumLoadFactor);
+    header->scale = static_cast<int8_t>(scale);
+    header->age = age;
+    header->seed = has_seed ? seed : reinterpret_cast<int64_t>(raw);
+}
+
 void* allocate_set(void* metadata, int scale, int32_t age, int64_t seed, bool has_seed) {
     void* element = arguments_of(metadata)[0];
     const auto* witnesses = witnesses_of(element);
     const size_t buckets = 1ULL << scale;
     const size_t elements_at = align_up(kSetBitmapOffset + bitmap_bytes(scale), alignment_mask(witnesses));
     auto* raw = static_cast<char*>(calloc(1, elements_at + buckets * witnesses->stride));
-    auto* header = reinterpret_cast<HashedHeader*>(raw);
-    header->metadata = metadata;
-    new (&header->references) std::atomic<uint64_t>(1);
-    header->capacity = static_cast<int64_t>(static_cast<double>(buckets) * kMaximumLoadFactor);
-    header->scale = static_cast<int8_t>(scale);
-    header->reserved_scale = 0;
-    header->age = age;
-    header->seed = has_seed ? seed : reinterpret_cast<int64_t>(raw);
+    init_hashed_header(raw, metadata, scale, age, seed, has_seed);
     void* elements = raw + elements_at;
     memcpy(raw + kSetElementsOffset, &elements, sizeof elements);
     return raw;
@@ -57,13 +60,7 @@ void* allocate_dictionary(void* metadata, int scale, int32_t age, int64_t seed, 
     const size_t keys_at = align_up(kDictionaryBitmapOffset + bitmap_bytes(scale), alignment_mask(key_witnesses));
     const size_t values_at = align_up(keys_at + buckets * key_witnesses->stride, alignment_mask(value_witnesses));
     auto* raw = static_cast<char*>(calloc(1, values_at + buckets * value_witnesses->stride));
-    auto* header = reinterpret_cast<HashedHeader*>(raw);
-    header->metadata = metadata;
-    new (&header->references) std::atomic<uint64_t>(1);
-    header->capacity = static_cast<int64_t>(static_cast<double>(buckets) * kMaximumLoadFactor);
-    header->scale = static_cast<int8_t>(scale);
-    header->age = age;
-    header->seed = has_seed ? seed : reinterpret_cast<int64_t>(raw);
+    init_hashed_header(raw, metadata, scale, age, seed, has_seed);
     void* keys = raw + keys_at;
     void* values = raw + values_at;
     memcpy(raw + kDictionaryKeysOffset, &keys, sizeof keys);

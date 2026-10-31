@@ -97,7 +97,6 @@ size_t array_storage_contents(void* storage, void* element_type, char** elements
 
 namespace stdlib {
 
-using SymbolTable = std::unordered_map<std::string_view, void*>;
 void add_stdlib_runtime_symbols(SymbolTable& table);
 void add_stdlib_strings_symbols(SymbolTable& table);
 void add_stdlib_collections_symbols(SymbolTable& table);

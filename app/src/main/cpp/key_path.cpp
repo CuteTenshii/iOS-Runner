@@ -209,6 +209,11 @@ void walk_key_path(const void* key_path, void* root, Finish finish) {
     }
 }
 
+[[noreturn]] void stop_unsupported_component(uint32_t kind) {
+    engine_log("STOP: unsupported final key path component %u", kind);
+    abort();
+}
+
 }  // namespace
 
 void key_path_get(const void* key_path, void* root, void* out, void* value_type) {
@@ -224,8 +229,7 @@ void key_path_get(const void* key_path, void* root, void* out, void* value_type)
                 rt_key_path_getter(step.getter, out, base, step.arguments, step.argument_size);
                 break;
             default:
-                engine_log("STOP: unsupported final key path component %u", step.kind);
-                abort();
+                stop_unsupported_component(step.kind);
         }
     });
 }
@@ -247,8 +251,7 @@ void key_path_set(const void* key_path, void* root, void* new_value, void* value
                 rt_key_path_setter(step.setter, new_value, base, step.arguments, step.argument_size);
                 break;
             default:
-                engine_log("STOP: unsupported final key path component %u", step.kind);
-                abort();
+                stop_unsupported_component(step.kind);
         }
     });
 }

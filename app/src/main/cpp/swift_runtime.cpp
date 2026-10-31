@@ -283,20 +283,29 @@ constexpr ValueWitnessTable pod_witnesses() {
 using RetainFunction = void* (*)(void*);
 using ReleaseFunction = void (*)(void*);
 
+template <RetainFunction Retain>
+void* reference_copy(void* destination, void* source, void*) {
+    *static_cast<void**>(destination) = Retain(*static_cast<void**>(source));
+    return destination;
+}
+
+// Invalid low pointers are the extra inhabitants: 0 is Optional.none.
+uint32_t low_pointer_get_tag(const void* value, uint32_t empty_cases, void*) {
+    if (empty_cases == 0) return 0;
+    const auto bits = *static_cast<const uintptr_t*>(value);
+    return bits < kFirstValidPointer ? static_cast<uint32_t>(bits) + 1 : 0;
+}
+
+void low_pointer_store_tag(void* value, uint32_t tag, uint32_t empty_cases, void*) {
+    if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
+}
+
 template <RetainFunction Retain, ReleaseFunction Release>
 constexpr ValueWitnessTable reference_witnesses() {
     return {
-        +[](void* destination, void* source, void*) -> void* {
-            auto* value = *static_cast<void**>(source);
-            *static_cast<void**>(destination) = Retain(value);
-            return destination;
-        },
+        reference_copy<Retain>,
         +[](void* value, void*) { Release(*static_cast<void**>(value)); },
-        +[](void* destination, void* source, void*) -> void* {
-            auto* value = *static_cast<void**>(source);
-            *static_cast<void**>(destination) = Retain(value);
-            return destination;
-        },
+        reference_copy<Retain>,
         +[](void* destination, void* source, void*) -> void* {
             auto* value = *static_cast<void**>(source);
             auto* previous = *static_cast<void**>(destination);
@@ -311,15 +320,8 @@ constexpr ValueWitnessTable reference_witnesses() {
             Release(previous);
             return destination;
         },
-        // Invalid low pointers are the extra inhabitants: 0 is Optional.none.
-        +[](const void* value, uint32_t empty_cases, void*) -> uint32_t {
-            if (empty_cases == 0) return 0;
-            const auto bits = *static_cast<const uintptr_t*>(value);
-            return bits < kFirstValidPointer ? static_cast<uint32_t>(bits) + 1 : 0;
-        },
-        +[](void* value, uint32_t tag, uint32_t empty_cases, void*) {
-            if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
-        },
+        low_pointer_get_tag,
+        low_pointer_store_tag,
         8, 8, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer), nullptr, nullptr, nullptr};
 }
 
@@ -357,14 +359,8 @@ const ValueWitnessTable kClosureWitnesses = {
     closure_assign_copy,
     pod_copy<16>,
     closure_assign_take,
-    +[](const void* value, uint32_t empty_cases, void*) -> uint32_t {
-        if (empty_cases == 0) return 0;
-        const auto bits = *static_cast<const uintptr_t*>(value);
-        return bits < kFirstValidPointer ? static_cast<uint32_t>(bits) + 1 : 0;
-    },
-    +[](void* value, uint32_t tag, uint32_t empty_cases, void*) {
-        if (empty_cases != 0 && tag != 0) *static_cast<uintptr_t*>(value) = tag - 1;
-    },
+    low_pointer_get_tag,
+    low_pointer_store_tag,
     16, 16, 7 | kFlagNonPod, static_cast<uint32_t>(kFirstValidPointer), nullptr, nullptr, nullptr};
 const ValueWitnessTable kInt8Witnesses = pod_witnesses<1>();
 const ValueWitnessTable kInt16Witnesses = pod_witnesses<2>();
@@ -431,17 +427,9 @@ __asm__(
     "rt_swiftui_app_main_entry:\n"
     "  b rt_app_main\n"
     ".globl rt_call_destroyer\n"
-    "rt_call_destroyer:\n"
-    "  stp x29, x30, [sp, #-32]!\n"
-    "  mov x29, sp\n"
-    "  str x20, [sp, #16]\n"
-    "  mov x16, x0\n"
+    "rt_call_destroyer:\n" SWIFT_CALL_PROLOGUE
     "  mov x0, x1\n"
-    "  mov x20, x1\n"
-    "  blr x16\n"
-    "  ldr x20, [sp, #16]\n"
-    "  ldp x29, x30, [sp], #32\n"
-    "  ret\n"
+    "  mov x20, x1\n" SWIFT_CALL_EPILOGUE
     // Swift's self and indirect-result registers cannot be set from C++.
     ".globl rt_call_witness\n"
     "rt_call_witness:\n"

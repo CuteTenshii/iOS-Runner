@@ -454,6 +454,35 @@ SWIFTCC uint8_t task_priority_raw_value(SWIFT_CONTEXT const uint64_t* self) { re
 }  // namespace
 
 // Every actor shares the one guest thread, so a hop just continues: the resume function is in x0, the context stays in x22.
+// Shared pieces of the async entry points below: x16 continues the caller, or the task has suspended.
+#define ASYNC_FINISH              \
+    "  ldp x29, x30, [sp], #48\n" \
+    "  br x16\n"                  \
+    "1:\n"                        \
+    "  ldp x29, x30, [sp], #48\n" \
+    "  ret\n"
+#define GROUP_WAIT         \
+    "  mov x4, x22\n"      \
+    "  add x5, sp, #32\n"  \
+    "  bl rt_group_wait\n" \
+    "  cbz w0, 1f\n"       \
+    "  ldr x20, [sp, #32]\n"
+#define SAVE_CALLEE_REGISTERS        \
+    "  stp x29, x30, [sp, #-112]!\n" \
+    "  mov x29, sp\n"                \
+    "  stp x19, x20, [sp, #16]\n"    \
+    "  stp x21, x22, [sp, #32]\n"    \
+    "  stp x23, x24, [sp, #48]\n"    \
+    "  stp x25, x26, [sp, #64]\n"    \
+    "  stp x27, x28, [sp, #80]\n"
+#define RESTORE_CALLEE_REGISTERS  \
+    "  ldp x19, x20, [sp, #16]\n" \
+    "  ldp x21, x22, [sp, #32]\n" \
+    "  ldp x23, x24, [sp, #48]\n" \
+    "  ldp x25, x26, [sp, #64]\n" \
+    "  ldp x27, x28, [sp, #80]\n" \
+    "  ldp x29, x30, [sp], #112\n"
+
 __asm__(
     ".text\n"
     ".globl rt_task_switch\n"
@@ -501,12 +530,7 @@ __asm__(
     "  ldr x0, [sp, #16]\n"
     "  bl rt_async_let_error\n"
     "  mov x20, x0\n"
-    "  ldr x16, [sp, #24]\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  br x16\n"
-    "1:\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  ret\n"
+    "  ldr x16, [sp, #24]\n" ASYNC_FINISH
     // Clock.sleep(until:tolerance:), with `until` in x0: it never finishes on the caller's stack.
     ".globl rt_clock_sleep\n"
     "rt_clock_sleep:\n"
@@ -561,73 +585,27 @@ __asm__(
     "  mov x29, sp\n"
     "  ldr x1, [x20]\n"
     "  ldr x2, [x22, #8]\n"
-    "  add x3, sp, #16\n"
-    "  mov x4, x22\n"
-    "  add x5, sp, #32\n"
-    "  bl rt_group_wait\n"
-    "  cbz w0, 1f\n"
-    "  ldr x20, [sp, #32]\n"
-    "  ldr x16, [x22, #8]\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  br x16\n"
-    "1:\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  ret\n"
+    "  add x3, sp, #16\n" GROUP_WAIT
+    "  ldr x16, [x22, #8]\n" ASYNC_FINISH
     ".globl rt_group_wait_entry\n"
     "rt_group_wait_entry:\n"
     "  stp x29, x30, [sp, #-48]!\n"
     "  mov x29, sp\n"
-    "  stp x2, x3, [sp, #16]\n"
-    "  mov x4, x22\n"
-    "  add x5, sp, #32\n"
-    "  bl rt_group_wait\n"
-    "  cbz w0, 1f\n"
-    "  ldr x20, [sp, #32]\n"
-    "  ldr x16, [sp, #16]\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  br x16\n"
-    "1:\n"
-    "  ldp x29, x30, [sp], #48\n"
-    "  ret\n"
+    "  stp x2, x3, [sp, #16]\n" GROUP_WAIT
+    "  ldr x16, [sp, #16]\n" ASYNC_FINISH
     ".globl rt_resume_task\n"
-    "rt_resume_task:\n"
-    "  stp x29, x30, [sp, #-112]!\n"
-    "  mov x29, sp\n"
-    "  stp x19, x20, [sp, #16]\n"
-    "  stp x21, x22, [sp, #32]\n"
-    "  stp x23, x24, [sp, #48]\n"
-    "  stp x25, x26, [sp, #64]\n"
-    "  stp x27, x28, [sp, #80]\n"
+    "rt_resume_task:\n" SAVE_CALLEE_REGISTERS
     "  mov x22, x1\n"
     "  mov x20, x2\n"
-    "  blr x0\n"
-    "  ldp x19, x20, [sp, #16]\n"
-    "  ldp x21, x22, [sp, #32]\n"
-    "  ldp x23, x24, [sp, #48]\n"
-    "  ldp x25, x26, [sp, #64]\n"
-    "  ldp x27, x28, [sp, #80]\n"
-    "  ldp x29, x30, [sp], #112\n"
+    "  blr x0\n" RESTORE_CALLEE_REGISTERS
     "  ret\n"
     ".globl rt_start_task\n"
-    "rt_start_task:\n"
-    "  stp x29, x30, [sp, #-112]!\n"
-    "  mov x29, sp\n"
-    "  stp x19, x20, [sp, #16]\n"
-    "  stp x21, x22, [sp, #32]\n"
-    "  stp x23, x24, [sp, #48]\n"
-    "  stp x25, x26, [sp, #64]\n"
-    "  stp x27, x28, [sp, #80]\n"
+    "rt_start_task:\n" SAVE_CALLEE_REGISTERS
     "  mov x16, x0\n"
     "  mov x0, x1\n"
     "  mov x20, x2\n"
     "  mov x22, x3\n"
-    "  blr x16\n"
-    "  ldp x19, x20, [sp, #16]\n"
-    "  ldp x21, x22, [sp, #32]\n"
-    "  ldp x23, x24, [sp, #48]\n"
-    "  ldp x25, x26, [sp, #64]\n"
-    "  ldp x27, x28, [sp, #80]\n"
-    "  ldp x29, x30, [sp], #112\n"
+    "  blr x16\n" RESTORE_CALLEE_REGISTERS
     "  ret\n");
 
 extern "C" void rt_task_switch();
