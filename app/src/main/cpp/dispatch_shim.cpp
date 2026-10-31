@@ -20,6 +20,7 @@
 extern "C" void* rt_call_witness(const void* function, void* out, void* self, void* type, void* table);
 extern "C" void* darwin_block_copy(const void*);
 extern "C" void rt_registrar_mark_dirty_c();
+extern "C" void* rt_swift_retain(void*);
 
 namespace {
 
@@ -83,7 +84,8 @@ void* queue_object(const std::string& label) {
     static std::map<std::string, void*> queues;
     void*& queue = queues[label];
     if (queue == nullptr) queue = objc_framework_object("OS_dispatch_queue");
-    return queue;
+    // These accessors return +1, and queues live as long as the process.
+    return rt_swift_retain(queue);
 }
 
 void* queue_main() { return queue_object("main"); }
