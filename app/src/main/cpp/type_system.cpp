@@ -813,6 +813,23 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     return struct_from_fields(key, found->second, arguments, witness_word_count(symbol));
 }
 
+// Generic code copies class values through these. A class's prefix holds a destroyer where value types keep a
+// layout, so they forward as a plain reference rather than reading the layout of the type they're given.
+ValueWitnessTable* class_reference_witnesses() {
+    static ValueWitnessTable* witnesses = [] {
+        auto* table = new ValueWitnessTable(*witnesses_of(native_type()));
+        table->initialize_buffer_with_copy = +[](void* destination, void* source, void*) { return witness_buffer_copy(destination, source, native_type()); };
+        table->destroy = +[](void* value, void*) { witness_destroy(value, native_type()); };
+        table->initialize_with_copy = +[](void* destination, void* source, void*) { return witness_copy(destination, source, native_type()); };
+        table->assign_with_copy = +[](void* destination, void* source, void*) { return witness_assign_copy(destination, source, native_type()); };
+        table->assign_with_take = +[](void* destination, void* source, void*) { return witness_assign_take(destination, source, native_type()); };
+        table->get_enum_tag_single_payload = +[](const void* value, uint32_t count, void*) { return witness_get_tag(value, count, native_type()); };
+        table->store_enum_tag_single_payload = +[](void* value, uint32_t tag, uint32_t count, void*) { witness_store_tag(value, tag, count, native_type()); };
+        return table;
+    }();
+    return witnesses;
+}
+
 // Types whose stored layout the app's compiled code depends on; everything else from a framework is one reference.
 Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& arguments) {
     std::string key = symbol;
@@ -834,6 +851,7 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
         }
         auto destroyer = storage_destroyer_for(symbol.c_str());
         block[0] = reinterpret_cast<void*>(destroyer != nullptr ? destroyer : free);
+        block[1] = class_reference_witnesses();
         block[2] = nullptr;
         auto* metadata = reinterpret_cast<Metadata*>(block + 2);
         for (size_t i = 0; i < arguments.size(); ++i) block[4 + i] = arguments[i];
@@ -2182,6 +2200,11 @@ constexpr size_t kVTableHeaderBytes = 8;
 constexpr size_t kMethodDescriptorBytes = 8;
 constexpr size_t kMethodImplementationOffset = 4;
 constexpr size_t kOverrideEntryBytes = 12;
+constexpr size_t kResilientSuperclassBytes = 4;
+constexpr uint32_t kMetadataInitializationShift = 16;
+constexpr uint32_t kMetadataInitializationMask = 3;
+constexpr uint32_t kSingletonMetadataInitialization = 1;
+constexpr size_t kSingletonInitializationBytes = 12;
 
 const char* indirect_relative(const char* field) {
     int32_t offset;
@@ -2200,6 +2223,9 @@ const char* class_vtable_header(const char* descriptor) {
         memcpy(&requirements, cursor + kNumRequirementsOffset, sizeof requirements);
         cursor += kGenericHeaderBytes + ((params + 3u) & ~3u) + requirements * kRequirementBytes;
     }
+    const uint32_t flags = read_u32_at(descriptor);
+    if (flags & kClassHasResilientSuperclass) cursor += kResilientSuperclassBytes;
+    if (((flags >> kMetadataInitializationShift) & kMetadataInitializationMask) == kSingletonMetadataInitialization) cursor += kSingletonInitializationBytes;
     return cursor;
 }
 
