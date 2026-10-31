@@ -21,10 +21,6 @@ adb install -r -t app/build/outputs/apk/debug/app-debug.apk
 | `IOSRUNNER_EFENCE=1` | Links `tools/efence.cpp`, a guard-page allocator that turns heap overruns and use-after-free into immediate faults |
 | `IOSRUNNER_TRACE_HEAP=1` | Logs object destruction |
 | `IOSRUNNER_SEED_ACCOUNTS=<file>` | Installs a file as Block Extreme Droite's saved `accounts.json` |
-| `IOSRUNNER_DRIVE=<button text>` | Taps that button and answers the guest's web view scripts with a canned block flow (`cli_main.cpp`) |
-| `IOSRUNNER_DRIVE_WHEN=<text>` | Waits for a tree containing this text before tapping; action ids change between trees |
-| `IOSRUNNER_DRIVE_SECONDS=<n>` | How long a driven run lasts |
-| `IOSRUNNER_DRIVE_SITE=<dir>` | Answers HTTP requests from files named after the URL's last path component |
 
 On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-as moe.tenshii.iosrunner cat cache/engine.log`. Installed apps are under `files/apps/<bundle id>/`. `logcat` can be empty on some phones, so fatal VM errors and uncaught C++ exceptions are also copied into this log.
 
@@ -54,4 +50,4 @@ Shims are hand-written against the Swift ABI, so most bugs are ABI mismatches:
 
 ## Testing against real services
 
-Guest apps do what they were built to do, including reporting to their servers and acting on real accounts. Test risky flows with fixtures: `IOSRUNNER_SEED_ACCOUNTS` and `IOSRUNNER_DRIVE*` on the host, or a local page reached through `adb reverse` on a phone. Block Extreme Droite's `BlockCounter` posts every completed block to the live site, even when the block itself was against a fixture.
+Guest apps do what they were built to do, including reporting to their servers and acting on real accounts. Test risky flows with fixtures: `IOSRUNNER_SEED_ACCOUNTS` on the host, or a local page reached through `adb reverse` on a phone, tapping with `adb shell input tap`. Block Extreme Droite's `BlockCounter` posts every completed block to the live site, even when the block itself was against a fixture.
