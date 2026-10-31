@@ -40,7 +40,7 @@ On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-a
 - `stdlib_shim`, `foundation_shim`, `concurrency_shim`, `objc_runtime`, `codable_shim`, `regex_shim`, `key_path`, `coredata_shim`, `combine_shim`, `dispatch_shim` and `swiftui_shim` implement the libraries of the same name.
 - `__isPlatformVersionAtLeast` answers as the app's deployment target, so apps take the paths that need no weak imports. Unknown messages to `UI*` classes log `UIKIT: ignoring` and return nil, since the host draws the interface; every other unknown message stops the run.
 - The large shims are split by theme into `<name>_*.cpp` with a private `<name>_internal.h`: `foundation_*`, `stdlib_*` and `swiftui_*`. Each part registers its own symbols, and `<name>_shim.cpp` merges them.
-- `swiftui_views` and `swiftui_modifiers` have resilient views build `ViewNode` boxes, walks the app's view values by reflection, and emits a JSON tree. `GuestActivity` sends actions back by id, and each action re-renders the tree.
+- In `swiftui_views` and `swiftui_modifiers`, resilient views build `ViewNode` boxes. `swiftui_render` walks the app's view values by reflection and emits a JSON tree. `GuestActivity` sends actions back by id, and each action re-renders the tree.
 - `concurrency_shim.cpp` runs every task on the one guest thread, from a ready queue plus sleep timers drained by the render loop.
 
 ### Writing shims
