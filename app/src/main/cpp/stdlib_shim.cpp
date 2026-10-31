@@ -814,6 +814,23 @@ SWIFTCC void set_algebra_from_sequence(SWIFT_OUT void* out, void*, void* type, v
     }
 }
 
+// Characters here are Unicode scalars, which is what the app's ASCII strings need.
+int64_t scalar_count(const std::string& text) {
+    int64_t count = 0;
+    for (const char c : text) count += (static_cast<unsigned char>(c) & 0xC0) != 0x80 ? 1 : 0;
+    return count;
+}
+
+SWIFTCC int64_t string_count(SwiftString text) { return scalar_count(swift_string_to_utf8(text)); }
+
+SWIFTCC SwiftString string_describing(const void* value, void* type) {
+    SwiftString out = swift_string_from_utf8("");
+    print_unlocked(value, &out, type);
+    return out;
+}
+
+SWIFTCC SwiftString string_from_c_string(const char* text) { return swift_string_from_utf8(text); }
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -847,6 +864,10 @@ void* stdlib_symbol(std::string_view name) {
         {"$ss15_print_unlockedyyx_q_zts16TextOutputStreamR_r0_lF", reinterpret_cast<void*>(print_unlocked)},
         {"$sSa11descriptionSSvg", reinterpret_cast<void*>(array_description)},
         {"$sSKsSS7ElementRtzrlE6joined9separatorS2S_tF", reinterpret_cast<void*>(strings_joined)},
+        {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
+        {"$sSS10describingSSx_tclufC", reinterpret_cast<void*>(string_describing)},
+        {"$sSS7cStringSSSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},
+        {"$sSS7cStringSSSPys5UInt8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},
         {"$sSS6appendyySSF", reinterpret_cast<void*>(string_append)},
         {"$ss11_StringGutsV4growyySiF", reinterpret_cast<void*>(string_guts_grow)},
         {"$sSS10lowercasedSSyF", reinterpret_cast<void*>(string_lowercased)},

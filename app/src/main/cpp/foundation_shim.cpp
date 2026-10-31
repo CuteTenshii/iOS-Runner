@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <ctime>
 
 #include <atomic>
 #include <cerrno>
@@ -2211,6 +2212,32 @@ void foundation_cookies_changed() {
 
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
 
+constexpr double kSecondsFrom1970To2001 = 978307200;
+
+bool foundation_parse_iso8601(const std::string& text, double& seconds) {
+    tm parts{};
+    int consumed = 0;
+    if (sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d%n", &parts.tm_year, &parts.tm_mon, &parts.tm_mday, &parts.tm_hour, &parts.tm_min, &parts.tm_sec, &consumed) < 3) return false;
+    parts.tm_year -= 1900;
+    parts.tm_mon -= 1;
+    double result = static_cast<double>(timegm(&parts));
+    const char* rest = text.c_str() + consumed;
+    if (consumed > 0 && *rest == '.') {
+        char* end;
+        result += strtod(rest, &end);
+        rest = end;
+    }
+    int hours = 0, minutes = 0;
+    if ((*rest == '+' || *rest == '-') && sscanf(rest + 1, "%d:%d", &hours, &minutes) >= 1) {
+        const double offset = hours * 3600.0 + minutes * 60.0;
+        result += *rest == '+' ? -offset : offset;
+    }
+    seconds = result - kSecondsFrom1970To2001;
+    return true;
+}
+
+void* foundation_make_url(const std::string& text) { return make_url_box(text); }
+
 void* foundation_native_array(void* object) {
     void* value = nullptr;
     return object != nullptr && bridged_collection_value(object, value) ? value : nullptr;
@@ -2269,6 +2296,199 @@ SWIFTCC SwiftString string_format_arguments(SwiftString format, void* arguments)
     return swift_string_from_utf8(out);
 }
 
+// StringProtocol's Foundation API: Self and its generic arguments are only ever String here, passed by address.
+SWIFTCC bool string_contains(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    return swift_string_to_utf8(*self).find(swift_string_to_utf8(*other)) != std::string::npos;
+}
+
+std::string ascii_lowered(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return static_cast<char>(tolower(c)); });
+    return text;
+}
+
+SWIFTCC bool string_contains_any_case(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    return ascii_lowered(swift_string_to_utf8(*self)).find(ascii_lowered(swift_string_to_utf8(*other))) != std::string::npos;
+}
+
+constexpr int64_t kOrderedAscending = -1;
+constexpr int64_t kOrderedDescending = 1;
+
+SWIFTCC int64_t string_compare_any_case(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    const int order = ascii_lowered(swift_string_to_utf8(*self)).compare(ascii_lowered(swift_string_to_utf8(*other)));
+    return order < 0 ? kOrderedAscending : order > 0 ? kOrderedDescending
+                                                     : 0;
+}
+
+SWIFTCC SwiftString string_replacing(const SwiftString* target, const SwiftString* replacement, uint64_t, uint64_t, uint64_t, uint64_t, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    std::string text = swift_string_to_utf8(*self);
+    const std::string from = swift_string_to_utf8(*target);
+    const std::string to = swift_string_to_utf8(*replacement);
+    if (!from.empty()) {
+        for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size())) text.replace(at, from.size(), to);
+    }
+    return swift_string_from_utf8(text);
+}
+
+// CharacterSet is one reference to this set of bytes; the framework's sets are all ASCII as far as this runtime goes.
+struct CharacterSetBox {
+    NativeObject header;
+    std::string* members;
+};
+
+const StorageMetadata kCharacterSetMetadata = {free, nullptr, 0};
+
+CharacterSetBox* new_character_set(std::string members) {
+    auto* box = static_cast<CharacterSetBox*>(calloc(1, sizeof(CharacterSetBox)));
+    box->header.isa = const_cast<uint64_t*>(&kCharacterSetMetadata.kind);
+    box->header.references = 1;
+    box->members = new std::string(std::move(members));
+    return box;
+}
+
+constexpr const char* kAlphanumerics = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+SWIFTCC void set_whitespace(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(" \t"); }
+SWIFTCC void set_newlines(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set("\n\r"); }
+SWIFTCC void set_whitespace_newlines(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(" \t\n\r"); }
+SWIFTCC void set_alphanumerics(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(kAlphanumerics); }
+SWIFTCC void set_url_query(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics) + "-._~!$&'()*+,;=:@/?"); }
+SWIFTCC void set_characters_in(__attribute__((swift_indirect_result)) CharacterSetBox** out, SwiftString text) { *out = new_character_set(swift_string_to_utf8(text)); }
+SWIFTCC void set_insert_characters(SwiftString text, __attribute__((swift_context)) CharacterSetBox** self) { *(*self)->members += swift_string_to_utf8(text); }
+SWIFTCC void set_remove_characters(SwiftString text, __attribute__((swift_context)) CharacterSetBox** self) {
+    for (const char c : swift_string_to_utf8(text)) {
+        std::string& members = *(*self)->members;
+        members.erase(std::remove(members.begin(), members.end(), c), members.end());
+    }
+}
+
+SWIFTCC SwiftString string_trimming_set(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    const std::string text = swift_string_to_utf8(*self);
+    const size_t first = text.find_first_not_of(*(*set)->members);
+    if (first == std::string::npos) return swift_string_from_utf8("");
+    return swift_string_from_utf8(text.substr(first, text.find_last_not_of(*(*set)->members) - first + 1));
+}
+
+void* string_array(const std::vector<std::string>& parts) {
+    char* elements;
+    void* storage = make_array_storage(type_system_symbol("$sSSN"), parts.size(), &elements);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const SwiftString part = swift_string_from_utf8(parts[i]);
+        memcpy(elements + i * sizeof part, &part, sizeof part);
+    }
+    return storage;
+}
+
+SWIFTCC void* string_components_string(const SwiftString* separator, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    const std::string text = swift_string_to_utf8(*self);
+    const std::string by = swift_string_to_utf8(*separator);
+    std::vector<std::string> parts;
+    size_t start = 0;
+    for (size_t at = by.empty() ? std::string::npos : text.find(by); at != std::string::npos; at = text.find(by, start)) {
+        parts.push_back(text.substr(start, at - start));
+        start = at + by.size();
+    }
+    parts.push_back(text.substr(start));
+    return string_array(parts);
+}
+
+SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    const std::string text = swift_string_to_utf8(*self);
+    std::vector<std::string> parts;
+    size_t start = 0;
+    for (size_t at = text.find_first_of(*(*set)->members); at != std::string::npos; at = text.find_first_of(*(*set)->members, start)) {
+        parts.push_back(text.substr(start, at - start));
+        start = at + 1;
+    }
+    parts.push_back(text.substr(start));
+    return string_array(parts);
+}
+
+SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    std::string out;
+    for (const char c : swift_string_to_utf8(*self)) {
+        if ((*set)->members->find(c) != std::string::npos) {
+            out += c;
+        } else {
+            char escaped[4];
+            snprintf(escaped, sizeof escaped, "%%%02X", static_cast<unsigned char>(c));
+            out += escaped;
+        }
+    }
+    const SwiftString value = swift_string_from_utf8(out);
+    return {value.count_and_flags, value.object};
+}
+
+SWIFTCC OptionalSwiftString string_removing_percent(void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    const std::string text = swift_string_to_utf8(*self);
+    std::string out;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '%' && i + 2 < text.size() && isxdigit(static_cast<unsigned char>(text[i + 1])) && isxdigit(static_cast<unsigned char>(text[i + 2]))) {
+            out += static_cast<char>(strtol(text.substr(i + 1, 2).c_str(), nullptr, 16));
+            i += 2;
+        } else {
+            out += text[i];
+        }
+    }
+    const SwiftString value = swift_string_from_utf8(out);
+    return {value.count_and_flags, value.object};
+}
+
+SWIFTCC SwiftString string_capitalized(void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+    std::string text = ascii_lowered(swift_string_to_utf8(*self));
+    bool start = true;
+    for (char& c : text) {
+        if (start) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+        start = isspace(static_cast<unsigned char>(c)) != 0;
+    }
+    return swift_string_from_utf8(text);
+}
+
+// String.Encoding is a raw NSStringEncoding; only UTF-8 compatible text passes through this runtime.
+constexpr uint64_t kEncodingAscii = 1;
+constexpr uint64_t kEncodingUtf8 = 4;
+constexpr uint64_t kEncodingLatin1 = 5;
+
+template <uint64_t Encoding>
+SWIFTCC void encoding_getter(__attribute__((swift_indirect_result)) uint64_t* out) { *out = Encoding; }
+
+SWIFTCC void encoding_from_raw(__attribute__((swift_indirect_result)) uint64_t* out, uint64_t raw) { *out = raw; }
+
+// `Data?`'s none has this tag in its second word, where Data's own storage tags never reach.
+constexpr uint64_t kOptionalDataNoneTag = 0xF000000000000000ULL;
+
+SWIFTCC DataValue string_data_using(const uint64_t*, bool, void*, void*, __attribute__((swift_context)) const SwiftString* self) { return make_data(swift_string_to_utf8(*self)); }
+
+SWIFTCC OptionalSwiftString string_from_data(uint64_t range, uint64_t storage, const uint64_t*) {
+    if (storage == kOptionalDataNoneTag) return {0, 0};
+    const SwiftString value = swift_string_from_utf8(data_bytes(range, storage));
+    return {value.count_and_flags, value.object};
+}
+
+SWIFTCC SwiftString string_contents_of(URLBox** url, const uint64_t*, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+    const std::string path = url_path(*(*url)->text);
+    FILE* file = fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        *error = foundation_make_error("The file couldn't be opened.", 260);
+        return {0, 0};
+    }
+    std::string text;
+    char chunk[4096];
+    for (size_t got; (got = fread(chunk, 1, sizeof chunk, file)) > 0;) text.append(chunk, got);
+    fclose(file);
+    return swift_string_from_utf8(text);
+}
+
+SWIFTCC void string_write_to(URLBox** url, bool, const uint64_t*, void*, void*, __attribute__((swift_context)) const SwiftString* self, __attribute__((swift_error_result)) void** error) {
+    FILE* file = fopen(url_path(*(*url)->text).c_str(), "wb");
+    if (file == nullptr) {
+        *error = foundation_make_error("The file couldn't be saved.", 512);
+        return;
+    }
+    const std::string text = swift_string_to_utf8(*self);
+    fwrite(text.data(), 1, text.size(), file);
+    fclose(file);
+}
+
 SWIFTCC SwiftString ns_localized_string(SwiftString key) { return swift_string_from_utf8(localization_lookup(swift_string_to_utf8(key))); }
 
 // A task from dataTask(with:completionHandler:): the request happens once resume is called.
@@ -2312,6 +2532,133 @@ void run_data_task(void* raw) {
 
 void session_task_resume(void* self, const char*) { dispatch_enqueue(run_data_task, self); }
 void session_task_cancel(void*, const char*) {}
+
+SWIFTCC void date_unbridge(__attribute__((swift_indirect_result)) double* out, void* object) {
+    double seconds = 0;
+    if (object != nullptr) foundation_object_date(object, seconds);
+    *out = seconds;
+}
+
+double seconds_now_since_2001() {
+    timespec now{};
+    clock_gettime(CLOCK_REALTIME, &now);
+    return static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_nsec) / 1e9 - kSecondsFrom1970To2001;
+}
+
+constexpr double kDistantPast = -63114076800.0;
+
+SWIFTCC void date_distant_past(__attribute__((swift_indirect_result)) double* out) { *out = kDistantPast; }
+SWIFTCC double date_interval_since(const double* other, __attribute__((swift_context)) const double* self) { return *self - *other; }
+SWIFTCC void date_adding(__attribute__((swift_indirect_result)) double* out, double interval, __attribute__((swift_context)) const double* self) { *out = *self + interval; }
+SWIFTCC void date_plus(__attribute__((swift_indirect_result)) double* out, const double* date, double interval) { *out = *date + interval; }
+SWIFTCC void date_from_interval_since(__attribute__((swift_indirect_result)) double* out, double interval, const double* date) { *out = *date + interval; }
+SWIFTCC bool date_greater(const double* left, const double* right) { return *left > *right; }
+SWIFTCC bool date_less(const double* left, const double* right) { return *left < *right; }
+SWIFTCC bool date_equal(const double* left, const double* right) { return *left == *right; }
+SWIFTCC void date_from_since_now(__attribute__((swift_indirect_result)) double* out, double interval) { *out = seconds_now_since_2001() + interval; }
+SWIFTCC double date_since_now(__attribute__((swift_context)) const double* self) { return *self - seconds_now_since_2001(); }
+SWIFTCC void date_from_1970(__attribute__((swift_indirect_result)) double* out, double interval) { *out = interval - kSecondsFrom1970To2001; }
+SWIFTCC double date_since_1970(__attribute__((swift_context)) const double* self) { return *self + kSecondsFrom1970To2001; }
+
+// `result` is a String? written in place.
+SWIFTCC bool string_conditional_bridge(void* object, SwiftString* result, void*) {
+    *result = swift_string_from_utf8(nsstring_text(object));
+    return true;
+}
+
+SWIFTCC void string_force_bridge(void* object, SwiftString* result, void*) { *result = swift_string_from_utf8(nsstring_text(object)); }
+
+void* bundle_identifier_object(void*, const char*) { return new_nsstring(bundle_info_string("CFBundleIdentifier")); }
+
+struct ScannerObject {
+    NativeObject header;
+    std::string* text;
+};
+
+void* scanner_init(void* self, const char*, void* text) {
+    static_cast<ScannerObject*>(self)->text = new std::string(nsstring_text(text));
+    return self;
+}
+
+void* scanner_with_string(void*, const char*, void* text) { return scanner_init(objc_framework_object("NSScanner"), nullptr, text); }
+
+bool scanner_scan_hex(void* self, const char*, uint64_t* out) {
+    const std::string& text = *static_cast<ScannerObject*>(self)->text;
+    char* end;
+    const uint64_t value = strtoull(text.c_str(), &end, 16);
+    if (end == text.c_str()) return false;
+    if (out != nullptr) *out = value;
+    return true;
+}
+
+void* iso_formatter_date(void*, const char*, void* text) {
+    double seconds = 0;
+    return text != nullptr && foundation_parse_iso8601(nsstring_text(text), seconds) ? new_date_object(seconds) : nullptr;
+}
+
+void formatter_ignore_word(void*, const char*, uint64_t) {}
+
+// A date format pattern's fields, as strftime spells them; only numeric UTC formats reach this runtime.
+std::string strftime_pattern(const std::string& format) {
+    static const std::pair<const char*, const char*> kFields[] = {{"yyyy", "%Y"}, {"MMMM", "%B"}, {"MMM", "%b"}, {"MM", "%m"}, {"dd", "%d"}, {"HH", "%H"}, {"hh", "%I"}, {"mm", "%M"}, {"ss", "%S"}, {"a", "%p"}};
+    std::string out;
+    for (size_t i = 0; i < format.size();) {
+        if (format[i] == '\'') {
+            const size_t end = format.find('\'', i + 1);
+            if (end == std::string::npos) break;
+            out += format.substr(i + 1, end - i - 1);
+            i = end + 1;
+            continue;
+        }
+        bool matched = false;
+        for (const auto& [field, spelled] : kFields) {
+            if (format.compare(i, strlen(field), field) == 0) {
+                out += spelled;
+                i += strlen(field);
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) out += format[i++];
+    }
+    return out;
+}
+
+struct DateFormatterObject {
+    NativeObject header;
+    std::string* format;
+};
+
+void date_formatter_set_format(void* self, const char*, void* format) {
+    auto* formatter = static_cast<DateFormatterObject*>(self);
+    delete formatter->format;
+    formatter->format = new std::string(format == nullptr ? std::string() : nsstring_text(format));
+}
+
+std::string date_formatter_pattern(void* self) {
+    const auto* format = static_cast<DateFormatterObject*>(self)->format;
+    return strftime_pattern(format == nullptr || format->empty() ? "yyyy-MM-dd HH:mm" : *format);
+}
+
+constexpr double kFormatterEpochOffset = 978307200;
+
+void* date_formatter_date(void* self, const char*, void* text) {
+    if (text == nullptr) return nullptr;
+    tm parts{};
+    if (strptime(nsstring_text(text).c_str(), date_formatter_pattern(self).c_str(), &parts) == nullptr) return nullptr;
+    return new_date_object(static_cast<double>(timegm(&parts)) - kFormatterEpochOffset);
+}
+
+void* date_formatter_string(void* self, const char*, void* date) {
+    double seconds = 0;
+    if (date == nullptr || !foundation_object_date(date, seconds)) return new_nsstring("");
+    const time_t clock = static_cast<time_t>(seconds + kFormatterEpochOffset);
+    tm parts{};
+    gmtime_r(&clock, &parts);
+    char text[128];
+    strftime(text, sizeof text, date_formatter_pattern(self).c_str(), &parts);
+    return new_nsstring(text);
+}
 
 std::string foundation_object_text(void* object) {
     const void* isa = static_cast<NativeObject*>(object)->isa;
@@ -2438,6 +2785,20 @@ void foundation_register_classes() {
     objc_register_method("-[NSURLSession dataTaskWithRequest:completionHandler:]", reinterpret_cast<const void*>(session_task_request));
     objc_register_method("-[NSURLSessionDataTask resume]", reinterpret_cast<const void*>(session_task_resume));
     objc_register_method("-[NSURLSessionDataTask cancel]", reinterpret_cast<const void*>(session_task_cancel));
+    objc_register_method("-[NSISO8601DateFormatter setFormatOptions:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSISO8601DateFormatter dateFromString:]", reinterpret_cast<const void*>(iso_formatter_date));
+    objc_register_method("-[NSDateFormatter setDateFormat:]", reinterpret_cast<const void*>(date_formatter_set_format));
+    objc_register_method("-[NSDateFormatter setLocale:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSDateFormatter setTimeZone:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSDateFormatter setCalendar:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSDateFormatter setDateStyle:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSDateFormatter setTimeStyle:]", reinterpret_cast<const void*>(formatter_ignore_word));
+    objc_register_method("-[NSDateFormatter dateFromString:]", reinterpret_cast<const void*>(date_formatter_date));
+    objc_register_method("-[NSDateFormatter stringFromDate:]", reinterpret_cast<const void*>(date_formatter_string));
+    objc_register_method("-[NSBundle bundleIdentifier]", reinterpret_cast<const void*>(bundle_identifier_object));
+    objc_register_method("-[NSScanner initWithString:]", reinterpret_cast<const void*>(scanner_init));
+    objc_register_method("+[NSScanner scannerWithString:]", reinterpret_cast<const void*>(scanner_with_string));
+    objc_register_method("-[NSScanner scanHexLongLong:]", reinterpret_cast<const void*>(scanner_scan_hex));
     objc_register_method("+[NSURLSession sharedSession]", reinterpret_cast<const void*>(url_session_shared));
     objc_register_method("+[UIDevice currentDevice]", reinterpret_cast<const void*>(device_current));
     objc_register_method("-[UIDevice systemName]", reinterpret_cast<const void*>(device_system_name));
@@ -2515,6 +2876,49 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation3URLV5querySSSgvg", reinterpret_cast<void*>(url_query)},
         {"$s10Foundation3URLV4portSiSgvg", reinterpret_cast<void*>(url_port)},
         {"$s10Foundation3URLV6string10relativeToACSgSSh_AFhtcfC", reinterpret_cast<void*>(url_string_relative)},
+        {"$s10Foundation4DateV36_unconditionallyBridgeFromObjectiveCyACSo6NSDateCSgFZ", reinterpret_cast<void*>(date_unbridge)},
+        {"$s10Foundation4DateV11distantPastACvgZ", reinterpret_cast<void*>(date_distant_past)},
+        {"$s10Foundation4DateV17timeIntervalSinceySdACF", reinterpret_cast<void*>(date_interval_since)},
+        {"$s10Foundation4DateV18addingTimeIntervalyACSdF", reinterpret_cast<void*>(date_adding)},
+        {"$s10Foundation4DateV1poiyA2C_SdtFZ", reinterpret_cast<void*>(date_plus)},
+        {"$s10Foundation4DateV12timeInterval5sinceACSd_ACtcfC", reinterpret_cast<void*>(date_from_interval_since)},
+        {"$s10Foundation4DateV1goiySbAC_ACtFZ", reinterpret_cast<void*>(date_greater)},
+        {"$s10Foundation4DateV1loiySbAC_ACtFZ", reinterpret_cast<void*>(date_less)},
+        {"$s10Foundation4DateV2eeoiySbAC_ACtFZ", reinterpret_cast<void*>(date_equal)},
+        {"$s10Foundation4DateV20timeIntervalSinceNowACSd_tcfC", reinterpret_cast<void*>(date_from_since_now)},
+        {"$s10Foundation4DateV20timeIntervalSinceNowSdvg", reinterpret_cast<void*>(date_since_now)},
+        {"$s10Foundation4DateV21timeIntervalSince1970ACSd_tcfC", reinterpret_cast<void*>(date_from_1970)},
+        {"$s10Foundation4DateV21timeIntervalSince1970Sdvg", reinterpret_cast<void*>(date_since_1970)},
+        {"$s10Foundation4DateV3nowACvgZ", reinterpret_cast<void*>(date_now)},
+        {"$sSS10FoundationE34_conditionallyBridgeFromObjectiveC_6resultSbSo8NSStringC_SSSgztFZ", reinterpret_cast<void*>(string_conditional_bridge)},
+        {"$sSS10FoundationE26_forceBridgeFromObjectiveC_6resultySo8NSStringC_SSSgztFZ", reinterpret_cast<void*>(string_force_bridge)},
+        {"$sSy10FoundationE8containsySbqd__SyRd__lF", reinterpret_cast<void*>(string_contains)},
+        {"$sSy10FoundationE32localizedCaseInsensitiveContainsySbqd__SyRd__lF", reinterpret_cast<void*>(string_contains_any_case)},
+        {"$sSy10FoundationE31localizedCaseInsensitiveCompareySo18NSComparisonResultVqd__SyRd__lF", reinterpret_cast<void*>(string_compare_any_case)},
+        {"$sSy10FoundationE22caseInsensitiveCompareySo18NSComparisonResultVqd__SyRd__lF", reinterpret_cast<void*>(string_compare_any_case)},
+        {"$sSy10FoundationE20replacingOccurrences2of4with7options5rangeSSqd___qd_0_So22NSStringCompareOptionsVSnySS5IndexVGSgtSyRd__SyRd_0_r0_lF", reinterpret_cast<void*>(string_replacing)},
+        {"$sSy10FoundationE18trimmingCharacters2inSSAA12CharacterSetV_tF", reinterpret_cast<void*>(string_trimming_set)},
+        {"$sSy10FoundationE10components11separatedBySaySSGqd___tSyRd__lF", reinterpret_cast<void*>(string_components_string)},
+        {"$sSy10FoundationE10components11separatedBySaySSGAA12CharacterSetV_tF", reinterpret_cast<void*>(string_components_set)},
+        {"$sSy10FoundationE21addingPercentEncoding21withAllowedCharactersSSSgAA12CharacterSetV_tF", reinterpret_cast<void*>(string_adding_percent)},
+        {"$sSy10FoundationE23removingPercentEncodingSSSgvg", reinterpret_cast<void*>(string_removing_percent)},
+        {"$sSy10FoundationE11capitalizedSSvg", reinterpret_cast<void*>(string_capitalized)},
+        {"$sSy10FoundationE4data5using20allowLossyConversionAA4DataVSgSSAAE8EncodingV_SbtF", reinterpret_cast<void*>(string_data_using)},
+        {"$sSS10FoundationE4data8encodingSSSgAA4DataVh_SSAAE8EncodingVtcfC", reinterpret_cast<void*>(string_from_data)},
+        {"$sSS10FoundationE10contentsOf8encodingSSAA3URLVh_SSAAE8EncodingVtKcfC", reinterpret_cast<void*>(string_contents_of)},
+        {"$sSy10FoundationE5write2to10atomically8encodingyAA3URLV_SbSSAAE8EncodingVtKF", reinterpret_cast<void*>(string_write_to)},
+        {"$sSS10FoundationE8EncodingV4utf8ACvgZ", reinterpret_cast<void*>(encoding_getter<kEncodingUtf8>)},
+        {"$sSS10FoundationE8EncodingV5asciiACvgZ", reinterpret_cast<void*>(encoding_getter<kEncodingAscii>)},
+        {"$sSS10FoundationE8EncodingV9isoLatin1ACvgZ", reinterpret_cast<void*>(encoding_getter<kEncodingLatin1>)},
+        {"$sSS10FoundationE8EncodingV8rawValueACSu_tcfC", reinterpret_cast<void*>(encoding_from_raw)},
+        {"$s10Foundation12CharacterSetV11whitespacesACvgZ", reinterpret_cast<void*>(set_whitespace)},
+        {"$s10Foundation12CharacterSetV8newlinesACvgZ", reinterpret_cast<void*>(set_newlines)},
+        {"$s10Foundation12CharacterSetV22whitespacesAndNewlinesACvgZ", reinterpret_cast<void*>(set_whitespace_newlines)},
+        {"$s10Foundation12CharacterSetV13alphanumericsACvgZ", reinterpret_cast<void*>(set_alphanumerics)},
+        {"$s10Foundation12CharacterSetV15urlQueryAllowedACvgZ", reinterpret_cast<void*>(set_url_query)},
+        {"$s10Foundation12CharacterSetV12charactersInACSSh_tcfC", reinterpret_cast<void*>(set_characters_in)},
+        {"$s10Foundation12CharacterSetV6insert12charactersInySS_tF", reinterpret_cast<void*>(set_insert_characters)},
+        {"$s10Foundation12CharacterSetV6remove12charactersInySS_tF", reinterpret_cast<void*>(set_remove_characters)},
         {"$s10Foundation17NSLocalizedString_9tableName6bundle5value7commentS2S_SSSgSo8NSBundleCS2StF", reinterpret_cast<void*>(ns_localized_string)},
         {"$s10Foundation3URLV27applicationSupportDirectoryACvgZ", reinterpret_cast<void*>(url_application_support)},
         {"$s10Foundation3URLV6stringACSgSSh_tcfC", reinterpret_cast<void*>(url_from_string)},
@@ -2552,9 +2956,6 @@ void* foundation_symbol(std::string_view name) {
         {"$s10Foundation13URLComponentsV4pathSSvg", reinterpret_cast<void*>(components_path)},
         {"$s10Foundation13URLComponentsV10queryItemsSayAA12URLQueryItemVGSgvg", reinterpret_cast<void*>(components_query_items)},
         {"$s10Foundation13URLComponentsV10queryItemsSayAA12URLQueryItemVGSgvs", reinterpret_cast<void*>(components_set_query_items)},
-        {"$s10Foundation12CharacterSetV11whitespacesACvgZ", reinterpret_cast<void*>(character_set_whitespaces)},
-        {"$s10Foundation12CharacterSetV22whitespacesAndNewlinesACvgZ", reinterpret_cast<void*>(character_set_whitespaces_and_newlines)},
-        {"$sSy10FoundationE18trimmingCharacters2inSSAA12CharacterSetV_tF", reinterpret_cast<void*>(string_trimming)},
         {"$s10Foundation4UUIDVACycfC", reinterpret_cast<void*>(uuid_init)},
         {"$s10Foundation4UUIDV10uuidStringSSvg", reinterpret_cast<void*>(uuid_string)},
         {"swift_stdlib_random", reinterpret_cast<void*>(stdlib_random)},

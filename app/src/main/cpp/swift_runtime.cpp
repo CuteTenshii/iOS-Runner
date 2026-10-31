@@ -500,7 +500,9 @@ __asm__(
     extern "C" void rt_retain_##reg(); \
     extern "C" void rt_release_##reg();
 DECLARE_THUNK_PAIR(x1)
-DECLARE_THUNK_PAIR(x2) DECLARE_THUNK_PAIR(x8) DECLARE_THUNK_PAIR(x9) DECLARE_THUNK_PAIR(x10)
+DECLARE_THUNK_PAIR(x2)
+DECLARE_THUNK_PAIR(x8)
+DECLARE_THUNK_PAIR(x9) DECLARE_THUNK_PAIR(x10)
     DECLARE_THUNK_PAIR(x19) DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
         DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
 
@@ -563,6 +565,8 @@ void swift_runtime_attach_conformances(const void* section, size_t size) {
 void* swift_runtime_find_conformance(void* type, const void* protocol) {
     const auto wanted = reinterpret_cast<uintptr_t>(protocol) & ~kProtocolPointerTagMask;
     const void* descriptor = static_cast<void**>(type)[kMetadataDescriptorWord];
+    // A framework type the app extends has no descriptor here, so its import's name identifies it.
+    const char* foreign_name = foreign_type_name(type);
     for (size_t i = 0; i + sizeof(int32_t) <= g_conformance_section_size; i += sizeof(int32_t)) {
         const auto* conformance = static_cast<const char*>(relative_direct(g_conformance_section + i));
         if ((reinterpret_cast<uintptr_t>(relative_indirectable(conformance)) & ~kProtocolPointerTagMask) != wanted) continue;
@@ -576,7 +580,9 @@ void* swift_runtime_find_conformance(void* type, const void* protocol) {
         } else {
             conforming = relative_direct(conformance + kConformanceTypeOffset);
         }
-        if (conforming == descriptor) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
+        const char* conforming_name = foreign_name != nullptr ? unresolved_symbol_at(reinterpret_cast<uintptr_t>(conforming)) : nullptr;
+        const bool same_import = conforming_name != nullptr && strcmp(conforming_name, foreign_name) == 0;
+        if (conforming == descriptor || same_import) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
     }
     // A framework type's conformance only needs to be distinct; thunks and the walker supply its behaviour.
     return rt_swift_getWitnessTable(static_cast<const char*>(protocol), type, nullptr);
