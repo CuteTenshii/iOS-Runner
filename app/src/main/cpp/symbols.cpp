@@ -90,6 +90,11 @@ void darwin_log_impl(...) {}
 // The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
 bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
+// The guest runs on one thread, so a lock is never contended and a trylock always succeeds.
+void darwin_lock_noop(void*) {}
+bool darwin_trylock_succeeds(void*) { return true; }
+int darwin_mutex_ok(void*, ...) { return 0; }
+
 double darwin_absolute_time() {
     constexpr double kSecondsFrom1970To2001 = 978307200.0;
     timespec now{};
@@ -219,6 +224,19 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"exit", reinterpret_cast<void*>(exit)},
         {"gettimeofday", reinterpret_cast<void*>(gettimeofday)},
         {"clock_gettime", reinterpret_cast<void*>(clock_gettime)},
+        {"os_unfair_lock_lock", reinterpret_cast<void*>(darwin_lock_noop)},
+        {"os_unfair_lock_unlock", reinterpret_cast<void*>(darwin_lock_noop)},
+        {"os_unfair_lock_trylock", reinterpret_cast<void*>(darwin_trylock_succeeds)},
+        {"os_unfair_lock_assert_owner", reinterpret_cast<void*>(darwin_lock_noop)},
+        {"os_unfair_lock_assert_not_owner", reinterpret_cast<void*>(darwin_lock_noop)},
+        {"pthread_mutex_init", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutex_destroy", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutex_lock", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutex_unlock", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutex_trylock", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutexattr_init", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutexattr_settype", reinterpret_cast<void*>(darwin_mutex_ok)},
+        {"pthread_mutexattr_destroy", reinterpret_cast<void*>(darwin_mutex_ok)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
         {"__isPlatformVersionAtLeast", reinterpret_cast<void*>(platform_version_at_least)},
         {"fopen", reinterpret_cast<void*>(fopen)},

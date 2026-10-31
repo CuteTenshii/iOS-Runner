@@ -1812,7 +1812,8 @@ extern "C" void* rt_allocateGenericValueMetadata(const char* descriptor, void* c
         uint16_t offset_in_words, size_in_words;
         memcpy(&offset_in_words, partial + 4, sizeof offset_in_words);
         memcpy(&size_in_words, partial + 6, sizeof size_in_words);
-        memcpy(metadata + offset_in_words, relative_address(partial), size_in_words * sizeof(void*));
+        // The pattern's offset counts from after the kind and descriptor words.
+        memcpy(metadata + 2 + offset_in_words, relative_address(partial), size_in_words * sizeof(void*));
     }
     return metadata;
 }
@@ -1870,6 +1871,100 @@ extern "C" MetadataResponse rt_getOpaqueTypeMetadata(size_t, void* const* argume
         length += byte >= 1 && byte <= 0x17 ? 5 : 1;
     }
     return {static_cast<Metadata*>(rt_getTypeByMangledNameInContext2(underlying, length, descriptor, arguments)), 0};
+}
+
+// Types the app builds at runtime instead of naming them.
+constexpr size_t kOpaqueExistentialWords = 4;
+constexpr size_t kClassConstraintClass = 0;
+
+extern "C" Metadata* rt_getExistentialTypeMetadata(size_t class_constraint, const void*, size_t protocol_count, const void* const*) {
+    const std::lock_guard guard(g_types_lock);
+    if (class_constraint == kClassConstraintClass) {
+        if (protocol_count == 0) return native_type();
+        const std::string key = "ClassExistential" + std::to_string(protocol_count);
+        auto* layout = new Layout{LayoutKind::Aggregate, {{native_type(), 0}}, nullptr};
+        return named_type(key, kKindStruct, layout, (1 + protocol_count) * kPointerSize, kPointerSize, kPointerExtraInhabitants);
+    }
+    if (protocol_count <= 1) return any_type();
+    const std::string key = "OpaqueExistential" + std::to_string(protocol_count);
+    return named_type(key, kKindStruct, new Layout{LayoutKind::OpaqueExistential, {}, nullptr}, (kOpaqueExistentialWords + protocol_count) * kPointerSize, kPointerSize, kPointerExtraInhabitants);
+}
+
+extern "C" Metadata* rt_getFunctionTypeMetadata() {
+    const std::lock_guard guard(g_types_lock);
+    return thick_function_type();
+}
+
+extern "C" Metadata* rt_getMetatypeMetadata(void*) {
+    const std::lock_guard guard(g_types_lock);
+    return pod_type("metatype", kPointerSize);
+}
+
+extern "C" MetadataResponse rt_getTupleTypeMetadata2(size_t, Metadata* first, Metadata* second) {
+    const std::lock_guard guard(g_types_lock);
+    return {tuple_of({first, second}), 0};
+}
+
+extern "C" MetadataResponse rt_getTupleTypeMetadata3(size_t, Metadata* first, Metadata* second, Metadata* third) {
+    const std::lock_guard guard(g_types_lock);
+    return {tuple_of({first, second, third}), 0};
+}
+
+constexpr size_t kTupleCountMask = 0xffff;
+
+extern "C" MetadataResponse rt_getTupleTypeMetadata(size_t, size_t flags, Metadata* const* elements) {
+    const std::lock_guard guard(g_types_lock);
+    return {tuple_of(std::vector<Metadata*>(elements, elements + (flags & kTupleCountMask))), 0};
+}
+
+struct TypeLayoutValue {
+    size_t size;
+    size_t stride;
+    uint32_t flags;
+    uint32_t extra_inhabitants;
+};
+
+// Lays out tuple fields for code that has only the fields' layouts, and returns their offsets.
+void tuple_layout(TypeLayoutValue* out, size_t* offsets, const TypeLayoutValue* const* fields, size_t count) {
+    size_t offset = 0;
+    size_t mask = 0;
+    uint32_t flags = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const size_t field_mask = fields[i]->flags & 0xff;
+        offset = (offset + field_mask) & ~field_mask;
+        if (offsets != nullptr) offsets[i] = offset;
+        offset += fields[i]->size;
+        if (field_mask > mask) mask = field_mask;
+        flags |= fields[i]->flags & kFlagNonPod;
+    }
+    *out = {offset, offset == 0 ? 1 : (offset + mask) & ~mask, static_cast<uint32_t>(mask) | flags, 0};
+}
+
+extern "C" size_t rt_getTupleTypeLayout2(TypeLayoutValue* out, const TypeLayoutValue* first, const TypeLayoutValue* second) {
+    const TypeLayoutValue* fields[] = {first, second};
+    size_t offsets[2];
+    tuple_layout(out, offsets, fields, 2);
+    return offsets[1];
+}
+
+struct TupleOffsets {
+    size_t second;
+    size_t third;
+};
+
+extern "C" TupleOffsets rt_getTupleTypeLayout3(TypeLayoutValue* out, const TypeLayoutValue* first, const TypeLayoutValue* second, const TypeLayoutValue* third) {
+    const TypeLayoutValue* fields[] = {first, second, third};
+    size_t offsets[3];
+    tuple_layout(out, offsets, fields, 3);
+    return {offsets[1], offsets[2]};
+}
+
+extern "C" void rt_getTupleTypeLayout(TypeLayoutValue* out, uint32_t* offsets, size_t, size_t count, const TypeLayoutValue* const* fields) {
+    std::vector<size_t> computed(count);
+    tuple_layout(out, computed.data(), fields, count);
+    if (offsets != nullptr) {
+        for (size_t i = 0; i < count; ++i) offsets[i] = static_cast<uint32_t>(computed[i]);
+    }
 }
 
 extern "C" MetadataResponse rt_checkMetadataState(size_t, void* metadata) { return {static_cast<Metadata*>(metadata), 0}; }
@@ -2186,6 +2281,7 @@ size_t accessor_generic_arity(std::string_view symbol) {
         {"$s7SwiftUI19_ConditionalContentV7StorageOMa", 2},
         {"$s7SwiftUI7SectionVMa", 3},
         {"$sScCMa", 2},
+        {"$s7SwiftUI20_ValueActionModifierVMa", 1},
         {"$s7Combine9PublishedVMa", 1},
         {"$s7Combine8DeferredVMa", 1},
         {"$s7Combine11SubscribersO10CompletionOMa", 1},
@@ -2248,6 +2344,18 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_getOpaqueTypeMetadata") return reinterpret_cast<void*>(rt_getOpaqueTypeMetadata);
     if (name == "swift_allocateGenericClassMetadata") return reinterpret_cast<void*>(rt_allocateGenericClassMetadata);
     if (name == "swift_initClassMetadata2") return reinterpret_cast<void*>(rt_initClassMetadata2);
+    if (name == "swift_getExistentialTypeMetadata") return reinterpret_cast<void*>(rt_getExistentialTypeMetadata);
+    if (name == "swift_getFunctionTypeMetadata") return reinterpret_cast<void*>(rt_getFunctionTypeMetadata);
+    if (name == "swift_getFunctionTypeMetadata0") return reinterpret_cast<void*>(rt_getFunctionTypeMetadata);
+    if (name == "swift_getFunctionTypeMetadata1") return reinterpret_cast<void*>(rt_getFunctionTypeMetadata);
+    if (name == "swift_getFunctionTypeMetadata2") return reinterpret_cast<void*>(rt_getFunctionTypeMetadata);
+    if (name == "swift_getMetatypeMetadata") return reinterpret_cast<void*>(rt_getMetatypeMetadata);
+    if (name == "swift_getTupleTypeMetadata") return reinterpret_cast<void*>(rt_getTupleTypeMetadata);
+    if (name == "swift_getTupleTypeMetadata2") return reinterpret_cast<void*>(rt_getTupleTypeMetadata2);
+    if (name == "swift_getTupleTypeMetadata3") return reinterpret_cast<void*>(rt_getTupleTypeMetadata3);
+    if (name == "swift_getTupleTypeLayout") return reinterpret_cast<void*>(rt_getTupleTypeLayout);
+    if (name == "swift_getTupleTypeLayout2") return reinterpret_cast<void*>(rt_getTupleTypeLayout2);
+    if (name == "swift_getTupleTypeLayout3") return reinterpret_cast<void*>(rt_getTupleTypeLayout3);
     if (name == "swift_checkMetadataState") return reinterpret_cast<void*>(rt_checkMetadataState);
     if (name == "swift_initEnumMetadataSingleCase") return reinterpret_cast<void*>(rt_initEnumMetadataSingleCase);
     if (name == "swift_initEnumMetadataSinglePayload") return reinterpret_cast<void*>(rt_initEnumMetadataSinglePayload);

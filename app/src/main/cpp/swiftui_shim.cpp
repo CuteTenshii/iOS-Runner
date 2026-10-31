@@ -759,6 +759,12 @@ SWIFTCC void view_searchable(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* lo
     *out = node;
 }
 
+SWIFTCC void view_on_change_perform(SWIFT_OUT ViewNode** out, const void*, const void*, void*, void* self_type, void*, void*, void*, SWIFT_CONTEXT void* self) {
+    auto* node = new_node(NodeKind::OnChange);
+    add_self_child(node, self, self_type);
+    *out = node;
+}
+
 // A transition only animates a view in and out, which the tree doesn't show.
 SWIFTCC uint64_t transition_constant() { return kImmediate; }
 SWIFTCC uint64_t transition_with_argument(uint64_t) { return kImmediate; }
@@ -2904,6 +2910,7 @@ void* swiftui_symbol(std::string_view name) {
         {"$s7SwiftUI11ColorPickerVA2A4TextVRszrlE_9selection15supportsOpacityACyAEGAA18LocalizedStringKeyV_AA7BindingVyAA0C0VGSbtcfC", reinterpret_cast<void*>(empty_node_init)},
         {"$s7SwiftUI22UIHostingConfigurationVA2A9EmptyViewVRs_rlE7contentACyxAEGxyXE_tcfC", reinterpret_cast<void*>(empty_node_init)},
         {"$s7SwiftUI8EditModeO9isEditingSbvg", reinterpret_cast<void*>(edit_mode_is_editing)},
+        {"$s7SwiftUI4ViewPAAE8onChange2of7performQrqd___yqd__ctSQRd__lF", reinterpret_cast<void*>(view_on_change_perform)},
         {"$s11Observation0A9RegistrarVACycfC", reinterpret_cast<void*>(registrar_init)},
         {"$s11Observation0A9RegistrarV6access_7keyPathyx_s03KeyE0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
         {"$s11Observation0A9RegistrarV7willSet_7keyPathyx_s03KeyF0Cyxq_GtAA10ObservableRzr0_lF", reinterpret_cast<void*>(registrar_access)},
