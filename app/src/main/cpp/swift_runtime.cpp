@@ -4,11 +4,11 @@
 
 #include <atomic>
 #include <cstdint>
-#include <new>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -427,42 +427,43 @@ char g_app_body_requirement;
 
 // Register-preserving retain and release variants: the argument arrives in the named register,
 // callers rely on every other caller-saved register surviving, and retains return the object in x0.
-#define PRESERVING_THUNK(name, target, reg, result)        \
-    ".globl " #name "\n"                           \
-    #name ":\n"                                    \
-    "  stp x29, x30, [sp, #-176]!\n"               \
-    "  stp x0, x1, [sp, #16]\n"                    \
-    "  stp x2, x3, [sp, #32]\n"                    \
-    "  stp x4, x5, [sp, #48]\n"                    \
-    "  stp x6, x7, [sp, #64]\n"                    \
-    "  stp x8, x9, [sp, #80]\n"                    \
-    "  stp x10, x11, [sp, #96]\n"                  \
-    "  stp x12, x13, [sp, #112]\n"                 \
-    "  stp x14, x15, [sp, #128]\n"                 \
-    "  stp x16, x17, [sp, #144]\n"                 \
-    "  mov x0, " #reg "\n"                         \
-    "  bl " #target "\n"                           \
-    "  ldp x0, x1, [sp, #16]\n"                    \
-    "  ldp x2, x3, [sp, #32]\n"                    \
-    "  ldp x4, x5, [sp, #48]\n"                    \
-    "  ldp x6, x7, [sp, #64]\n"                    \
-    "  ldp x8, x9, [sp, #80]\n"                    \
-    "  ldp x10, x11, [sp, #96]\n"                  \
-    "  ldp x12, x13, [sp, #112]\n"                 \
-    "  ldp x14, x15, [sp, #128]\n"                 \
-    "  ldp x16, x17, [sp, #144]\n"                 \
-    "  ldp x29, x30, [sp], #176\n"                 \
-    result                                         \
+#define PRESERVING_THUNK(name, target, reg, result) \
+    ".globl " #name "\n" #name                      \
+    ":\n"                                           \
+    "  stp x29, x30, [sp, #-176]!\n"                \
+    "  stp x0, x1, [sp, #16]\n"                     \
+    "  stp x2, x3, [sp, #32]\n"                     \
+    "  stp x4, x5, [sp, #48]\n"                     \
+    "  stp x6, x7, [sp, #64]\n"                     \
+    "  stp x8, x9, [sp, #80]\n"                     \
+    "  stp x10, x11, [sp, #96]\n"                   \
+    "  stp x12, x13, [sp, #112]\n"                  \
+    "  stp x14, x15, [sp, #128]\n"                  \
+    "  stp x16, x17, [sp, #144]\n"                  \
+    "  mov x0, " #reg                               \
+    "\n"                                            \
+    "  bl " #target                                 \
+    "\n"                                            \
+    "  ldp x0, x1, [sp, #16]\n"                     \
+    "  ldp x2, x3, [sp, #32]\n"                     \
+    "  ldp x4, x5, [sp, #48]\n"                     \
+    "  ldp x6, x7, [sp, #64]\n"                     \
+    "  ldp x8, x9, [sp, #80]\n"                     \
+    "  ldp x10, x11, [sp, #96]\n"                   \
+    "  ldp x12, x13, [sp, #112]\n"                  \
+    "  ldp x14, x15, [sp, #128]\n"                  \
+    "  ldp x16, x17, [sp, #144]\n"                  \
+    "  ldp x29, x30, [sp], #176\n" result           \
     "  ret\n"
 
-#define THUNK_PAIR(reg) \
-    PRESERVING_THUNK(rt_retain_##reg, rt_swift_retain, reg, "  mov x0, " #reg "\n") PRESERVING_THUNK(rt_release_##reg, rt_swift_release, reg, "")
+#define THUNK_PAIR(reg)                                                             \
+    PRESERVING_THUNK(rt_retain_##reg, rt_swift_retain, reg, "  mov x0, " #reg "\n") \
+    PRESERVING_THUNK(rt_release_##reg, rt_swift_release, reg, "")
 
 __asm__(
-    ".text\n"
-    THUNK_PAIR(x1) THUNK_PAIR(x2) THUNK_PAIR(x8) THUNK_PAIR(x9) THUNK_PAIR(x10)
-    THUNK_PAIR(x19) THUNK_PAIR(x20) THUNK_PAIR(x21) THUNK_PAIR(x22) THUNK_PAIR(x23)
-    THUNK_PAIR(x24) THUNK_PAIR(x25) THUNK_PAIR(x26) THUNK_PAIR(x27) THUNK_PAIR(x28)
+    ".text\n" THUNK_PAIR(x1) THUNK_PAIR(x2) THUNK_PAIR(x8) THUNK_PAIR(x9) THUNK_PAIR(x10)
+        THUNK_PAIR(x19) THUNK_PAIR(x20) THUNK_PAIR(x21) THUNK_PAIR(x22) THUNK_PAIR(x23)
+            THUNK_PAIR(x24) THUNK_PAIR(x25) THUNK_PAIR(x26) THUNK_PAIR(x27) THUNK_PAIR(x28)
     // App.main() arrives with Self in x0, its witness table in x1 and the metatype in x20.
     ".globl rt_swiftui_app_main_entry\n"
     "rt_swiftui_app_main_entry:\n"
@@ -495,12 +496,15 @@ __asm__(
     "  ldp x29, x30, [sp], #32\n"
     "  ret\n");
 
-#define DECLARE_THUNK_PAIR(reg) extern "C" void rt_retain_##reg(); extern "C" void rt_release_##reg();
-DECLARE_THUNK_PAIR(x1) DECLARE_THUNK_PAIR(x2) DECLARE_THUNK_PAIR(x8) DECLARE_THUNK_PAIR(x9) DECLARE_THUNK_PAIR(x10)
-DECLARE_THUNK_PAIR(x19) DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
-DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
+#define DECLARE_THUNK_PAIR(reg)        \
+    extern "C" void rt_retain_##reg(); \
+    extern "C" void rt_release_##reg();
+DECLARE_THUNK_PAIR(x1)
+DECLARE_THUNK_PAIR(x2) DECLARE_THUNK_PAIR(x8) DECLARE_THUNK_PAIR(x9) DECLARE_THUNK_PAIR(x10)
+    DECLARE_THUNK_PAIR(x19) DECLARE_THUNK_PAIR(x20) DECLARE_THUNK_PAIR(x21) DECLARE_THUNK_PAIR(x22) DECLARE_THUNK_PAIR(x23)
+        DECLARE_THUNK_PAIR(x24) DECLARE_THUNK_PAIR(x25) DECLARE_THUNK_PAIR(x26) DECLARE_THUNK_PAIR(x27) DECLARE_THUNK_PAIR(x28)
 
-const void* find_witness(const char* conformance, const void* requirement) {
+            const void* find_witness(const char* conformance, const void* requirement) {
     const auto witnesses = resilient_witnesses(conformance);
     for (uint32_t i = 0; i < witnesses.count; ++i) {
         const char* entry = witnesses.entries + i * 8;
@@ -625,8 +629,10 @@ void* make_static_witness_table(const char* symbol) {
 
 extern "C" const void* rt_dispatch_lookup(const DispatchThunk* thunk, void** table) {
     const char* conformance_name = nullptr;
-    if (const auto found = static_witness_tables().find(table); found != static_witness_tables().end()) conformance_name = found->second;
-    else conformance_name = unresolved_symbol_at(reinterpret_cast<uintptr_t>(table[0]));
+    if (const auto found = static_witness_tables().find(table); found != static_witness_tables().end())
+        conformance_name = found->second;
+    else
+        conformance_name = unresolved_symbol_at(reinterpret_cast<uintptr_t>(table[0]));
     if (conformance_name != nullptr) {
         const std::string key = std::string(conformance_name) + "|" + thunk->requirement;
         const auto found = foreign_witnesses().find(key);
@@ -686,15 +692,27 @@ __asm__(
 
 void* swift_runtime_symbol(std::string_view name) {
 #define SYM(symbol, target) {symbol, reinterpret_cast<void*>(target)}
-#define THUNK_SYMS(reg)                                  \
-    SYM("swift_retain_" #reg, rt_retain_##reg),          \
-    SYM("swift_release_" #reg, rt_release_##reg),        \
-    SYM("objc_retain_" #reg, rt_retain_##reg),           \
-    SYM("objc_release_" #reg, rt_release_##reg)
+#define THUNK_SYMS(reg)                               \
+    SYM("swift_retain_" #reg, rt_retain_##reg),       \
+        SYM("swift_release_" #reg, rt_release_##reg), \
+        SYM("objc_retain_" #reg, rt_retain_##reg),    \
+        SYM("objc_release_" #reg, rt_release_##reg)
     static const std::unordered_map<std::string_view, void*> table = {
-        THUNK_SYMS(x1), THUNK_SYMS(x2), THUNK_SYMS(x8), THUNK_SYMS(x9), THUNK_SYMS(x10),
-        THUNK_SYMS(x19), THUNK_SYMS(x20), THUNK_SYMS(x21), THUNK_SYMS(x22), THUNK_SYMS(x23),
-        THUNK_SYMS(x24), THUNK_SYMS(x25), THUNK_SYMS(x26), THUNK_SYMS(x27), THUNK_SYMS(x28),
+        THUNK_SYMS(x1),
+        THUNK_SYMS(x2),
+        THUNK_SYMS(x8),
+        THUNK_SYMS(x9),
+        THUNK_SYMS(x10),
+        THUNK_SYMS(x19),
+        THUNK_SYMS(x20),
+        THUNK_SYMS(x21),
+        THUNK_SYMS(x22),
+        THUNK_SYMS(x23),
+        THUNK_SYMS(x24),
+        THUNK_SYMS(x25),
+        THUNK_SYMS(x26),
+        THUNK_SYMS(x27),
+        THUNK_SYMS(x28),
         SYM("swift_retain", retain_object),
         SYM("swift_release", release_object),
         SYM("objc_retain", retain_object),
@@ -720,8 +738,7 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("swift_initStaticObject", +[](void* metadata, void** object) -> void* {
             object[0] = metadata;
             object[1] = reinterpret_cast<void*>(static_cast<uintptr_t>(kImmortal));
-            return object;
-        }),
+            return object; }),
         SYM("objc_autorelease", rt_identity),
         SYM("objc_autoreleaseReturnValue", rt_identity),
         SYM("objc_retainAutorelease", retain_object),
@@ -734,8 +751,7 @@ void* swift_runtime_symbol(std::string_view name) {
             retain_object(value);
             void* old = *slot;
             *slot = value;
-            release_object(old);
-        }),
+            release_object(old); }),
         SYM("swift_errorRetain", retain_object),
         SYM("swift_getOpaqueTypeConformance2", rt_get_opaque_conformance),
         SYM("swift_getOpaqueTypeConformance", rt_get_opaque_conformance),

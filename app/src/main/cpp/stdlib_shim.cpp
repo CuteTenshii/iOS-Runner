@@ -259,7 +259,6 @@ SWIFTCC bool string_equal_slow(SwiftString left, SwiftString right, uint8_t expe
     return expecting == 0 ? a == b : a < b;
 }
 
-
 constexpr uint64_t kIndexFlags = 0x7;
 constexpr unsigned kIndexOffsetShift = 16;
 constexpr size_t kMinimumGrownCapacity = 32;
@@ -624,7 +623,8 @@ void store_enum_tag_multi_payload(char* value, void* type, uint32_t which) {
 uint32_t tag_bytes_for(size_t payload_size, uint32_t empty_cases) {
     if (payload_size >= kSmallPayloadLimit) return 1;
     const uint64_t cases = ((empty_cases + (1ULL << (payload_size * 8)) - 1) >> (payload_size * 8)) + 1;
-    return cases <= 0x100 ? 1 : cases <= 0x10000 ? 2 : 4;
+    return cases <= 0x100 ? 1 : cases <= 0x10000 ? 2
+                                                 : 4;
 }
 
 using GetExtraInhabitant = uint32_t (*)(const void*, uint32_t, void*);
@@ -713,10 +713,14 @@ constexpr size_t kValueWitnessStrideOffset = 72;
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
     std::string text;
-    if (type == type_system_symbol("$sSSN")) text = swift_string_to_utf8(*static_cast<const SwiftString*>(value));
-    else if (type == type_system_symbol("$sSiN")) text = std::to_string(*static_cast<const int64_t*>(value));
-    else if (type == type_system_symbol("$sSbN")) text = *static_cast<const uint8_t*>(value) != 0 ? "true" : "false";
-    else text = enum_case_name(value, type);
+    if (type == type_system_symbol("$sSSN"))
+        text = swift_string_to_utf8(*static_cast<const SwiftString*>(value));
+    else if (type == type_system_symbol("$sSiN"))
+        text = std::to_string(*static_cast<const int64_t*>(value));
+    else if (type == type_system_symbol("$sSbN"))
+        text = *static_cast<const uint8_t*>(value) != 0 ? "true" : "false";
+    else
+        text = enum_case_name(value, type);
     if (text.empty() && type != type_system_symbol("$sSSN")) text = "(value)";
     *stream = swift_string_from_utf8(swift_string_to_utf8(*stream) + text);
 }

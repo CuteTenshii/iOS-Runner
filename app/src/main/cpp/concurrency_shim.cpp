@@ -9,8 +9,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <new>
 #include <map>
+#include <new>
 #include <set>
 #include <unordered_map>
 
@@ -631,8 +631,10 @@ void concurrency_drain() {
             const ReadyTask task = queue.front();
             queue.pop_front();
             g_current_task = task.owner;
-            if (task.is_resume) rt_resume_task(task.function, task.async_context, task.closure_context);
-            else rt_start_task(task.function, task.result, task.closure_context, task.async_context);
+            if (task.is_resume)
+                rt_resume_task(task.function, task.async_context, task.closure_context);
+            else
+                rt_start_task(task.function, task.result, task.closure_context, task.async_context);
         }
     } while (dispatch_run_ready() && !queue.empty());
 }

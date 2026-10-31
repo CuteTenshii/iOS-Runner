@@ -10,12 +10,12 @@
 #include <atomic>
 #include <cerrno>
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
-#include <cctype>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -23,11 +23,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "engine.h"
+#include "concurrency_shim.h"
 #include "dispatch_shim.h"
+#include "engine.h"
 #include "json.h"
 #include "localization.h"
-#include "concurrency_shim.h"
 #include "objc_runtime.h"
 #include "stdlib_shim.h"
 #include "type_system.h"
@@ -127,15 +127,19 @@ struct UserDefaults {
 
     void save() const {
         std::ofstream output(path(), std::ios::trunc);
-        for (const auto& [key, value] : values) output << escape(key) << '\n' << escape(value) << '\n';
+        for (const auto& [key, value] : values) output << escape(key) << '\n'
+                                                       << escape(value) << '\n';
     }
 
     static std::string escape(const std::string& text) {
         std::string out;
         for (const char c : text) {
-            if (c == '\n') out += "\\n";
-            else if (c == '\\') out += "\\\\";
-            else out += c;
+            if (c == '\n')
+                out += "\\n";
+            else if (c == '\\')
+                out += "\\\\";
+            else
+                out += c;
         }
         return out;
     }
@@ -143,8 +147,10 @@ struct UserDefaults {
     static std::string unescape(const std::string& text) {
         std::string out;
         for (size_t i = 0; i < text.size(); ++i) {
-            if (text[i] == '\\' && i + 1 < text.size()) out += text[++i] == 'n' ? '\n' : text[i];
-            else out += text[i];
+            if (text[i] == '\\' && i + 1 < text.size())
+                out += text[++i] == 'n' ? '\n' : text[i];
+            else
+                out += text[i];
         }
         return out;
     }
@@ -213,11 +219,16 @@ void* defaults_object_for_key(void*, const char*, void* key) {
     if (stored == nullptr) return nullptr;
     const std::string body = stored->substr(1);
     switch ((*stored)[0]) {
-        case kStoredBool: return new_nsnumber(body == "1", true);
-        case kStoredInteger: return new_nsnumber(strtoll(body.c_str(), nullptr, 10), false);
-        case kStoredStrings: return strings_object_from_json(body);
-        case kStoredDate: return new_date_object(strtod(body.c_str(), nullptr));
-        default: return new_nsstring(body);
+        case kStoredBool:
+            return new_nsnumber(body == "1", true);
+        case kStoredInteger:
+            return new_nsnumber(strtoll(body.c_str(), nullptr, 10), false);
+        case kStoredStrings:
+            return strings_object_from_json(body);
+        case kStoredDate:
+            return new_date_object(strtod(body.c_str(), nullptr));
+        default:
+            return new_nsstring(body);
     }
 }
 
@@ -314,8 +325,6 @@ bool file_exists_at_path(void*, const char*, void* path) { return access(nsstrin
 // iOS's coarsest accuracy constant, in metres; the value only needs to be the one the app passes back.
 const double kLocationAccuracyKilometer = 1000.0;
 
-
-
 // NSArray keeps retained references; the app only receives arrays from this runtime.
 struct NSArrayObject {
     NativeObject header;
@@ -344,7 +353,6 @@ struct BlockHeader {
     int32_t reserved;
     void (*invoke)(void*, void*);
 };
-
 
 struct URLBox;
 URLBox* make_url_box(const std::string& text);
@@ -390,11 +398,9 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
     return storage;
 }
 
-
 void* cookie_store(void*, const char*) { return framework_singleton("WKHTTPCookieStore"); }
 
 void* web_view_layer(void*, const char*) { return framework_singleton("CALayer"); }
-
 
 void* web_data_store_default(void*, const char*) { return framework_singleton("WKWebsiteDataStore"); }
 void* content_world_page(void*, const char*) { return framework_singleton("WKContentWorld"); }
@@ -554,7 +560,10 @@ SWIFTCC SwiftString url_path_extension(__attribute__((swift_context)) URLBox** s
 
 SWIFTCC SwiftString url_path_percent(bool, __attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
 SWIFTCC bool url_is_file(__attribute__((swift_context)) URLBox** self) { return (*self)->text->rfind("file:", 0) == 0; }
-SWIFTCC bool url_has_directory_path(__attribute__((swift_context)) URLBox** self) { const std::string base = text_without_query(*(*self)->text); return !base.empty() && base.back() == '/'; }
+SWIFTCC bool url_has_directory_path(__attribute__((swift_context)) URLBox** self) {
+    const std::string base = text_without_query(*(*self)->text);
+    return !base.empty() && base.back() == '/';
+}
 SWIFTCC bool url_equal(URLBox** left, URLBox** right) { return *(*left)->text == *(*right)->text; }
 SWIFTCC bool url_start_security_scope(__attribute__((swift_context)) void*) { return true; }
 SWIFTCC void url_absolute(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) { *out = new_url(*(*self)->text); }
@@ -689,9 +698,12 @@ constexpr int64_t kCachesDirectory = 13;
 
 std::string sandbox_directory(int64_t directory) {
     switch (directory) {
-        case kDocumentDirectory: return engine_bundle_dir() + "/.Documents";
-        case kCachesDirectory: return engine_bundle_dir() + "/.Library/Caches";
-        default: return engine_bundle_dir() + "/.Library/Application Support";
+        case kDocumentDirectory:
+            return engine_bundle_dir() + "/.Documents";
+        case kCachesDirectory:
+            return engine_bundle_dir() + "/.Library/Caches";
+        default:
+            return engine_bundle_dir() + "/.Library/Application Support";
     }
 }
 
@@ -1258,7 +1270,10 @@ std::string group_thousands(int64_t value) {
 
 std::string compact_number(int64_t value) {
     const double magnitude = static_cast<double>(value < 0 ? -value : value);
-    static constexpr struct { double scale; const char* suffix; } kUnits[] = {{1e9, "B"}, {1e6, "M"}, {1e3, "K"}};
+    static constexpr struct {
+        double scale;
+        const char* suffix;
+    } kUnits[] = {{1e9, "B"}, {1e6, "M"}, {1e3, "K"}};
     for (const auto& unit : kUnits) {
         if (magnitude >= unit.scale) {
             char text[32];
@@ -1280,7 +1295,7 @@ SWIFTCC void integer_formatted_style(SWIFT_OUT SwiftString* out, const uint64_t*
 SWIFTCC SwiftString integer_formatted(void*, void*, SWIFT_CTX const int64_t* self) { return swift_string_from_utf8(group_thousands(*self)); }
 
 SWIFTCC void date_now(SWIFT_OUT double* out) {
-    struct timespec now {};
+    struct timespec now{};
     clock_gettime(CLOCK_REALTIME, &now);
     constexpr double kSecondsFrom1970To2001 = 978307200.0;
     *out = static_cast<double>(now.tv_sec) - kSecondsFrom1970To2001 + static_cast<double>(now.tv_nsec) * 1e-9;
@@ -1291,7 +1306,7 @@ SWIFTCC void date_style_word(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
 SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CTX const double* self) {
     constexpr double kSecondsFrom1970To2001 = 978307200.0;
     const auto seconds = static_cast<time_t>(*self + kSecondsFrom1970To2001);
-    struct tm local {};
+    struct tm local{};
     localtime_r(&seconds, &local);
     char text[64];
     strftime(text, sizeof text, "%b %e, %Y at %H:%M", &local);
@@ -1353,18 +1368,19 @@ SwiftString swift_string_from_utf8(const std::string& text) {
 }
 
 // Async throwing functions return values in x0-x2 and the error in x20, through the context's resume word.
-#define URL_SESSION_ENTRY(name, fetch)         \
-    ".globl " #name "\n"                       \
-    #name ":\n"                                \
-    "  stp x29, x30, [sp, #-48]!\n"            \
-    "  mov x29, sp\n"                          \
-    "  mov x1, x0\n"                           \
-    "  add x0, sp, #16\n"                      \
-    "  bl " #fetch "\n"                        \
-    "  ldp x0, x1, [sp, #16]\n"                \
-    "  ldp x2, x20, [sp, #32]\n"               \
-    "  ldp x29, x30, [sp], #48\n"              \
-    "  ldr x3, [x22, #8]\n"                    \
+#define URL_SESSION_ENTRY(name, fetch) \
+    ".globl " #name "\n" #name         \
+    ":\n"                              \
+    "  stp x29, x30, [sp, #-48]!\n"    \
+    "  mov x29, sp\n"                  \
+    "  mov x1, x0\n"                   \
+    "  add x0, sp, #16\n"              \
+    "  bl " #fetch                     \
+    "\n"                               \
+    "  ldp x0, x1, [sp, #16]\n"        \
+    "  ldp x2, x20, [sp, #32]\n"       \
+    "  ldp x29, x30, [sp], #48\n"      \
+    "  ldr x3, [x22, #8]\n"            \
     "  br x3\n"
 
 // Suspends: control returns to the scheduler until the host reports the script's result.
@@ -1381,9 +1397,8 @@ __asm__(
     "  ret\n");
 
 __asm__(
-    ".text\n"
-    URL_SESSION_ENTRY(rt_url_session_data_url, rt_url_session_fetch_url)
-    URL_SESSION_ENTRY(rt_url_session_data_request, rt_url_session_fetch_request));
+    ".text\n" URL_SESSION_ENTRY(rt_url_session_data_url, rt_url_session_fetch_url)
+        URL_SESSION_ENTRY(rt_url_session_data_request, rt_url_session_fetch_request));
 
 constexpr size_t kDictionaryKeysOffset = 48;
 constexpr size_t kDictionaryValuesOffset = 56;
@@ -2066,7 +2081,9 @@ SWIFTCC void character_set_whitespaces_and_newlines(SWIFT_OUT uint64_t* out) { *
 // Decodes the scalar at `at`, setting `length`; malformed bytes count as themselves.
 uint32_t utf8_scalar(const std::string& text, size_t at, size_t& length) {
     const auto lead = static_cast<unsigned char>(text[at]);
-    length = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    length = lead < 0x80 ? 1 : lead < 0xE0 ? 2
+                           : lead < 0xF0   ? 3
+                                           : 4;
     if (at + length > text.size()) {
         length = 1;
         return lead;
@@ -2170,8 +2187,10 @@ void foundation_js_finished(int call, const std::string& json, bool failed) {
         const PendingScriptCall pending = found->second;
         pending_script_calls().erase(found);
         void* error = nullptr;
-        if (failed) error = make_error("The script could not run.", 1);
-        else write_script_result(pending.out, json);
+        if (failed)
+            error = make_error("The script could not run.", 1);
+        else
+            write_script_result(pending.out, json);
         concurrency_resume_call(pending.context, error);
     });
 }

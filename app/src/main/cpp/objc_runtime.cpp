@@ -179,46 +179,43 @@ extern "C" void* rt_objc_allocWithZone(void* cls, void*) {
 }  // namespace
 
 // Saves every argument register around the lookup, so the method sees exactly the caller's call.
-#define OBJC_DISPATCH(name, lookup, nil_check, finish)  \
-    ".globl " #name "\n"                        \
-    #name ":\n"                                 \
-    nil_check                                   \
-    "  stp x29, x30, [sp, #-208]!\n"            \
-    "  mov x29, sp\n"                           \
-    "  stp x0, x1, [sp, #16]\n"                 \
-    "  stp x2, x3, [sp, #32]\n"                 \
-    "  stp x4, x5, [sp, #48]\n"                 \
-    "  stp x6, x7, [sp, #64]\n"                 \
-    "  str x8, [sp, #80]\n"                     \
-    "  stp d0, d1, [sp, #96]\n"                 \
-    "  stp d2, d3, [sp, #112]\n"                \
-    "  stp d4, d5, [sp, #128]\n"                \
-    "  stp d6, d7, [sp, #144]\n"                \
-    "  bl " #lookup "\n"                        \
-    "  mov x16, x0\n"                           \
-    "  ldp x0, x1, [sp, #16]\n"                 \
-    "  ldp x2, x3, [sp, #32]\n"                 \
-    "  ldp x4, x5, [sp, #48]\n"                 \
-    "  ldp x6, x7, [sp, #64]\n"                 \
-    "  ldr x8, [sp, #80]\n"                     \
-    "  ldp d0, d1, [sp, #96]\n"                 \
-    "  ldp d2, d3, [sp, #112]\n"                \
-    "  ldp d4, d5, [sp, #128]\n"                \
-    "  ldp d6, d7, [sp, #144]\n"                \
-    "  ldp x29, x30, [sp], #208\n"              \
-    finish                                      \
+#define OBJC_DISPATCH(name, lookup, nil_check, finish) \
+    ".globl " #name "\n" #name ":\n" nil_check         \
+    "  stp x29, x30, [sp, #-208]!\n"                   \
+    "  mov x29, sp\n"                                  \
+    "  stp x0, x1, [sp, #16]\n"                        \
+    "  stp x2, x3, [sp, #32]\n"                        \
+    "  stp x4, x5, [sp, #48]\n"                        \
+    "  stp x6, x7, [sp, #64]\n"                        \
+    "  str x8, [sp, #80]\n"                            \
+    "  stp d0, d1, [sp, #96]\n"                        \
+    "  stp d2, d3, [sp, #112]\n"                       \
+    "  stp d4, d5, [sp, #128]\n"                       \
+    "  stp d6, d7, [sp, #144]\n"                       \
+    "  bl " #lookup                                    \
+    "\n"                                               \
+    "  mov x16, x0\n"                                  \
+    "  ldp x0, x1, [sp, #16]\n"                        \
+    "  ldp x2, x3, [sp, #32]\n"                        \
+    "  ldp x4, x5, [sp, #48]\n"                        \
+    "  ldp x6, x7, [sp, #64]\n"                        \
+    "  ldr x8, [sp, #80]\n"                            \
+    "  ldp d0, d1, [sp, #96]\n"                        \
+    "  ldp d2, d3, [sp, #112]\n"                       \
+    "  ldp d4, d5, [sp, #128]\n"                       \
+    "  ldp d6, d7, [sp, #144]\n"                       \
+    "  ldp x29, x30, [sp], #208\n" finish              \
     "  br x16\n"
 
 __asm__(
-    ".text\n"
-    OBJC_DISPATCH(rt_objc_msgSend, rt_objc_lookup,
-                  "  cbnz x0, 1f\n"
-                  "  mov x1, xzr\n"
-                  "  movi d0, #0\n"
-                  "  movi d1, #0\n"
-                  "  ret\n"
-                  "1:\n",
-                  "")
+    ".text\n" OBJC_DISPATCH(rt_objc_msgSend, rt_objc_lookup,
+                            "  cbnz x0, 1f\n"
+                            "  mov x1, xzr\n"
+                            "  movi d0, #0\n"
+                            "  movi d1, #0\n"
+                            "  ret\n"
+                            "1:\n",
+                            "")
     // x0 points at {receiver, class}; the method itself must see the receiver.
     OBJC_DISPATCH(rt_objc_msgSendSuper2, rt_objc_super_lookup, "", "  ldr x0, [x0]\n"));
 

@@ -70,7 +70,14 @@ struct ValueWitnessTable {
     void (*destructive_inject_enum_tag)(void*, uint32_t, void*);
 };
 
-enum class LayoutKind { Pod, NativeReference, BridgeReference, Aggregate, Optional, OpaqueExistential, StateStorage, Conditional };
+enum class LayoutKind { Pod,
+                        NativeReference,
+                        BridgeReference,
+                        Aggregate,
+                        Optional,
+                        OpaqueExistential,
+                        StateStorage,
+                        Conditional };
 
 struct Metadata;
 
@@ -213,8 +220,10 @@ void* witness_copy(void* destination, void* source, void* type) {
             auto* contained = reinterpret_cast<void**>(from)[3];
             if (contained == nullptr) break;
             const auto* value = witnesses_of(contained);
-            if (value->flags & kFlagNonInline) retain(*reinterpret_cast<void**>(from));
-            else value->initialize_with_copy(destination, source, contained);
+            if (value->flags & kFlagNonInline)
+                retain(*reinterpret_cast<void**>(from));
+            else
+                value->initialize_with_copy(destination, source, contained);
             break;
         }
     }
@@ -231,8 +240,10 @@ void witness_destroy(void* raw, void* type) {
             break;
         }
         case LayoutKind::StateStorage:
-            if (state_storage_tag(raw, type) == layout->value_case) witnesses_of(layout->payload)->destroy(raw, layout->payload);
-            else release(*reinterpret_cast<void**>(value + layout->reference_offset));
+            if (state_storage_tag(raw, type) == layout->value_case)
+                witnesses_of(layout->payload)->destroy(raw, layout->payload);
+            else
+                release(*reinterpret_cast<void**>(value + layout->reference_offset));
             break;
         case LayoutKind::Pod:
             break;
@@ -254,8 +265,10 @@ void witness_destroy(void* raw, void* type) {
             auto* contained = reinterpret_cast<void**>(raw)[3];
             if (contained == nullptr) break;
             const auto* witnesses = witnesses_of(contained);
-            if (witnesses->flags & kFlagNonInline) release(*reinterpret_cast<void**>(raw));
-            else witnesses->destroy(raw, contained);
+            if (witnesses->flags & kFlagNonInline)
+                release(*reinterpret_cast<void**>(raw));
+            else
+                witnesses->destroy(raw, contained);
             break;
         }
     }
@@ -356,7 +369,8 @@ uint32_t tag_bytes_needed(size_t payload_size, uint32_t empty_cases) {
     if (payload_size >= 4) return 1;
     const uint64_t states = (empty_cases + (1ULL << (payload_size * 8)) - 1) >> (payload_size * 8);
     const uint64_t cases = states + 1;
-    return cases <= 0x100 ? 1 : cases <= 0x10000 ? 2 : 4;
+    return cases <= 0x100 ? 1 : cases <= 0x10000 ? 2
+                                                 : 4;
 }
 
 uint32_t witness_get_tag(const void* value, uint32_t empty_cases, void* type) {
@@ -546,10 +560,10 @@ size_t g_current_length = 0;
 std::string printable(const char* text, size_t length);
 
 struct FrozenField {
-    size_t size;      // 0 means the type comes from `argument`.
+    size_t size;  // 0 means the type comes from `argument`.
     size_t alignment;
-    int argument;     // Index of a generic argument, or -1.
-    bool reference;   // A retained word, rather than plain bytes.
+    int argument;    // Index of a generic argument, or -1.
+    bool reference;  // A retained word, rather than plain bytes.
 };
 
 Metadata* metadata_for_field(const FrozenField& field, const std::vector<void*>& arguments) {
@@ -721,20 +735,32 @@ const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_lay
 // How many witness tables a type's constraints add to its metadata.
 size_t witness_word_count(const std::string& symbol) {
     static const std::unordered_map<std::string_view, size_t> counts = {
-        {"_$s7SwiftUI6HStackVMn", 1}, {"_$s7SwiftUI6VStackVMn", 1}, {"_$s7SwiftUI6ZStackVMn", 1},
+        {"_$s7SwiftUI6HStackVMn", 1},
+        {"_$s7SwiftUI6VStackVMn", 1},
+        {"_$s7SwiftUI6ZStackVMn", 1},
         {"_$s7SwiftUI13_VariadicViewO4TreeVMn", 1},
-        {"_$s7SwiftUI24_BackgroundStyleModifierVMn", 1}, {"_$s7SwiftUI16_OverlayModifierVMn", 1},
-        {"_$s7SwiftUI11_ClipEffectVMn", 1}, {"_$s7SwiftUI21_ContentShapeModifierVMn", 1},
-        {"_$s7SwiftUI18_AnimationModifierVMn", 1}, {"_$s7SwiftUI21_TraitWritingModifierVMn", 1},
+        {"_$s7SwiftUI24_BackgroundStyleModifierVMn", 1},
+        {"_$s7SwiftUI16_OverlayModifierVMn", 1},
+        {"_$s7SwiftUI11_ClipEffectVMn", 1},
+        {"_$s7SwiftUI21_ContentShapeModifierVMn", 1},
+        {"_$s7SwiftUI18_AnimationModifierVMn", 1},
+        {"_$s7SwiftUI21_TraitWritingModifierVMn", 1},
         {"_$s7SwiftUI24_TagTraitWritingModifierVMn", 1},
-        {"_$s7SwiftUI14ObservedObjectVMn", 1}, {"_$s7SwiftUI11StateObjectVMn", 1},
+        {"_$s7SwiftUI14ObservedObjectVMn", 1},
+        {"_$s7SwiftUI11StateObjectVMn", 1},
         {"_$s7SwiftUI16SubscriptionViewVMn", 2},
         {"_$ss16IndexingIteratorVMn", 1},
         {"_$s7SwiftUI5GroupVMn", 1},
-        {"_$s7SwiftUI19_BackgroundModifierVMn", 1}, {"_$s7SwiftUI10_ShapeViewVMn", 2}, {"_$s7SwiftUI13_StrokedShapeVMn", 1},
-        {"_$s7SwiftUI13_TrimmedShapeVMn", 1}, {"_$s7SwiftUI11_MaskEffectVMn", 1}, {"_$s7SwiftUI21_OverlayStyleModifierVMn", 1},
-        {"_$s7SwiftUI24_ForegroundStyleModifierVMn", 1}, {"_$s7SwiftUI20_ValueActionModifierVMn", 1},
-        {"_$s7SwiftUI18_TaskValueModifierVMn", 1}, {"_$s7SwiftUI23_GeometryActionModifierVMn", 1},
+        {"_$s7SwiftUI19_BackgroundModifierVMn", 1},
+        {"_$s7SwiftUI10_ShapeViewVMn", 2},
+        {"_$s7SwiftUI13_StrokedShapeVMn", 1},
+        {"_$s7SwiftUI13_TrimmedShapeVMn", 1},
+        {"_$s7SwiftUI11_MaskEffectVMn", 1},
+        {"_$s7SwiftUI21_OverlayStyleModifierVMn", 1},
+        {"_$s7SwiftUI24_ForegroundStyleModifierVMn", 1},
+        {"_$s7SwiftUI20_ValueActionModifierVMn", 1},
+        {"_$s7SwiftUI18_TaskValueModifierVMn", 1},
+        {"_$s7SwiftUI23_GeometryActionModifierVMn", 1},
         {"_$s7SwiftUI14GeometryReaderVMn", 1},
     };
     const auto found = counts.find(symbol);
@@ -826,7 +852,11 @@ struct NominalReference {
 extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t length, const void* context, void* const* generics);
 
 struct Node {
-    enum class Tag { Type, Nominal, Protocol, ListMarker, FirstElement } tag = Tag::Type;
+    enum class Tag { Type,
+                     Nominal,
+                     Protocol,
+                     ListMarker,
+                     FirstElement } tag = Tag::Type;
     Metadata* type = nullptr;
     NominalReference nominal;
 };
@@ -873,13 +903,24 @@ std::vector<uint64_t> generic_depth_bases(const void* descriptor) {
         memcpy(&flags, context, sizeof flags);
         size_t header = 0;
         switch (flags & kDescriptorKindMask) {
-            case kContextKindExtension: header = kExtensionGenericOffset; break;
-            case kContextKindAnonymous: header = kAnonymousGenericOffset; break;
-            case kContextKindOpaque: header = kOpaqueGenericOffset; break;
-            case kContextKindClass: header = kClassGenericOffset; break;
+            case kContextKindExtension:
+                header = kExtensionGenericOffset;
+                break;
+            case kContextKindAnonymous:
+                header = kAnonymousGenericOffset;
+                break;
+            case kContextKindOpaque:
+                header = kOpaqueGenericOffset;
+                break;
+            case kContextKindClass:
+                header = kClassGenericOffset;
+                break;
             case kContextKindStruct:
-            case kContextKindEnum: header = kValueTypeGenericOffset; break;
-            default: break;
+            case kContextKindEnum:
+                header = kValueTypeGenericOffset;
+                break;
+            default:
+                break;
         }
         if (header != 0 && (flags & kDescriptorGeneric)) {
             uint16_t params;
@@ -958,8 +999,10 @@ private:
         if (code == 2) target = *static_cast<void* const*>(target);
         Node node;
         node.tag = Node::Tag::Nominal;
-        if (const char* foreign = unresolved_symbol_at(reinterpret_cast<uintptr_t>(target))) node.nominal.foreign_symbol = foreign;
-        else node.nominal.descriptor = target;
+        if (const char* foreign = unresolved_symbol_at(reinterpret_cast<uintptr_t>(target)))
+            node.nominal.foreign_symbol = foreign;
+        else
+            node.nominal.descriptor = target;
         if (node.nominal.foreign_symbol != nullptr && strstr(node.nominal.foreign_symbol, "Mp") != nullptr &&
             strcmp(node.nominal.foreign_symbol + strlen(node.nominal.foreign_symbol) - 2, "Mp") == 0) {
             node.tag = Node::Tag::Protocol;
@@ -984,14 +1027,30 @@ private:
 
     void standard(char code) {
         switch (code) {
-            case 'S': push_type(string_type()); return;
-            case 'i': push_type(pod_type("Si", 8)); return;
-            case 'u': push_type(pod_type("Su", 8)); return;
-            case 'b': push_type(named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254)); return;
-            case 'd': push_type(pod_type("Sd", 8)); return;
-            case 'f': push_type(pod_type("Sf", 4)); return;
-            case 'J': push_type(two_word_type("SJ", word_type(), bridge_word_type())); return;
-            case 's': push_type(named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants)); return;
+            case 'S':
+                push_type(string_type());
+                return;
+            case 'i':
+                push_type(pod_type("Si", 8));
+                return;
+            case 'u':
+                push_type(pod_type("Su", 8));
+                return;
+            case 'b':
+                push_type(named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254));
+                return;
+            case 'd':
+                push_type(pod_type("Sd", 8));
+                return;
+            case 'f':
+                push_type(pod_type("Sf", 4));
+                return;
+            case 'J':
+                push_type(two_word_type("SJ", word_type(), bridge_word_type()));
+                return;
+            case 's':
+                push_type(named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants));
+                return;
             case 'g': {
                 Metadata* payload = as_type(pop());
                 if (payload == nullptr) return;
@@ -1015,7 +1074,10 @@ private:
                 substitute(node);
                 return;
             }
-            case 'p': case 'P': case 'r': case 'R': {
+            case 'p':
+            case 'P':
+            case 'r':
+            case 'R': {
                 // Unsafe pointers: one plain word, whatever they point at.
                 Node node;
                 node.tag = Node::Tag::Nominal;
@@ -1023,10 +1085,13 @@ private:
                 stack_.push_back(node);
                 return;
             }
-            case 'a': case 'D': case 'h': {
+            case 'a':
+            case 'D':
+            case 'h': {
                 Node node;
                 node.tag = Node::Tag::Nominal;
-                node.nominal.foreign_symbol = code == 'a' ? "$Array" : code == 'D' ? "$Dictionary" : "$Set";
+                node.nominal.foreign_symbol = code == 'a' ? "$Array" : code == 'D' ? "$Dictionary"
+                                                                                   : "$Set";
                 stack_.push_back(node);
                 return;
             }
@@ -1054,8 +1119,14 @@ private:
                     stack_.push_back(node);
                     return;
                 }
-                if (concurrency == 'M') { push_type(native_type()); return; }
-                if (concurrency == 'P') { push_type(pod_type("ScP", 1)); return; }
+                if (concurrency == 'M') {
+                    push_type(native_type());
+                    return;
+                }
+                if (concurrency == 'P') {
+                    push_type(pod_type("ScP", 1));
+                    return;
+                }
                 fail(std::string("unknown concurrency type Sc") + concurrency);
                 return;
             }
@@ -1075,8 +1146,10 @@ private:
             if (top.tag == Node::Tag::FirstElement) continue;
             arguments.insert(arguments.begin(), as_type(top));
         }
-        if (stack_.empty()) fail("generic arguments without a list start");
-        else pop();
+        if (stack_.empty())
+            fail("generic arguments without a list start");
+        else
+            pop();
         return arguments;
     }
 
@@ -1084,7 +1157,10 @@ private:
         std::vector<void*> arguments = pop_generic_arguments();
         if (!failure_.empty()) return;
         for (const void* argument : arguments) {
-            if (argument == nullptr) { fail("generic argument did not resolve"); return; }
+            if (argument == nullptr) {
+                fail("generic argument did not resolve");
+                return;
+            }
         }
         Node base = pop();
         if (base.tag != Node::Tag::Nominal) {
@@ -1119,7 +1195,10 @@ private:
         }
         if (!failure_.empty()) return;
         for (const auto* element : elements) {
-            if (element == nullptr) { fail("tuple element did not resolve"); return; }
+            if (element == nullptr) {
+                fail("tuple element did not resolve");
+                return;
+            }
         }
         push_type(tuple_of(elements));
     }
@@ -1155,7 +1234,10 @@ private:
     }
 
     void opaque_type() {
-        if (cursor_ >= end_) { fail("truncated Q operator"); return; }
+        if (cursor_ >= end_) {
+            fail("truncated Q operator");
+            return;
+        }
         const char variety = *cursor_++;
         // A pack gathers its elements from the stack like a tuple, and is carried as one.
         if (variety == 'P') {
@@ -1167,10 +1249,16 @@ private:
             return;
         }
         const uint64_t ordinal = cursor_ < end_ && *cursor_ == '_' ? 0 : read_natural() + 1;
-        if (cursor_ >= end_ || *cursor_++ != '_') { fail("bad opaque type ordinal"); return; }
+        if (cursor_ >= end_ || *cursor_++ != '_') {
+            fail("bad opaque type ordinal");
+            return;
+        }
         std::vector<void*> arguments = pop_generic_arguments();
         Node base = pop();
-        if (base.tag != Node::Tag::Nominal) { fail("opaque type without a descriptor"); return; }
+        if (base.tag != Node::Tag::Nominal) {
+            fail("opaque type without a descriptor");
+            return;
+        }
 
         Node node;
         if (base.nominal.foreign_symbol != nullptr) {
@@ -1200,7 +1288,10 @@ private:
             MangledName nested(underlying, length, arguments.data());
             nested.use_context(descriptor);
             node.type = nested.parse();
-            if (node.type == nullptr) { fail("opaque underlying type: " + nested.failure()); return; }
+            if (node.type == nullptr) {
+                fail("opaque underlying type: " + nested.failure());
+                return;
+            }
         }
         stack_.push_back(node);
         substitute(node);
@@ -1252,7 +1343,10 @@ private:
         }
         switch (code) {
             case 'S':
-                if (cursor_ >= end_) { fail("truncated standard type"); return; }
+                if (cursor_ >= end_) {
+                    fail("truncated standard type");
+                    return;
+                }
                 standard(*cursor_++);
                 return;
             case 'y':
@@ -1333,15 +1427,30 @@ private:
     }
 
     void builtin() {
-        if (cursor_ >= end_) { fail("truncated builtin"); return; }
+        if (cursor_ >= end_) {
+            fail("truncated builtin");
+            return;
+        }
         const char code = *cursor_++;
         switch (code) {
-            case 'D': push_type(pod_type("BD", 96)); return;
-            case 'o': case 'O': push_type(native_type()); return;
-            case 'b': push_type(bridge_word_type()); return;
-            case 'w': push_type(word_type()); return;
-            case 'p': push_type(word_type()); return;
-            default: fail(std::string("unknown builtin B") + code);
+            case 'D':
+                push_type(pod_type("BD", 96));
+                return;
+            case 'o':
+            case 'O':
+                push_type(native_type());
+                return;
+            case 'b':
+                push_type(bridge_word_type());
+                return;
+            case 'w':
+                push_type(word_type());
+                return;
+            case 'p':
+                push_type(word_type());
+                return;
+            default:
+                fail(std::string("unknown builtin B") + code);
         }
     }
 
@@ -1369,14 +1478,23 @@ private:
         if (cursor_ < end_ && *cursor_ == 'd') {
             ++cursor_;
             const uint64_t depth = read_natural() + 1;
-            if (cursor_ >= end_ || *cursor_++ != '_') { fail("bad generic depth"); return; }
+            if (cursor_ >= end_ || *cursor_++ != '_') {
+                fail("bad generic depth");
+                return;
+            }
             const uint64_t index = cursor_ < end_ && *cursor_ == '_' ? 0 : read_natural() + 1;
-            if (cursor_ >= end_ || *cursor_++ != '_') { fail("bad generic index"); return; }
+            if (cursor_ >= end_ || *cursor_++ != '_') {
+                fail("bad generic index");
+                return;
+            }
             generic(depth, index);
             return;
         }
         const uint64_t index = cursor_ < end_ && *cursor_ == '_' ? 0 : read_natural() + 1;
-        if (cursor_ >= end_ || *cursor_++ != '_') { fail("bad generic parameter"); return; }
+        if (cursor_ >= end_ || *cursor_++ != '_') {
+            fail("bad generic parameter");
+            return;
+        }
         generic(0, index + 1);
     }
 
@@ -1388,19 +1506,31 @@ private:
                 count = read_natural();
                 has_count = true;
             }
-            if (cursor_ >= end_) { fail("truncated substitution"); return; }
+            if (cursor_ >= end_) {
+                fail("truncated substitution");
+                return;
+            }
             const char letter = *cursor_++;
             if (letter == '_') {
                 // Indexes past the alphabet: `A_` is 26, `A<n>_` is n + 27.
                 const uint64_t index = has_count ? count + 27 : 26;
-                if (index >= substitutions_.size()) { fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size())); return; }
+                if (index >= substitutions_.size()) {
+                    fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size()));
+                    return;
+                }
                 stack_.push_back(substitutions_[index]);
                 return;
             }
             const bool last = letter >= 'A' && letter <= 'Z';
-            if (!last && !(letter >= 'a' && letter <= 'z')) { fail("malformed substitution"); return; }
+            if (!last && !(letter >= 'a' && letter <= 'z')) {
+                fail("malformed substitution");
+                return;
+            }
             const uint64_t index = static_cast<uint64_t>(last ? letter - 'A' : letter - 'a');
-            if (index >= substitutions_.size()) { fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size())); return; }
+            if (index >= substitutions_.size()) {
+                fail("substitution " + std::to_string(index) + " out of range, have " + std::to_string(substitutions_.size()));
+                return;
+            }
             for (uint64_t i = 0; i < (has_count ? count : 1); ++i) stack_.push_back(substitutions_[index]);
             if (last) return;
         }
@@ -1460,7 +1590,6 @@ extern "C" void* rt_getTypeByMangledNameInContext2(const char* name, size_t leng
 extern "C" void* rt_getTypeByMangledNameInContextInMetadataState2(size_t, const char* name, size_t length, const void* context, void* const* generics) {
     return rt_getTypeByMangledNameInContext2(name, length, context, generics);
 }
-
 
 constexpr uint32_t kKindMask = 0x1f;
 constexpr uint32_t kContextClass = 16;
@@ -1589,9 +1718,12 @@ size_t generic_header_offset(const char* descriptor) {
     uint32_t flags;
     memcpy(&flags, descriptor, sizeof flags);
     switch (flags & kDescriptorKindMask) {
-        case kContextKindClass: return kClassGenericHeaderOffset;
-        case kContextKindStruct: return kStructGenericHeaderOffset;
-        default: return kEnumGenericHeaderOffset;
+        case kContextKindClass:
+            return kClassGenericHeaderOffset;
+        case kContextKindStruct:
+            return kStructGenericHeaderOffset;
+        default:
+            return kEnumGenericHeaderOffset;
     }
 }
 
@@ -1834,24 +1966,39 @@ extern "C" void* rt_updateClassMetadata2(char* metadata, size_t, size_t field_co
     return nullptr;
 }
 
-
 constexpr size_t kAccessorPoolSize = 256 * 1024;
 constexpr size_t kAccessorStubSize = 32;
 
 // Accessors take generic arguments in registers, so each needs its arity; anything unlisted is non-generic.
 size_t accessor_generic_arity(std::string_view symbol) {
     static const std::unordered_map<std::string_view, size_t> arities = {
-        {"$s7SwiftUI5StateVMa", 1}, {"$s7SwiftUI7BindingVMa", 1}, {"$s7SwiftUI12FetchRequestVMa", 1},
-        {"$s7SwiftUI5GroupVMa", 1}, {"$s7SwiftUI4FormVMa", 1}, {"$s7SwiftUI10ScrollViewVMa", 1},
-        {"$s7SwiftUI6ZStackVMa", 1}, {"$s7SwiftUI9LazyVGridVMa", 1},
+        {"$s7SwiftUI5StateVMa", 1},
+        {"$s7SwiftUI7BindingVMa", 1},
+        {"$s7SwiftUI12FetchRequestVMa", 1},
+        {"$s7SwiftUI5GroupVMa", 1},
+        {"$s7SwiftUI4FormVMa", 1},
+        {"$s7SwiftUI10ScrollViewVMa", 1},
+        {"$s7SwiftUI6ZStackVMa", 1},
+        {"$s7SwiftUI9LazyVGridVMa", 1},
         {"$s7SwiftUI28UIApplicationDelegateAdaptorVMa", 1},
-        {"$s7SwiftUI4ListVMa", 2}, {"$s7SwiftUI4MenuVMa", 2}, {"$s7SwiftUI15NavigationStackVMa", 2},
-        {"$s7SwiftUI11ToolbarItemVMa", 2}, {"$s7SwiftUI19_ConditionalContentVMa", 2},
-        {"$s7SwiftUI19_ConditionalContentV7StorageOMa", 2}, {"$s7SwiftUI7SectionVMa", 3},
+        {"$s7SwiftUI4ListVMa", 2},
+        {"$s7SwiftUI4MenuVMa", 2},
+        {"$s7SwiftUI15NavigationStackVMa", 2},
+        {"$s7SwiftUI11ToolbarItemVMa", 2},
+        {"$s7SwiftUI19_ConditionalContentVMa", 2},
+        {"$s7SwiftUI19_ConditionalContentV7StorageOMa", 2},
+        {"$s7SwiftUI7SectionVMa", 3},
         {"$sScCMa", 2},
-        {"$s7Combine9PublishedVMa", 1}, {"$s7Combine8DeferredVMa", 1}, {"$s7Combine11SubscribersO10CompletionOMa", 1},
-        {"$s7Combine12AnyPublisherVMa", 2}, {"$s7Combine18PassthroughSubjectCMa", 2}, {"$s7Combine6FutureCMa", 2},
-        {"$sSaMa", 1}, {"$sShMa", 1}, {"$sSDMa", 2}, {"$ss6ResultOMa", 2},
+        {"$s7Combine9PublishedVMa", 1},
+        {"$s7Combine8DeferredVMa", 1},
+        {"$s7Combine11SubscribersO10CompletionOMa", 1},
+        {"$s7Combine12AnyPublisherVMa", 2},
+        {"$s7Combine18PassthroughSubjectCMa", 2},
+        {"$s7Combine6FutureCMa", 2},
+        {"$sSaMa", 1},
+        {"$sShMa", 1},
+        {"$sSDMa", 2},
+        {"$ss6ResultOMa", 2},
     };
     if (const auto found = arities.find(symbol); found != arities.end()) return found->second;
     if (symbol == "$s7SwiftUI15ModifiedContentVMa") return 2;
@@ -2002,8 +2149,10 @@ bool conditional_active(const void* metadata, const void* value, TypeField& out)
 bool optional_payload(const void* metadata, const void* value, TypeField& out) {
     if (static_cast<const Metadata*>(metadata)->kind != kKindOptional) return false;
     auto* payload = layout_of(metadata)->payload;
-    if (witnesses_of(payload)->get_enum_tag_single_payload(value, 1, payload) != 0) out = {nullptr, 0};
-    else out = {payload, 0};
+    if (witnesses_of(payload)->get_enum_tag_single_payload(value, 1, payload) != 0)
+        out = {nullptr, 0};
+    else
+        out = {payload, 0};
     return true;
 }
 

@@ -57,8 +57,10 @@ int64_t monotonic_now() {
 }
 
 void perform(const Work& work) {
-    if (work.block != nullptr) static_cast<BlockLiteral*>(work.block)->invoke(work.block);
-    else work.function(work.context);
+    if (work.block != nullptr)
+        static_cast<BlockLiteral*>(work.block)->invoke(work.block);
+    else
+        work.function(work.context);
     rt_registrar_mark_dirty_c();
 }
 
@@ -132,8 +134,10 @@ SWIFTCC void group_wait(SWIFT_CONTEXT void* group) {
 SWIFTCC void group_notify(void*, void*, void*, void* block, SWIFT_CONTEXT void* group) {
     Work work{darwin_block_copy(block), nullptr, nullptr};
     GroupState& state = groups()[group];
-    if (state.entered <= 0) ready_work().push_back(work);
-    else state.waiting.push_back(work);
+    if (state.entered <= 0)
+        ready_work().push_back(work);
+    else
+        state.waiting.push_back(work);
 }
 
 // The block holds the group entered from enqueue until it has run.
@@ -226,7 +230,10 @@ int64_t dispatch_next_deadline() {
 }
 
 void* dispatch_symbol(std::string_view name) {
-#define ENTRY(symbol, target) {symbol, reinterpret_cast<void*>(target)}
+#define ENTRY(symbol, target)                   \
+    {                                           \
+        symbol, reinterpret_cast<void*>(target) \
+    }
     static const std::unordered_map<std::string_view, void*> table = {
         ENTRY("$sSo17OS_dispatch_queueC8DispatchE4mainABvgZ", queue_main),
         ENTRY("$sSo17OS_dispatch_queueC8DispatchE6global3qosAbC0D3QoSV0G6SClassO_tFZ", queue_global),

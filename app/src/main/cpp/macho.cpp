@@ -34,9 +34,15 @@ constexpr size_t kGuardSlots = 0x4000;
 
 constexpr uint32_t kBuildVersionCommand = 0x32;
 
-struct MachHeader64 { uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved; };
-struct LoadCommand { uint32_t cmd, cmdsize; };
-struct BuildVersionCommand { uint32_t cmd, cmdsize, platform, minos, sdk, ntools; };
+struct MachHeader64 {
+    uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved;
+};
+struct LoadCommand {
+    uint32_t cmd, cmdsize;
+};
+struct BuildVersionCommand {
+    uint32_t cmd, cmdsize, platform, minos, sdk, ntools;
+};
 struct SegmentCommand64 {
     uint32_t cmd, cmdsize;
     char segname[16];
@@ -49,12 +55,25 @@ struct Section64 {
     uint64_t addr, size;
     uint32_t offset, align, reloff, nreloc, flags, reserved1, reserved2, reserved3;
 };
-struct DylibCommand { uint32_t cmd, cmdsize, name_offset, timestamp, current_version, compat_version; };
-struct EntryPointCommand { uint32_t cmd, cmdsize; uint64_t entryoff, stacksize; };
-struct EncryptionCommand64 { uint32_t cmd, cmdsize, cryptoff, cryptsize, cryptid, pad; };
-struct LinkeditDataCommand { uint32_t cmd, cmdsize, dataoff, datasize; };
-struct FatHeader { uint32_t magic, nfat_arch; };
-struct FatArch { uint32_t cputype, cpusubtype, offset, size, align; };
+struct DylibCommand {
+    uint32_t cmd, cmdsize, name_offset, timestamp, current_version, compat_version;
+};
+struct EntryPointCommand {
+    uint32_t cmd, cmdsize;
+    uint64_t entryoff, stacksize;
+};
+struct EncryptionCommand64 {
+    uint32_t cmd, cmdsize, cryptoff, cryptsize, cryptid, pad;
+};
+struct LinkeditDataCommand {
+    uint32_t cmd, cmdsize, dataoff, datasize;
+};
+struct FatHeader {
+    uint32_t magic, nfat_arch;
+};
+struct FatArch {
+    uint32_t cputype, cpusubtype, offset, size, align;
+};
 
 struct ChainedFixupsHeader {
     uint32_t fixups_version, starts_offset, imports_offset, symbols_offset, imports_count, imports_format, symbols_format;
@@ -155,7 +174,7 @@ bool load_macho(const std::string& path, SymbolResolver resolve, MachImage& imag
         error = "cannot open " + path;
         return false;
     }
-    struct stat st {};
+    struct stat st{};
     fstat(fd, &st);
     const size_t file_size = static_cast<size_t>(st.st_size);
     auto* file = static_cast<uint8_t*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));

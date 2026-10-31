@@ -10,13 +10,13 @@
 
 #include <chrono>
 #include <condition_variable>
-#include <exception>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <map>
 #include <mutex>
 
@@ -53,13 +53,20 @@ void write_log_line(const char* text, size_t length) {
 
 const char* signal_name(int number) {
     switch (number) {
-        case SIGSEGV: return "SIGSEGV";
-        case SIGBUS: return "SIGBUS";
-        case SIGILL: return "SIGILL";
-        case SIGTRAP: return "SIGTRAP";
-        case SIGABRT: return "SIGABRT";
-        case SIGFPE: return "SIGFPE";
-        default: return "signal";
+        case SIGSEGV:
+            return "SIGSEGV";
+        case SIGBUS:
+            return "SIGBUS";
+        case SIGILL:
+            return "SIGILL";
+        case SIGTRAP:
+            return "SIGTRAP";
+        case SIGABRT:
+            return "SIGABRT";
+        case SIGFPE:
+            return "SIGFPE";
+        default:
+            return "signal";
     }
 }
 
@@ -135,12 +142,12 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
 }
 
 void install_fault_handlers() {
-    stack_t alternate {};
+    stack_t alternate{};
     alternate.ss_sp = mmap(nullptr, kSignalStackSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     alternate.ss_size = kSignalStackSize;
     sigaltstack(&alternate, nullptr);
 
-    struct sigaction action {};
+    struct sigaction action{};
     action.sa_sigaction = fault_handler;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
@@ -182,8 +189,10 @@ void* guest_thread(void* raw) {
     for (const auto& import : g_image.imports) {
         auto& counts = per_library[import.library.empty() ? "(flat)" : import.library];
         counts.second++;
-        if (import.resolved) counts.first++;
-        else missing++;
+        if (import.resolved)
+            counts.first++;
+        else
+            missing++;
 #ifdef IOSRUNNER_HOST
         if (!import.resolved && !import.weak) engine_log("UNRESOLVED: %s", import.name.c_str());
 #endif

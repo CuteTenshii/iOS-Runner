@@ -46,10 +46,14 @@ struct Parser {
         for (int i = 0; i < 4; ++i) {
             const char c = source[cursor++];
             out <<= 4;
-            if (c >= '0' && c <= '9') out |= static_cast<uint32_t>(c - '0');
-            else if (c >= 'a' && c <= 'f') out |= static_cast<uint32_t>(c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') out |= static_cast<uint32_t>(c - 'A' + 10);
-            else return false;
+            if (c >= '0' && c <= '9')
+                out |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                out |= static_cast<uint32_t>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F')
+                out |= static_cast<uint32_t>(c - 'A' + 10);
+            else
+                return false;
         }
         return true;
     }
@@ -67,14 +71,30 @@ struct Parser {
             if (cursor >= source.size()) return false;
             const char escape = source[cursor++];
             switch (escape) {
-                case '"': out += '"'; break;
-                case '\\': out += '\\'; break;
-                case '/': out += '/'; break;
-                case 'b': out += '\b'; break;
-                case 'f': out += '\f'; break;
-                case 'n': out += '\n'; break;
-                case 'r': out += '\r'; break;
-                case 't': out += '\t'; break;
+                case '"':
+                    out += '"';
+                    break;
+                case '\\':
+                    out += '\\';
+                    break;
+                case '/':
+                    out += '/';
+                    break;
+                case 'b':
+                    out += '\b';
+                    break;
+                case 'f':
+                    out += '\f';
+                    break;
+                case 'n':
+                    out += '\n';
+                    break;
+                case 'r':
+                    out += '\r';
+                    break;
+                case 't':
+                    out += '\t';
+                    break;
                 case 'u': {
                     uint32_t code;
                     if (!hex4(code)) return false;
@@ -87,7 +107,8 @@ struct Parser {
                     append_utf8(out, code);
                     break;
                 }
-                default: return false;
+                default:
+                    return false;
             }
         }
         return false;
@@ -99,8 +120,10 @@ struct Parser {
         if (cursor < source.size() && source[cursor] == '-') ++cursor;
         while (cursor < source.size()) {
             const char c = source[cursor];
-            if (c == '.' || c == 'e' || c == 'E' || c == '+' || (c == '-' && cursor != start)) integral = false;
-            else if (c < '0' || c > '9') break;
+            if (c == '.' || c == 'e' || c == 'E' || c == '+' || (c == '-' && cursor != start))
+                integral = false;
+            else if (c < '0' || c > '9')
+                break;
             ++cursor;
         }
         if (cursor == start) return false;
@@ -188,11 +211,21 @@ void write_string(const std::string& text, std::string& out) {
     out += '"';
     for (const char c : text) {
         switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
                 if (static_cast<unsigned char>(c) < 0x20) {
                     char escaped[8];
@@ -208,16 +241,24 @@ void write_string(const std::string& text, std::string& out) {
 
 void write_value(const Json& value, std::string& out) {
     switch (value.kind) {
-        case Json::Kind::Null: out += "null"; break;
-        case Json::Kind::Bool: out += value.flag ? "true" : "false"; break;
-        case Json::Kind::Integer: out += std::to_string(value.integer); break;
+        case Json::Kind::Null:
+            out += "null";
+            break;
+        case Json::Kind::Bool:
+            out += value.flag ? "true" : "false";
+            break;
+        case Json::Kind::Integer:
+            out += std::to_string(value.integer);
+            break;
         case Json::Kind::Number: {
             char text[40];
             snprintf(text, sizeof text, "%.17g", value.number);
             out += text;
             break;
         }
-        case Json::Kind::String: write_string(value.text, out); break;
+        case Json::Kind::String:
+            write_string(value.text, out);
+            break;
         case Json::Kind::Array: {
             out += '[';
             for (size_t i = 0; i < value.items.size(); ++i) {

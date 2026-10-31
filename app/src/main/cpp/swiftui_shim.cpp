@@ -7,23 +7,23 @@
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
-#include <string>
-#include <vector>
 #include <map>
 #include <new>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "concurrency_shim.h"
 #include "coredata_shim.h"
 #include "engine.h"
-#include "objc_runtime.h"
 #include "foundation_shim.h"
 #include "json.h"
 #include "key_path.h"
 #include "localization.h"
 #include "macho.h"
+#include "objc_runtime.h"
 #include "stdlib_shim.h"
 #include "swift_runtime.h"
 #include "symbols.h"
@@ -131,7 +131,11 @@ SWIFTCC void scene_build_block(SWIFT_OUT void* out, void* value, void* type, voi
 
 SWIFTCC void registrar_mark_dirty();
 
-enum class BindingKind : uint32_t { State, Closures, ObjectKeyPath, BindingKeyPath, AppStorage };
+enum class BindingKind : uint32_t { State,
+                                    Closures,
+                                    ObjectKeyPath,
+                                    BindingKeyPath,
+                                    AppStorage };
 
 // A two-way reference to a value, in whichever of SwiftUI's forms the app created it.
 struct BindingNode {
@@ -191,10 +195,40 @@ struct ChildValue {
 };
 
 enum class NodeKind : uint32_t {
-    TabView, Tab, NavigationStack, List, Button, Label, Toggle, Modifier,
-    Sheet, Toolbar, OnChange, Task, Picker, ForEach, Section, ProgressView, Stepper, Image, AsyncImage,
-    Disclosure, LabeledContent, Unavailable, Menu, Link, ToolbarItem, ImageResource,
-    RowMenu, PresentedSheet, Alert, NavigationLink, TextField, Stack, Divider, Searchable,
+    TabView,
+    Tab,
+    NavigationStack,
+    List,
+    Button,
+    Label,
+    Toggle,
+    Modifier,
+    Sheet,
+    Toolbar,
+    OnChange,
+    Task,
+    Picker,
+    ForEach,
+    Section,
+    ProgressView,
+    Stepper,
+    Image,
+    AsyncImage,
+    Disclosure,
+    LabeledContent,
+    Unavailable,
+    Menu,
+    Link,
+    ToolbarItem,
+    ImageResource,
+    RowMenu,
+    PresentedSheet,
+    Alert,
+    NavigationLink,
+    TextField,
+    Stack,
+    Divider,
+    Searchable,
 };
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
@@ -1163,14 +1197,40 @@ constexpr uint64_t kFontBold = 1ULL << 16;
 constexpr uint64_t kFontMonospaced = 1ULL << 17;
 
 enum ConstantId : uint64_t {
-    kFontBody = 1, kFontCaption, kFontCaption2, kFontFootnote,
-    kColorAccent, kColorRed, kColorGreen, kColorSecondary,
-    kStyleSecondary, kStyleQuaternary,
-    kAnimationDefault, kButtonRoleDestructive, kToolbarTopBarTrailing,
-    kAlignLeading, kAlignTrailing, kAlignCenter, kAlignBottom, kAlignTop,
-    kFontLargeTitle, kFontTitle, kFontTitle2, kFontHeadline, kFontSubheadline,
-    kColorPrimary, kColorGray, kColorPink, kColorBlack, kColorClear, kColorWhite, kColorOrange, kColorYellow,
-    kStylePrimary, kWeightBold, kWeightSemibold,
+    kFontBody = 1,
+    kFontCaption,
+    kFontCaption2,
+    kFontFootnote,
+    kColorAccent,
+    kColorRed,
+    kColorGreen,
+    kColorSecondary,
+    kStyleSecondary,
+    kStyleQuaternary,
+    kAnimationDefault,
+    kButtonRoleDestructive,
+    kToolbarTopBarTrailing,
+    kAlignLeading,
+    kAlignTrailing,
+    kAlignCenter,
+    kAlignBottom,
+    kAlignTop,
+    kFontLargeTitle,
+    kFontTitle,
+    kFontTitle2,
+    kFontHeadline,
+    kFontSubheadline,
+    kColorPrimary,
+    kColorGray,
+    kColorPink,
+    kColorBlack,
+    kColorClear,
+    kColorWhite,
+    kColorOrange,
+    kColorYellow,
+    kStylePrimary,
+    kWeightBold,
+    kWeightSemibold,
     kStyleConstantOther,
 };
 
@@ -1651,40 +1711,74 @@ SWIFTCC EdgeInsetsValue edge_insets_all(double value) { return {value, value, va
 
 const char* node_kind_name(NodeKind kind) {
     switch (kind) {
-        case NodeKind::TabView: return "TabView";
-        case NodeKind::Tab: return "Tab";
-        case NodeKind::NavigationStack: return "NavigationStack";
-        case NodeKind::List: return "List";
-        case NodeKind::Button: return "Button";
-        case NodeKind::Label: return "Label";
-        case NodeKind::Toggle: return "Toggle";
-        case NodeKind::Modifier: return "Modifier";
-        case NodeKind::Sheet: return "Sheet";
-        case NodeKind::Toolbar: return "Toolbar";
-        case NodeKind::OnChange: return "OnChange";
-        case NodeKind::Task: return "Task";
-        case NodeKind::Picker: return "Picker";
-        case NodeKind::ForEach: return "ForEach";
-        case NodeKind::Section: return "Section";
-        case NodeKind::ProgressView: return "ProgressView";
-        case NodeKind::Stepper: return "Stepper";
-        case NodeKind::Image: return "Image";
-        case NodeKind::AsyncImage: return "AsyncImage";
-        case NodeKind::Disclosure: return "Disclosure";
-        case NodeKind::LabeledContent: return "LabeledContent";
-        case NodeKind::Unavailable: return "Unavailable";
-        case NodeKind::Menu: return "Menu";
-        case NodeKind::Link: return "Link";
-        case NodeKind::ToolbarItem: return "ToolbarItem";
-        case NodeKind::ImageResource: return "ImageResource";
-        case NodeKind::RowMenu: return "RowMenu";
-        case NodeKind::PresentedSheet: return "PresentedSheet";
-        case NodeKind::Alert: return "Alert";
-        case NodeKind::NavigationLink: return "NavigationLink";
-        case NodeKind::TextField: return "TextField";
-        case NodeKind::Stack: return "Stack";
-        case NodeKind::Divider: return "Divider";
-        case NodeKind::Searchable: return "Searchable";
+        case NodeKind::TabView:
+            return "TabView";
+        case NodeKind::Tab:
+            return "Tab";
+        case NodeKind::NavigationStack:
+            return "NavigationStack";
+        case NodeKind::List:
+            return "List";
+        case NodeKind::Button:
+            return "Button";
+        case NodeKind::Label:
+            return "Label";
+        case NodeKind::Toggle:
+            return "Toggle";
+        case NodeKind::Modifier:
+            return "Modifier";
+        case NodeKind::Sheet:
+            return "Sheet";
+        case NodeKind::Toolbar:
+            return "Toolbar";
+        case NodeKind::OnChange:
+            return "OnChange";
+        case NodeKind::Task:
+            return "Task";
+        case NodeKind::Picker:
+            return "Picker";
+        case NodeKind::ForEach:
+            return "ForEach";
+        case NodeKind::Section:
+            return "Section";
+        case NodeKind::ProgressView:
+            return "ProgressView";
+        case NodeKind::Stepper:
+            return "Stepper";
+        case NodeKind::Image:
+            return "Image";
+        case NodeKind::AsyncImage:
+            return "AsyncImage";
+        case NodeKind::Disclosure:
+            return "Disclosure";
+        case NodeKind::LabeledContent:
+            return "LabeledContent";
+        case NodeKind::Unavailable:
+            return "Unavailable";
+        case NodeKind::Menu:
+            return "Menu";
+        case NodeKind::Link:
+            return "Link";
+        case NodeKind::ToolbarItem:
+            return "ToolbarItem";
+        case NodeKind::ImageResource:
+            return "ImageResource";
+        case NodeKind::RowMenu:
+            return "RowMenu";
+        case NodeKind::PresentedSheet:
+            return "PresentedSheet";
+        case NodeKind::Alert:
+            return "Alert";
+        case NodeKind::NavigationLink:
+            return "NavigationLink";
+        case NodeKind::TextField:
+            return "TextField";
+        case NodeKind::Stack:
+            return "Stack";
+        case NodeKind::Divider:
+            return "Divider";
+        case NodeKind::Searchable:
+            return "Searchable";
     }
     return "?";
 }
@@ -1768,7 +1862,15 @@ bool is_view_like(void* type) {
     return find_view_conformance(type) != nullptr || find_conformance(type, kToolbarContentSymbol) != nullptr || find_conformance(type, kRepresentableSymbol) != nullptr;
 }
 
-enum class ActionKind { Closure, Toggle, StepBy, SetValue, DismissSheet, OpenUrl, SetText, PushLink, PopLink };
+enum class ActionKind { Closure,
+                        Toggle,
+                        StepBy,
+                        SetValue,
+                        DismissSheet,
+                        OpenUrl,
+                        SetText,
+                        PushLink,
+                        PopLink };
 
 struct Action {
     ActionKind kind;
@@ -1889,22 +1991,31 @@ bool values_equal(void* left, void* right, void* type) {
 
 std::string text_color_name(uint64_t style) {
     switch ((style & kTextColorMask) >> kTextColorShift) {
-        case kColorRed: return "red";
-        case kColorGreen: return "green";
-        case kColorAccent: return "accent";
+        case kColorRed:
+            return "red";
+        case kColorGreen:
+            return "green";
+        case kColorAccent:
+            return "accent";
         case kColorSecondary:
         case kStyleSecondary:
-        case kStyleQuaternary: return "secondary";
-        default: return "";
+        case kStyleQuaternary:
+            return "secondary";
+        default:
+            return "";
     }
 }
 
 const char* font_name(uint64_t style) {
     switch ((style & kTextFontMask) & 0xffff) {
-        case kFontCaption: return "caption";
-        case kFontCaption2: return "caption2";
-        case kFontFootnote: return "footnote";
-        default: return "body";
+        case kFontCaption:
+            return "caption";
+        case kFontCaption2:
+            return "caption2";
+        case kFontFootnote:
+            return "footnote";
+        default:
+            return "body";
     }
 }
 
@@ -2013,7 +2124,8 @@ Nodes render_node(ViewNode* node, const std::string& path, int depth) {
             Nodes children = node->title->empty() ? render_children(node, path, depth) : Nodes{plain_text(*node->title)};
             return {tree_node("button", {{"a", json_number(action)}}, std::move(children))};
         }
-        case NodeKind::NavigationLink: return render_navigation_link(node, path, depth);
+        case NodeKind::NavigationLink:
+            return render_navigation_link(node, path, depth);
         case NodeKind::TextField: {
             SwiftString text{};
             binding_read(node->binding, &text, string_metadata());
@@ -2030,8 +2142,10 @@ Nodes render_node(ViewNode* node, const std::string& path, int depth) {
             append_nodes(children, render_children(node, path, depth));
             return {tree_node("v", {}, std::move(children))};
         }
-        case NodeKind::Stack: return {tree_node("v", {}, render_children(node, path, depth))};
-        case NodeKind::Divider: return {};
+        case NodeKind::Stack:
+            return {tree_node("v", {}, render_children(node, path, depth))};
+        case NodeKind::Divider:
+            return {};
         case NodeKind::Link: {
             const int action = add_action({ActionKind::OpenUrl, nullptr, nullptr, nullptr, nullptr, nullptr, 0, *node->detail});
             return {tree_node("button", {{"a", json_number(action)}}, render_children(node, path, depth))};
@@ -2124,13 +2238,16 @@ Nodes render_node(ViewNode* node, const std::string& path, int depth) {
             children.push_back(tree_node("sheet", {{"d", json_number(action)}}, {tree_node("list", {}, std::move(body))}));
             return children;
         }
-        case NodeKind::TabView: return {tree_node("tabs", {}, render_children(node, path, depth))};
+        case NodeKind::TabView:
+            return {tree_node("tabs", {}, render_children(node, path, depth))};
         case NodeKind::Tab: {
             if (node->lower != 0) return render_tab_item(node, path, depth);
             return {tree_node("tab", text_properties(*node->title, *node->system_image), render_children(node, path, depth))};
         }
-        case NodeKind::NavigationStack: return {tree_node("nav", {}, render_children(node, path, depth))};
-        case NodeKind::List: return {tree_node("list", {}, render_children(node, path, depth))};
+        case NodeKind::NavigationStack:
+            return {tree_node("nav", {}, render_children(node, path, depth))};
+        case NodeKind::List:
+            return {tree_node("list", {}, render_children(node, path, depth))};
         case NodeKind::Section: {
             Nodes children;
             if (!node->title->empty()) children.push_back(tree_node("text", {{"t", json_text(*node->title)}, {"font", json_text("caption")}, {"color", json_text("secondary")}}));
@@ -2141,19 +2258,26 @@ Nodes render_node(ViewNode* node, const std::string& path, int depth) {
             if (node->children->empty()) return {tree_node("h", {}, {tree_node("image", text_properties({}, *node->system_image)), plain_text(*node->title)})};
             return {tree_node("h", {}, render_children(node, path, depth))};
         }
-        case NodeKind::Menu: return {tree_node("menu", {}, render_children(node, path, depth))};
+        case NodeKind::Menu:
+            return {tree_node("menu", {}, render_children(node, path, depth))};
         case NodeKind::Disclosure: {
             Nodes children;
             if (!node->title->empty()) children.push_back(plain_text(*node->title));
             append_nodes(children, render_children(node, path, depth));
             return {tree_node("disclosure", {}, std::move(children))};
         }
-        case NodeKind::Toolbar: return {tree_node("toolbar", {}, render_children(node, path, depth))};
-        case NodeKind::ToolbarItem: return {tree_node("toolbaritem", {}, render_children(node, path, depth))};
-        case NodeKind::ProgressView: return {tree_node("progress")};
-        case NodeKind::AsyncImage: return {tree_node("image")};
-        case NodeKind::Image: return {tree_node("image", text_properties(*node->title, *node->system_image))};
-        case NodeKind::LabeledContent: return {tree_node("labeled", text_properties(*node->title, *node->system_image), render_children(node, path, depth))};
+        case NodeKind::Toolbar:
+            return {tree_node("toolbar", {}, render_children(node, path, depth))};
+        case NodeKind::ToolbarItem:
+            return {tree_node("toolbaritem", {}, render_children(node, path, depth))};
+        case NodeKind::ProgressView:
+            return {tree_node("progress")};
+        case NodeKind::AsyncImage:
+            return {tree_node("image")};
+        case NodeKind::Image:
+            return {tree_node("image", text_properties(*node->title, *node->system_image))};
+        case NodeKind::LabeledContent:
+            return {tree_node("labeled", text_properties(*node->title, *node->system_image), render_children(node, path, depth))};
         case NodeKind::Unavailable: {
             Properties properties = text_properties(*node->title, *node->system_image);
             if (!node->detail->empty()) properties.emplace_back("s", json_text(*node->detail));

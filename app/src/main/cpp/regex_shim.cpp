@@ -31,7 +31,13 @@ namespace {
 constexpr int kUnbounded = -1;
 
 struct Node {
-    enum class Kind { Set, Start, End, Sequence, Alternation, Repeat, Capture };
+    enum class Kind { Set,
+                      Start,
+                      End,
+                      Sequence,
+                      Alternation,
+                      Repeat,
+                      Capture };
     Kind kind = Kind::Sequence;
     std::bitset<256> set;
     std::vector<std::unique_ptr<Node>> children;
@@ -134,23 +140,32 @@ private:
         const char c = pattern_[cursor_++];
         std::bitset<256> named;
         switch (c) {
-            case 'd': case 'D':
+            case 'd':
+            case 'D':
                 add_range(named, '0', '9');
                 break;
-            case 'w': case 'W':
+            case 'w':
+            case 'W':
                 add_range(named, '0', '9');
                 add_range(named, 'a', 'z');
                 add_range(named, 'A', 'Z');
                 named.set('_');
                 add_range(named, 0x80, 0xFF);
                 break;
-            case 's': case 'S':
+            case 's':
+            case 'S':
                 named.set(' ');
                 add_range(named, 0x09, 0x0D);
                 break;
-            case 'n': literal = '\n'; return false;
-            case 't': literal = '\t'; return false;
-            case 'r': literal = '\r'; return false;
+            case 'n':
+                literal = '\n';
+                return false;
+            case 't':
+                literal = '\t';
+                return false;
+            case 'r':
+                literal = '\r';
+                return false;
             default:
                 if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) fail("unsupported escape");
                 literal = c;
@@ -178,9 +193,12 @@ private:
             character_class(node->set);
         } else if (c == '(') {
             int capture = -1;
-            if (pattern_.compare(cursor_, 2, "?:") == 0) cursor_ += 2;
-            else if (more() && pattern_[cursor_] == '?') fail("group options");
-            else capture = ++captures_;
+            if (pattern_.compare(cursor_, 2, "?:") == 0)
+                cursor_ += 2;
+            else if (more() && pattern_[cursor_] == '?')
+                fail("group options");
+            else
+                capture = ++captures_;
             auto inner = alternation();
             if (!more() || pattern_[cursor_] != ')') fail("unterminated (");
             ++cursor_;
@@ -402,8 +420,7 @@ SWIFTCC void regex_replacing(SWIFT_OUT SwiftString* out, RegexBox** regex, const
         size_t end = at;
         const bool matched = done < maximum && match_node(*(*regex)->root, text, at, spans, [&](size_t after) {
             end = after;
-            return true;
-        });
+            return true; });
         if (matched && end > at) {
             result += with;
             at = end;

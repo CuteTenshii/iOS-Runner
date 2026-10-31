@@ -357,9 +357,12 @@ void save_store() {
         for (const auto& [name, attribute] : record.attributes) {
             if (attribute.value == nullptr && attribute.is_object) continue;
             std::string encoded;
-            if (!attribute.is_object) encoded = attribute.value != nullptr ? "b1" : "b0";
-            else if (const auto related = indexes.find(attribute.value); related != indexes.end()) encoded = "r" + std::to_string(related->second);
-            else encoded = foundation_encode_object(attribute.value);
+            if (!attribute.is_object)
+                encoded = attribute.value != nullptr ? "b1" : "b0";
+            else if (const auto related = indexes.find(attribute.value); related != indexes.end())
+                encoded = "r" + std::to_string(related->second);
+            else
+                encoded = foundation_encode_object(attribute.value);
             if (!encoded.empty()) entry.members.emplace_back(name, json_text(encoded));
         }
         root.items.push_back(std::move(entry));

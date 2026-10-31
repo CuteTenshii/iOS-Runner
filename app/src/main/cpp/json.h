@@ -6,7 +6,13 @@
 
 // A parsed JSON value. Object members keep their source order.
 struct Json {
-    enum class Kind { Null, Bool, Integer, Number, String, Array, Object };
+    enum class Kind { Null,
+                      Bool,
+                      Integer,
+                      Number,
+                      String,
+                      Array,
+                      Object };
     Kind kind = Kind::Null;
     bool flag = false;
     int64_t integer = 0;
