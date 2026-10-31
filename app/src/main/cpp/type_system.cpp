@@ -774,6 +774,7 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
     if (symbol == "_$s8Dispatch0A4TimeVMn") return pod_type("DispatchTime", 8);
+    if (symbol == "_$sSS10FoundationE8EncodingVMn") return pod_type("String.Encoding", 8);
     // Holds a continuation, which isn't reference counted; the arguments stay for resume to find its value type.
     if (symbol == "_$sScCMn") return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0, arguments);
     // Payload-free framework enums are plain tag words; a reference's layout would read small tags as Optional.none.
@@ -822,7 +823,8 @@ Metadata* foreign_nominal(const std::string& symbol, const std::vector<void*>& a
         constexpr size_t kClassSizeWord = 8;
         auto* block = static_cast<void**>(calloc(std::max<size_t>(kClassSizeWord + 1, 4 + arguments.size() + 1), sizeof(void*)));
         if (is_class && arguments.size() <= kClassSizeWord - 4) {
-            const uint32_t instance_size = 2 * sizeof(void*);
+            // The guest sizes array allocations from this: an array's header also holds its count and capacity.
+            const uint32_t instance_size = symbol == "_$ss23_ContiguousArrayStorageCMn" ? 4 * sizeof(void*) : 2 * sizeof(void*);
             const uint16_t alignment_mask = sizeof(void*) - 1;
             memcpy(block + kClassSizeWord, &instance_size, sizeof instance_size);
             memcpy(reinterpret_cast<char*>(block + kClassSizeWord) + sizeof instance_size, &alignment_mask, sizeof alignment_mask);
