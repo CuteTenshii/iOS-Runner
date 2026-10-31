@@ -27,6 +27,7 @@
 #include "swift_runtime.h"
 #include "swiftui_shim.h"
 #include "type_system.h"
+#include "swift_abi.h"
 
 extern "C" {
 void darwin_chkstk();
@@ -96,7 +97,6 @@ bool darwin_trylock_succeeds(void*) { return true; }
 int darwin_mutex_ok(void*, ...) { return 0; }
 
 double darwin_absolute_time() {
-    constexpr double kSecondsFrom1970To2001 = 978307200.0;
     timespec now{};
     clock_gettime(CLOCK_REALTIME, &now);
     return static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_nsec) / 1e9 - kSecondsFrom1970To2001;

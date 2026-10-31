@@ -12,15 +12,12 @@
 
 #include "engine.h"
 #include "macho.h"
+#include "swift_abi.h"
 
 namespace {
 
 constexpr uint32_t kRelativeMethodList = 0x80000000;
 constexpr uint32_t kMethodListEntrySizeMask = 0xffff;
-constexpr uintptr_t kClassDataMask = ~static_cast<uintptr_t>(7);
-constexpr size_t kClassSuperclassOffset = 8;
-constexpr size_t kClassDataOffset = 32;
-constexpr size_t kRoInstanceSizeOffset = 8;
 constexpr size_t kRoBaseMethodsOffset = 32;
 constexpr size_t kClassSymbolPrefixLength = sizeof("_OBJC_CLASS_$_") - 1;
 constexpr size_t kMetaclassSymbolPrefixLength = sizeof("_OBJC_METACLASS_$_") - 1;

@@ -14,20 +14,15 @@
 #include "json.h"
 #include "macho.h"
 #include "stdlib_shim.h"
+#include "swift_abi.h"
 #include "swift_runtime.h"
 #include "symbols.h"
 #include "type_system.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_CTX __attribute__((swift_context))
-#define SWIFT_ERROR __attribute__((swift_error_result))
 
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 
 namespace {
-
-constexpr size_t kValueWitnessSizeOffset = 0x40;
 constexpr size_t kAnyBufferWords = 3;
 constexpr uint64_t kBridgeObjectAddressMask = 0x00FFFFFFFFFFFFF8ULL;
 
@@ -48,13 +43,7 @@ struct CoderExistential {
 CoderExistential coder_for(Json* node) { return {node, {nullptr, nullptr}, type_system_symbol("$sSiN"), nullptr}; }
 
 // KeyedDecodingContainer and KeyedEncodingContainer are one reference at runtime; this is what it refers to.
-struct StorageMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-const StorageMetadata kContainerMetadata = {free, nullptr, 0};
+const HeapMetadata kContainerMetadata = {free, nullptr, 0};
 
 struct ContainerBox {
     void* metadata;
@@ -78,7 +67,7 @@ const void* witness_in(void* table, const char* requirement) {
     return swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), requirement);
 }
 
-using StringValueGetter = SWIFTCC SwiftString (*)(void*, void*, SWIFT_CTX const void*);
+using StringValueGetter = SWIFTCC SwiftString (*)(void*, void*, SWIFT_CONTEXT const void*);
 
 std::string key_name(const ContainerBox* box, const void* key, void* key_type) {
     const auto getter = reinterpret_cast<StringValueGetter>(const_cast<void*>(witness_in(box->key_witnesses, "_$ss9CodingKeyP11stringValueSSvgTq")));
@@ -100,12 +89,11 @@ void* decoding_error(const std::string& what) {
     return foundation_make_error("The data couldn't be read: " + what, 4864);
 }
 
-using InitFromDecoder = SWIFTCC void (*)(SWIFT_OUT void*, CoderExistential*, void*, void*, SWIFT_CTX void*, SWIFT_ERROR void**);
-using EncodeToEncoder = SWIFTCC void (*)(CoderExistential*, void*, void*, SWIFT_CTX const void*, SWIFT_ERROR void**);
+using InitFromDecoder = SWIFTCC void (*)(SWIFT_OUT void*, CoderExistential*, void*, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+using EncodeToEncoder = SWIFTCC void (*)(CoderExistential*, void*, void*, SWIFT_CONTEXT const void*, SWIFT_ERROR void**);
 
 constexpr uint64_t kOptionalKind = 0x202;
 constexpr size_t kFirstGenericWord = 2;
-constexpr size_t kWitnessStoreEnumTagOffset = 0x38;
 
 // Optional's tag goes through its payload's witness, which knows the spare bits it can use.
 void store_optional_tag(void* out, void* payload, bool none) {
@@ -321,9 +309,9 @@ struct MetadataResponse {
 };
 
 SWIFTCC MetadataResponse coder_access(size_t) { return {coder_class_metadata(), 0}; }
-SWIFTCC void* coder_init(SWIFT_CTX void* self) { return self; }
+SWIFTCC void* coder_init(SWIFT_CONTEXT void* self) { return self; }
 
-SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CTX void*, SWIFT_ERROR void** error) {
+SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     auto* root = new Json;
     if (!json_parse(foundation_data_bytes({range, storage}), *root)) {
         delete root;
@@ -334,14 +322,14 @@ SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uin
     delete root;
 }
 
-SWIFTCC FoundationData json_encoder_encode(const void* value, void* type, void*, SWIFT_CTX void*, SWIFT_ERROR void** error) {
+SWIFTCC FoundationData json_encoder_encode(const void* value, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     Json root;
     encode_value(type, value, root, error);
     if (*error != nullptr) return foundation_make_data("");
     return foundation_make_data(json_write(root));
 }
 
-SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     if ((*self)->kind != Json::Kind::Object) {
         *error = decoding_error("expected an object");
         return;
@@ -349,7 +337,7 @@ SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void*
     *out = make_container(*self, key_witnesses);
 }
 
-SWIFTCC void encoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CTX Json** self) {
+SWIFTCC void encoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CONTEXT Json** self) {
     (*self)->kind = Json::Kind::Object;
     *out = make_container(*self, key_witnesses);
 }
@@ -366,25 +354,25 @@ struct OptionalInt {
     uint64_t is_nil;
 };
 
-SWIFTCC SwiftString keyed_decode_string(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC SwiftString keyed_decode_string(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     SwiftString out{0, 0};
     if (Json* node = required_member(*self, key, container_type, error)) decode_value(type_system_symbol("$sSSN"), node, &out, error);
     return out;
 }
 
-SWIFTCC int64_t keyed_decode_int(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC int64_t keyed_decode_int(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     int64_t out = 0;
     if (Json* node = required_member(*self, key, container_type, error)) decode_value(type_system_symbol("$sSiN"), node, &out, error);
     return out;
 }
 
-SWIFTCC bool keyed_decode_bool(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC bool keyed_decode_bool(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     uint8_t out = 0;
     if (Json* node = required_member(*self, key, container_type, error)) decode_value(type_system_symbol("$sSbN"), node, &out, error);
     return out != 0;
 }
 
-SWIFTCC void keyed_decode_generic(SWIFT_OUT void* out, void*, const void* key, void* container_type, void* type, void*, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_decode_generic(SWIFT_OUT void* out, void*, const void* key, void* container_type, void* type, void*, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     if (Json* node = required_member(*self, key, container_type, error)) decode_value(type, node, out, error);
 }
 
@@ -393,13 +381,13 @@ Json* optional_member(const ContainerBox* box, const void* key, void* container_
     return found == nullptr || found->kind == Json::Kind::Null ? nullptr : found;
 }
 
-SWIFTCC SwiftString keyed_decode_optional_string(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC SwiftString keyed_decode_optional_string(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     SwiftString out{0, 0};
     if (Json* node = optional_member(*self, key, container_type)) decode_value(type_system_symbol("$sSSN"), node, &out, error);
     return out;
 }
 
-SWIFTCC OptionalInt keyed_decode_optional_int(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC OptionalInt keyed_decode_optional_int(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     Json* node = optional_member(*self, key, container_type);
     if (node == nullptr) return {0, 1};
     OptionalInt out{0, 0};
@@ -408,7 +396,7 @@ SWIFTCC OptionalInt keyed_decode_optional_int(const void* key, void* container_t
 }
 
 // decodeIfPresent<T>: absent and null both give nil, and the result is T? in place.
-SWIFTCC void keyed_decode_if_present_generic(SWIFT_OUT void* out, void*, const void* key, void* container_type, void* type, void*, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_decode_if_present_generic(SWIFT_OUT void* out, void*, const void* key, void* container_type, void* type, void*, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     Json* node = optional_member(*self, key, container_type);
     if (node == nullptr) {
         store_optional_tag(out, type, true);
@@ -420,7 +408,7 @@ SWIFTCC void keyed_decode_if_present_generic(SWIFT_OUT void* out, void*, const v
 
 constexpr uint8_t kOptionalBoolNone = 2;
 
-SWIFTCC uint8_t keyed_decode_optional_bool(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC uint8_t keyed_decode_optional_bool(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     Json* node = optional_member(*self, key, container_type);
     if (node == nullptr) return kOptionalBoolNone;
     uint8_t out = 0;
@@ -428,25 +416,25 @@ SWIFTCC uint8_t keyed_decode_optional_bool(const void* key, void* container_type
     return out;
 }
 
-SWIFTCC double keyed_decode_double(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC double keyed_decode_double(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     double out = 0;
     if (Json* node = required_member(*self, key, container_type, error)) decode_value(type_system_symbol("$sSdN"), node, &out, error);
     return out;
 }
 
-SWIFTCC bool keyed_contains(const void* key, void* container_type, SWIFT_CTX ContainerBox** self) { return (*self)->node->member(key_name(*self, key, key_type_of(container_type))) != nullptr; }
+SWIFTCC bool keyed_contains(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self) { return (*self)->node->member(key_name(*self, key, key_type_of(container_type))) != nullptr; }
 
-SWIFTCC bool keyed_decode_nil(const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void**) { return optional_member(*self, key, container_type) == nullptr; }
+SWIFTCC bool keyed_decode_nil(const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void**) { return optional_member(*self, key, container_type) == nullptr; }
 
-SWIFTCC void keyed_nested(SWIFT_OUT ContainerBox** out, void*, const void* key, void* container_type, void*, void* key_witnesses, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_nested(SWIFT_OUT ContainerBox** out, void*, const void* key, void* container_type, void*, void* key_witnesses, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     Json* node = required_member(*self, key, container_type, error);
     if (node != nullptr) *out = make_container(node, key_witnesses);
 }
 
 // Single-value and unkeyed containers are existentials over a node; unkeyed keeps its position in the buffer.
-SWIFTCC void decoder_value_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void**) { *out = coder_for(*self); }
+SWIFTCC void decoder_value_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void**) { *out = coder_for(*self); }
 
-SWIFTCC void decoder_unkeyed_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC void decoder_unkeyed_container(SWIFT_OUT CoderExistential* out, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     if ((*self)->kind != Json::Kind::Array) {
         *error = decoding_error("expected an array");
         return;
@@ -454,51 +442,51 @@ SWIFTCC void decoder_unkeyed_container(SWIFT_OUT CoderExistential* out, void*, v
     *out = coder_for(*self);
 }
 
-SWIFTCC void* coding_path_empty(void*, void*, SWIFT_CTX void*) { return resolve_symbol("_swiftEmptyArrayStorage"); }
-SWIFTCC void* decoder_user_info(void*, void*, SWIFT_CTX void*) { return resolve_symbol("_swiftEmptyDictionarySingleton"); }
+SWIFTCC void* coding_path_empty(void*, void*, SWIFT_CONTEXT void*) { return resolve_symbol("_swiftEmptyArrayStorage"); }
+SWIFTCC void* decoder_user_info(void*, void*, SWIFT_CONTEXT void*) { return resolve_symbol("_swiftEmptyDictionarySingleton"); }
 
-SWIFTCC bool value_decode_nil(void*, void*, SWIFT_CTX Json** self) { return (*self)->kind == Json::Kind::Null; }
+SWIFTCC bool value_decode_nil(void*, void*, SWIFT_CONTEXT Json** self) { return (*self)->kind == Json::Kind::Null; }
 
-SWIFTCC bool value_decode_bool(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC bool value_decode_bool(void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     uint8_t out = 0;
     decode_value(type_system_symbol("$sSbN"), *self, &out, error);
     return out != 0;
 }
 
-SWIFTCC int64_t value_decode_int(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC int64_t value_decode_int(void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     int64_t out = 0;
     decode_value(type_system_symbol("$sSiN"), *self, &out, error);
     return out;
 }
 
-SWIFTCC double value_decode_double(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC double value_decode_double(void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     double out = 0;
     decode_value(type_system_symbol("$sSdN"), *self, &out, error);
     return out;
 }
 
-SWIFTCC SwiftString value_decode_string(void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) {
+SWIFTCC SwiftString value_decode_string(void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     SwiftString out{0, 0};
     decode_value(type_system_symbol("$sSSN"), *self, &out, error);
     return out;
 }
 
-SWIFTCC void value_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CTX Json** self, SWIFT_ERROR void** error) { decode_value(type, *self, out, error); }
+SWIFTCC void value_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) { decode_value(type, *self, out, error); }
 
 // The position lives in the existential's second buffer word, which the guest passes back by address.
 int64_t& unkeyed_position(CoderExistential* self) { return *reinterpret_cast<int64_t*>(&self->padding[0]); }
 
-SWIFTCC bool unkeyed_is_at_end(void*, void*, SWIFT_CTX CoderExistential* self) { return unkeyed_position(self) >= static_cast<int64_t>(self->node->items.size()); }
-SWIFTCC int64_t unkeyed_current_index(void*, void*, SWIFT_CTX CoderExistential* self) { return unkeyed_position(self); }
+SWIFTCC bool unkeyed_is_at_end(void*, void*, SWIFT_CONTEXT CoderExistential* self) { return unkeyed_position(self) >= static_cast<int64_t>(self->node->items.size()); }
+SWIFTCC int64_t unkeyed_current_index(void*, void*, SWIFT_CONTEXT CoderExistential* self) { return unkeyed_position(self); }
 
 struct OptionalCount {
     int64_t value;
     uint64_t is_nil;
 };
 
-SWIFTCC OptionalCount unkeyed_count(void*, void*, SWIFT_CTX CoderExistential* self) { return {static_cast<int64_t>(self->node->items.size()), 0}; }
+SWIFTCC OptionalCount unkeyed_count(void*, void*, SWIFT_CONTEXT CoderExistential* self) { return {static_cast<int64_t>(self->node->items.size()), 0}; }
 
-SWIFTCC void unkeyed_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CTX CoderExistential* self, SWIFT_ERROR void** error) {
+SWIFTCC void unkeyed_decode_generic(SWIFT_OUT void* out, void*, void* type, void*, void*, void*, SWIFT_CONTEXT CoderExistential* self, SWIFT_ERROR void** error) {
     int64_t& position = unkeyed_position(self);
     if (position >= static_cast<int64_t>(self->node->items.size())) {
         *error = decoding_error("the array has no more values");
@@ -513,36 +501,36 @@ Json& new_member(const ContainerBox* box, const void* key, void* container_type)
     return box->node->members.back().second;
 }
 
-SWIFTCC void keyed_encode_string(SwiftString value, const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_string(SwiftString value, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     encode_value(type_system_symbol("$sSSN"), &value, new_member(*self, key, container_type), error);
 }
 
-SWIFTCC void keyed_encode_int(int64_t value, const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_int(int64_t value, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     encode_value(type_system_symbol("$sSiN"), &value, new_member(*self, key, container_type), error);
 }
 
-SWIFTCC void keyed_encode_bool(bool value, const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_bool(bool value, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     const uint8_t flag = value ? 1 : 0;
     encode_value(type_system_symbol("$sSbN"), &flag, new_member(*self, key, container_type), error);
 }
 
-SWIFTCC void keyed_encode_generic(const void* value, const void* key, void* container_type, void* type, void*, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_generic(const void* value, const void* key, void* container_type, void* type, void*, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     encode_value(type, value, new_member(*self, key, container_type), error);
 }
 
-SWIFTCC void keyed_encode_optional_string(SwiftString value, const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_optional_string(SwiftString value, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     if (value.object != 0) keyed_encode_string(value, key, container_type, self, error);
 }
 
-SWIFTCC void keyed_encode_optional_int(int64_t value, uint8_t is_nil, const void* key, void* container_type, SWIFT_CTX ContainerBox** self, SWIFT_ERROR void** error) {
+SWIFTCC void keyed_encode_optional_int(int64_t value, uint8_t is_nil, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     if ((is_nil & 1) == 0) keyed_encode_int(value, key, container_type, self, error);
 }
 
-using InitRawValue = SWIFTCC void (*)(SWIFT_OUT void*, const SwiftString*, void*, void*, SWIFT_CTX void*);
-using GetRawValue = SWIFTCC void (*)(SWIFT_OUT SwiftString*, void*, void*, SWIFT_CTX const void*);
+using InitRawValue = SWIFTCC void (*)(SWIFT_OUT void*, const SwiftString*, void*, void*, SWIFT_CONTEXT void*);
+using GetRawValue = SWIFTCC void (*)(SWIFT_OUT SwiftString*, void*, void*, SWIFT_CONTEXT const void*);
 
 // RawRepresentable's default init(from:) and encode(to:), where RawValue is String.
-SWIFTCC void raw_representable_init(SWIFT_OUT void* out, CoderExistential* decoder, void* type, void*, void* raw_witnesses, SWIFT_CTX void*, SWIFT_ERROR void** error) {
+SWIFTCC void raw_representable_init(SWIFT_OUT void* out, CoderExistential* decoder, void* type, void*, void* raw_witnesses, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     if (decoder->node->kind != Json::Kind::String) {
         *error = decoding_error("expected a string");
         return;
@@ -560,7 +548,7 @@ SWIFTCC void raw_representable_init(SWIFT_OUT void* out, CoderExistential* decod
     memcpy(out, result.data() + payload.offset, size_of(type));
 }
 
-SWIFTCC void raw_representable_encode(CoderExistential* encoder, void* type, void*, void* raw_witnesses, SWIFT_CTX const void* self, SWIFT_ERROR void**) {
+SWIFTCC void raw_representable_encode(CoderExistential* encoder, void* type, void*, void* raw_witnesses, SWIFT_CONTEXT const void* self, SWIFT_ERROR void**) {
     const auto get = reinterpret_cast<GetRawValue>(const_cast<void*>(witness_in(raw_witnesses, "_$sSY8rawValue03RawB0QzvgTq")));
     SwiftString raw{0, 0};
     get(&raw, type, raw_witnesses, self);

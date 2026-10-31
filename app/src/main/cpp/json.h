@@ -24,6 +24,13 @@ struct Json {
     const Json* member(const std::string& name) const;
 };
 
+inline Json json_text(const std::string& text) {
+    Json value;
+    value.kind = Json::Kind::String;
+    value.text = text;
+    return value;
+}
+
 // Returns false on malformed input, which includes anything after the first value.
 bool json_parse(const std::string& source, Json& out);
 std::string json_write(const Json& value);

@@ -17,29 +17,11 @@
 #include "macho.h"
 #include "swiftui_shim.h"
 #include "type_system.h"
+#include "swift_abi.h"
 
 namespace {
-
-constexpr uint64_t kImmortal = 1ULL << 63;
 // Swift keeps flags and discriminators in the top byte of bridged references.
-constexpr uint64_t kBridgePointerMask = 0x00fffffffffffff8ULL;
-constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
-constexpr size_t kBodyBufferSize = 64 * 1024;
 constexpr size_t kForeignWitnessTableWords = 32;
-
-struct HeapObject {
-    void* metadata;
-    std::atomic<uint64_t> references;
-};
-
-// Swift destructors take self in x20, this runtime's in x0, so the object goes in both.
-extern "C" void rt_call_destroyer(void* destroyer, void* object);
-
-// Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
-inline bool is_not_object(const void* raw) {
-    constexpr uintptr_t kFirstValidAddress = 0x1000;
-    return reinterpret_cast<uintptr_t>(raw) < kFirstValidAddress || reinterpret_cast<intptr_t>(raw) < 0;
-}
 
 void* retain_object(void* raw) {
     if (is_not_object(raw)) return raw;
@@ -93,7 +75,6 @@ constexpr uint32_t kConformanceConditionalMask = 0xffu << 8;
 constexpr uint32_t kConformanceConditionalShift = 8;
 constexpr uint32_t kConformanceResilient = 1u << 16;
 constexpr uint32_t kConformanceGenericTable = 1u << 17;
-constexpr size_t kGenericRequirementSize = 12;
 
 struct ResilientWitnesses {
     uint32_t count = 0;
@@ -231,8 +212,6 @@ constexpr size_t kOpaqueHeaderBytes = 8;
 constexpr size_t kGenericHeaderBytes = 8;
 constexpr size_t kGenericRequirementBytes = 12;
 constexpr uint32_t kFlagIsGeneric = 0x80;
-constexpr uint8_t kMarkerAccessFunction = 0xff;
-constexpr uint8_t kSymbolicAccessFunction = 0x09;
 
 // An opaque type's descriptor ends with accessors for its underlying types and their conformances.
 void* rt_get_opaque_conformance(void* const* arguments, const char* descriptor, size_t index) {
@@ -271,23 +250,6 @@ void rt_swiftui_app_main_entry();
 void* rt_swift_retain(void* object) { return retain_object(object); }
 void rt_swift_release(void* object) { release_object(object); }
 }
-
-struct ValueWitnessTable {
-    void* (*initialize_buffer_with_copy)(void*, void*, void*);
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-    void* (*initialize_with_take)(void*, void*, void*);
-    void* (*assign_with_take)(void*, void*, void*);
-    uint32_t (*get_enum_tag_single_payload)(const void*, uint32_t, void*);
-    void (*store_enum_tag_single_payload)(void*, uint32_t, uint32_t, void*);
-    size_t size;
-    size_t stride;
-    uint32_t flags;
-    uint32_t extra_inhabitants;
-};
-
-constexpr uint32_t kFlagNonPod = 0x10000;
 constexpr uintptr_t kFirstValidPointer = 0x1000;
 
 template <size_t Size>
@@ -552,11 +514,6 @@ namespace {
 
 const char* g_conformance_section = nullptr;
 size_t g_conformance_section_size = 0;
-constexpr size_t kMetadataDescriptorWord = 1;
-constexpr size_t kMetadataArgumentsWord = 2;
-constexpr size_t kConformanceTypeOffset = 4;
-constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
-constexpr uint32_t kTypeReferenceIndirect = 0x1u << 3;
 constexpr uintptr_t kProtocolPointerTagMask = 3;
 
 }  // namespace

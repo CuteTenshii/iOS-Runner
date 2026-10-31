@@ -16,25 +16,13 @@
 
 #include "engine.h"
 #include "foundation_shim.h"
+#include "swift_abi.h"
 #include "swift_runtime.h"
 
 namespace {
 
-struct HeapHeader {
-    void* metadata;
-    std::atomic<uint64_t> references;
-};
-
-struct ObjectMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-const ObjectMetadata kTaskMetadata = {free, nullptr, 0};
-const ObjectMetadata kMainActorMetadata = {free, nullptr, 0};
-
-constexpr uint64_t kImmortal = 1ULL << 63;
+const HeapMetadata kTaskMetadata = {free, nullptr, 0};
+const HeapMetadata kMainActorMetadata = {free, nullptr, 0};
 
 struct AsyncFunctionPointer {
     int32_t function;
@@ -66,7 +54,7 @@ std::deque<ReadyTask>& ready_tasks() {
 }
 
 struct TaskObject {
-    HeapHeader header;
+    HeapObject header;
 };
 
 struct TaskCreation {
@@ -113,16 +101,13 @@ void continuation_resume_with_error(char* task, void* error) {
     continuation_resume(task);
 }
 
-#define SWIFTCC_CONT __attribute__((swiftcall))
-#define SWIFT_OUT_CONT __attribute__((swift_indirect_result))
-#define SWIFT_SELF_CONT __attribute__((swift_context))
 
 // CheckedContinuation is the unsafe one, with the checking left out.
-SWIFTCC_CONT void checked_continuation_init(SWIFT_OUT_CONT void** out, void* unsafe_continuation) { *out = unsafe_continuation; }
+SWIFTCC void checked_continuation_init(SWIFT_OUT void** out, void* unsafe_continuation) { *out = unsafe_continuation; }
 
 constexpr size_t kCheckedValueTypeWord = 2;
 
-SWIFTCC_CONT void checked_resume_returning(void* value, void* metadata, SWIFT_SELF_CONT char** self) {
+SWIFTCC void checked_resume_returning(void* value, void* metadata, SWIFT_CONTEXT char** self) {
     ContinuationContext* context;
     memcpy(&context, *self + kTaskResumeContextOffset, sizeof context);
     void* type = static_cast<void**>(metadata)[kCheckedValueTypeWord];
@@ -133,7 +118,7 @@ SWIFTCC_CONT void checked_resume_returning(void* value, void* metadata, SWIFT_SE
     continuation_resume(*self);
 }
 
-SWIFTCC_CONT void checked_resume_throwing(void** error, void*, SWIFT_SELF_CONT char** self) { continuation_resume_with_error(*self, *error); }
+SWIFTCC void checked_resume_throwing(void** error, void*, SWIFT_CONTEXT char** self) { continuation_resume_with_error(*self, *error); }
 
 extern "C" void rt_with_checked_continuation();
 
@@ -142,7 +127,7 @@ extern "C" void rt_checked_begin(void* result, const void* body, void* body_cont
     void* task = continuation_init(context, 0);
     context->normal_result = result;
     context->state = kContinuationAwaited;
-    using Body = SWIFTCC_CONT void (*)(void*, SWIFT_SELF_CONT void*);
+    using Body = SWIFTCC void (*)(void*, SWIFT_CONTEXT void*);
     reinterpret_cast<Body>(const_cast<void*>(body))(&task, body_context);
 }
 
@@ -151,7 +136,7 @@ AsyncFunctionPointer g_group_await_all_record;
 AsyncFunctionPointer g_group_next_record;
 
 // The iterator is just the group's one word.
-__attribute__((swiftcall)) void group_make_iterator(__attribute__((swift_indirect_result)) void** out, void*, __attribute__((swift_context)) void** self) { *out = *self; }
+SWIFTCC void group_make_iterator(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = *self; }
 
 void* cancellation_handler_add(const void*, void*) { return nullptr; }
 void cancellation_handler_remove(void*) {}
@@ -208,7 +193,6 @@ extern "C" void rt_async_let_note_finished(AsyncLetState* state, void* error) {
     state->error = error;
     if (state->waiter != nullptr) ready_tasks().push_back({state->waiter, state->error, nullptr, state->waiter_context, true, g_current_task});
 }
-constexpr size_t kValueWitnessSizeOffset = 0x40;
 
 // A task group: child tasks run on this thread and queue up as they finish, for `next` to take in order.
 struct GroupChild {
@@ -235,7 +219,6 @@ struct GroupChildContext {
 extern "C" void rt_group_task_finished();
 
 constexpr size_t kWitnessInitializeWithTakeOffset = 0x20;
-constexpr size_t kWitnessStoreEnumTagOffset = 0x38;
 
 // Writes Optional<T>: some(taken from `value`) or, for null, none.
 void group_write_result(void* out, void* value, void* type) {
@@ -371,7 +354,7 @@ void default_actor_deallocate(void* actor) { free(actor); }
 
 void* main_actor_shared() {
     static auto* actor = [] {
-        auto* header = static_cast<HeapHeader*>(calloc(1, sizeof(HeapHeader)));
+        auto* header = static_cast<HeapObject*>(calloc(1, sizeof(HeapObject)));
         header->metadata = const_cast<uint64_t*>(&kMainActorMetadata.kind);
         new (&header->references) std::atomic<uint64_t>(kImmortal);
         return header;
@@ -396,15 +379,15 @@ ClockValue instant_now() {
     return clock_value((static_cast<__int128>(now.tv_sec) * 1000000000 + now.tv_nsec) * kAttosecondsPerNanosecond);
 }
 
-__attribute__((swiftcall)) void continuous_clock_init(__attribute__((swift_indirect_result)) void*) {}
-__attribute__((swiftcall)) void clock_now(__attribute__((swift_indirect_result)) ClockValue* out) { *out = instant_now(); }
-__attribute__((swiftcall)) void instant_advanced(__attribute__((swift_indirect_result)) ClockValue* out, uint64_t low, int64_t high, __attribute__((swift_context)) const ClockValue* self) {
+SWIFTCC void continuous_clock_init(SWIFT_OUT void*) {}
+SWIFTCC void clock_now(SWIFT_OUT ClockValue* out) { *out = instant_now(); }
+SWIFTCC void instant_advanced(SWIFT_OUT ClockValue* out, uint64_t low, int64_t high, SWIFT_CONTEXT const ClockValue* self) {
     *out = clock_value(attoseconds(*self) + attoseconds({low, high}));
 }
-__attribute__((swiftcall)) void instant_protocol_advanced(__attribute__((swift_indirect_result)) ClockValue* out, const ClockValue* by, void*, void*, __attribute__((swift_context)) const ClockValue* self) {
+SWIFTCC void instant_protocol_advanced(SWIFT_OUT ClockValue* out, const ClockValue* by, void*, void*, SWIFT_CONTEXT const ClockValue* self) {
     *out = clock_value(attoseconds(*self) + attoseconds(*by));
 }
-__attribute__((swiftcall)) ClockValue instant_duration_to(const ClockValue* other, __attribute__((swift_context)) const ClockValue* self) {
+SWIFTCC ClockValue instant_duration_to(const ClockValue* other, SWIFT_CONTEXT const ClockValue* self) {
     return clock_value(attoseconds(*other) - attoseconds(*self));
 }
 bool duration_less(uint64_t left_low, int64_t left_high, uint64_t right_low, int64_t right_high) {
@@ -434,7 +417,7 @@ extern "C" void rt_clock_sleep_begin(const ClockValue* until, void* context) {
     sleepers().insert({static_cast<int64_t>(attoseconds(*until) / kAttosecondsPerNanosecond), {context, g_current_task}});
 }
 
-__attribute__((swiftcall)) void task_cancel(__attribute__((swift_context)) const void* task) {
+SWIFTCC void task_cancel(SWIFT_CONTEXT const void* task) {
     g_cancelled_tasks.insert(task);
     auto& timers = sleepers();
     for (auto entry = timers.begin(); entry != timers.end();) {
@@ -451,7 +434,7 @@ __attribute__((swiftcall)) void task_cancel(__attribute__((swift_context)) const
 bool task_equal(const void* left, const void* right) { return left == right; }
 
 // Isolated deinit: there is one guest thread, so it already runs on the right executor.
-__attribute__((swiftcall)) void task_deinit_on_executor(void* object, __attribute__((swiftcall)) void (*work)(void*), void*, void*, size_t) { work(object); }
+SWIFTCC void task_deinit_on_executor(void* object, SWIFTCC void (*work)(void*), void*, void*, size_t) { work(object); }
 
 AsyncFunctionPointer g_clock_sleep_record;
 
@@ -466,8 +449,8 @@ ExecutorReference main_actor_executor() { return {0, 0}; }
 constexpr uint64_t kTaskPriorityUserInitiated = 25;
 constexpr uint64_t kImmediateTag = 1ULL << 63;
 
-__attribute__((swiftcall)) void task_priority_user_initiated(__attribute__((swift_indirect_result)) uint64_t* out) { *out = kImmediateTag | kTaskPriorityUserInitiated; }
-__attribute__((swiftcall)) uint8_t task_priority_raw_value(__attribute__((swift_context)) const uint64_t* self) { return static_cast<uint8_t>(*self); }
+SWIFTCC void task_priority_user_initiated(SWIFT_OUT uint64_t* out) { *out = kImmediateTag | kTaskPriorityUserInitiated; }
+SWIFTCC uint8_t task_priority_raw_value(SWIFT_CONTEXT const uint64_t* self) { return static_cast<uint8_t>(*self); }
 
 }  // namespace
 

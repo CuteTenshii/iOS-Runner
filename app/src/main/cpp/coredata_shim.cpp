@@ -17,20 +17,12 @@
 #include "macho.h"
 #include "objc_runtime.h"
 #include "stdlib_shim.h"
+#include "swift_abi.h"
 #include "type_system.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_CONTEXT __attribute__((swift_context))
-#define SWIFT_ERROR __attribute__((swift_error_result))
 
-extern "C" void* rt_swift_retain(void*);
-extern "C" void rt_swift_release(void*);
 
 namespace {
-
-constexpr uintptr_t kClassDataMask = ~static_cast<uintptr_t>(7);
-constexpr size_t kClassSuperclassOffset = 8;
-constexpr size_t kClassDataOffset = 32;
 constexpr size_t kRoNameOffset = 24;
 constexpr size_t kRoBasePropertiesOffset = 64;
 
@@ -184,9 +176,6 @@ struct CVarArgExistential {
     void* table;
 };
 
-constexpr size_t kArrayCountOffset = 16;
-constexpr size_t kArrayElementsOffset = 32;
-
 SWIFTCC void* predicate_init(SwiftString format, void* arguments, SWIFT_CONTEXT void*) {
     const std::string text = swift_string_to_utf8(format);
     auto* predicate = static_cast<Predicate*>(objc_framework_object("NSPredicate"));
@@ -209,13 +198,6 @@ bool matches(void* object, const Predicate* predicate) {
 }
 
 // Attribute values compare by what they hold: only strings and dates are ever sorted on.
-int compare_objects(void* left, void* right) {
-    if (left == nullptr || right == nullptr) return (left != nullptr) - (right != nullptr);
-    double left_date, right_date;
-    if (foundation_object_date(left, left_date) && foundation_object_date(right, right_date)) return (left_date > right_date) - (left_date < right_date);
-    return foundation_object_text(left).compare(foundation_object_text(right));
-}
-
 // The key path's getter returns a bridged value, but its pattern ends in the property's accessor: the sort reads through it.
 void sort_key_value(void* object, void* key_path, char (&buffer)[64], void*& type) {
     type = key_path_value_type(key_path);
@@ -335,13 +317,6 @@ void* context_execute(void*, const char*, FetchRequest* request, void**) {
 
 // Saved as JSON beside the app's other support files; relationships are indexes into the saved list.
 std::string store_path() { return engine_bundle_dir() + "/.Library/Application Support/coredata.json"; }
-
-Json json_text(const std::string& text) {
-    Json value;
-    value.kind = Json::Kind::String;
-    value.text = text;
-    return value;
-}
 
 void save_store() {
     const auto& order = store().insertion_order;

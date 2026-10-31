@@ -1,5 +1,6 @@
 #include "stdlib_shim.h"
 
+#include "swift_abi.h"
 #include "symbols.h"
 
 #include <atomic>
@@ -18,33 +19,11 @@
 #include "swift_runtime.h"
 #include "type_system.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_SELF __attribute__((swift_context))
 
 uint64_t* empty_set_singleton();
 uint64_t* empty_array_singleton();
 
 namespace {
-
-struct ValueWitnessTable {
-    void* (*initialize_buffer_with_copy)(void*, void*, void*);
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-    void* (*initialize_with_take)(void*, void*, void*);
-    void* (*assign_with_take)(void*, void*, void*);
-    uint32_t (*get_enum_tag_single_payload)(const void*, uint32_t, void*);
-    void (*store_enum_tag_single_payload)(void*, uint32_t, uint32_t, void*);
-    size_t size;
-    size_t stride;
-    uint32_t flags;
-    uint32_t extra_inhabitants;
-};
-
-const ValueWitnessTable* witnesses_of(const void* type) {
-    return static_cast<const ValueWitnessTable*>(static_cast<void* const*>(type)[-1]);
-}
 
 // Native hashed storage, laid out as the guest's inlined Set and Dictionary code expects.
 struct HashedHeader {
@@ -63,11 +42,6 @@ constexpr size_t kWordBits = 64;
 constexpr double kMaximumLoadFactor = 0.75;
 constexpr size_t kSetElementsOffset = sizeof(HashedHeader);
 constexpr size_t kSetBitmapOffset = kSetElementsOffset + sizeof(void*);
-constexpr size_t kDictionaryKeysOffset = sizeof(HashedHeader);
-constexpr size_t kDictionaryValuesOffset = kDictionaryKeysOffset + sizeof(void*);
-constexpr size_t kDictionaryBitmapOffset = kDictionaryValuesOffset + sizeof(void*);
-constexpr size_t kMetadataArgumentsWord = 2;
-constexpr size_t kArrayElementsOffset = 32;
 constexpr uint64_t kBridgeAddressMask = 0x00FFFFFFFFFFFFF8ULL;
 
 void** arguments_of(const void* metadata) { return const_cast<void**>(static_cast<void* const*>(metadata)) + kMetadataArgumentsWord; }
@@ -177,27 +151,27 @@ void destroy_array_storage(void* raw) {
     free(raw);
 }
 
-SWIFTCC void* set_storage_allocate(int64_t capacity, SWIFT_SELF void* metadata) {
+SWIFTCC void* set_storage_allocate(int64_t capacity, SWIFT_CONTEXT void* metadata) {
     return allocate_set(metadata, scale_for_capacity(capacity), 0, 0, false);
 }
 
-SWIFTCC void* set_storage_copy(HashedHeader* original, SWIFT_SELF void* metadata) {
+SWIFTCC void* set_storage_copy(HashedHeader* original, SWIFT_CONTEXT void* metadata) {
     return allocate_set(metadata, original->scale, original->age, original->seed, true);
 }
 
-SWIFTCC void* set_storage_resize(HashedHeader* original, int64_t capacity, bool, SWIFT_SELF void* metadata) {
+SWIFTCC void* set_storage_resize(HashedHeader* original, int64_t capacity, bool, SWIFT_CONTEXT void* metadata) {
     return allocate_set(metadata, scale_for_capacity(capacity), original->age, 0, false);
 }
 
-SWIFTCC void* dictionary_storage_allocate(int64_t capacity, SWIFT_SELF void* metadata) {
+SWIFTCC void* dictionary_storage_allocate(int64_t capacity, SWIFT_CONTEXT void* metadata) {
     return allocate_dictionary(metadata, scale_for_capacity(capacity), 0, 0, false);
 }
 
-SWIFTCC void* dictionary_storage_copy(HashedHeader* original, SWIFT_SELF void* metadata) {
+SWIFTCC void* dictionary_storage_copy(HashedHeader* original, SWIFT_CONTEXT void* metadata) {
     return allocate_dictionary(metadata, original->scale, original->age, original->seed, true);
 }
 
-SWIFTCC void* dictionary_storage_resize(HashedHeader* original, int64_t capacity, bool, SWIFT_SELF void* metadata) {
+SWIFTCC void* dictionary_storage_resize(HashedHeader* original, int64_t capacity, bool, SWIFT_CONTEXT void* metadata) {
     return allocate_dictionary(metadata, scale_for_capacity(capacity), original->age, 0, false);
 }
 
@@ -227,12 +201,12 @@ SWIFTCC void hasher_seed(SWIFT_OUT HasherState* out, int64_t seed) {
     out->state = mix_bytes(kFnvOffset, &seed, sizeof seed);
 }
 
-SWIFTCC void hasher_combine_word(uint64_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
-SWIFTCC void hasher_combine_uint16(uint16_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
-SWIFTCC void hasher_combine_uint32(uint32_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
-SWIFTCC void hasher_combine_byte(uint8_t value, SWIFT_SELF HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_word(uint64_t value, SWIFT_CONTEXT HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_uint16(uint16_t value, SWIFT_CONTEXT HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_uint32(uint32_t value, SWIFT_CONTEXT HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
+SWIFTCC void hasher_combine_byte(uint8_t value, SWIFT_CONTEXT HasherState* self) { self->state = mix_bytes(self->state, &value, sizeof value); }
 
-SWIFTCC int64_t hasher_finalize(SWIFT_SELF HasherState* self) {
+SWIFTCC int64_t hasher_finalize(SWIFT_CONTEXT HasherState* self) {
     // Finalizing must also scramble high bits: bucket selection uses the low bits only.
     uint64_t value = self->state;
     value ^= value >> 33;
@@ -249,8 +223,8 @@ SWIFTCC int64_t hasher_hash_seed_word(int64_t seed, uint64_t value) {
 }
 
 // NSObject's default `hash` is the identity, and no shim overrides it.
-SWIFTCC void nsobject_hash_into(HasherState* hasher, SWIFT_SELF void* self) { hasher_combine_word(reinterpret_cast<uint64_t>(self), hasher); }
-SWIFTCC int64_t nsobject_raw_hash_value(int64_t seed, SWIFT_SELF void* self) { return hasher_hash_seed_word(seed, reinterpret_cast<uint64_t>(self)); }
+SWIFTCC void nsobject_hash_into(HasherState* hasher, SWIFT_CONTEXT void* self) { hasher_combine_word(reinterpret_cast<uint64_t>(self), hasher); }
+SWIFTCC int64_t nsobject_raw_hash_value(int64_t seed, SWIFT_CONTEXT void* self) { return hasher_hash_seed_word(seed, reinterpret_cast<uint64_t>(self)); }
 
 SWIFTCC void string_hash_into(HasherState* hasher, SwiftString value) {
     const std::string text = swift_string_to_utf8(value);
@@ -309,20 +283,18 @@ std::string map_ascii_case(std::string text, bool upper) {
     return text;
 }
 
-SWIFTCC void string_append(SwiftString other, SWIFT_SELF SwiftString* self) {
+SWIFTCC void string_append(SwiftString other, SWIFT_CONTEXT SwiftString* self) {
     *self = swift_string_from_utf8(swift_string_to_utf8(*self) + swift_string_to_utf8(other));
 }
 
-SWIFTCC void string_guts_grow(int64_t capacity, SWIFT_SELF SwiftString* self) {
+SWIFTCC void string_guts_grow(int64_t capacity, SWIFT_CONTEXT SwiftString* self) {
     // Rewrites the string into native storage with room for `capacity` bytes, as the guest's inline append expects.
     std::string text = swift_string_to_utf8(*self);
     const size_t requested = capacity < static_cast<int64_t>(kMinimumGrownCapacity) ? kMinimumGrownCapacity : static_cast<size_t>(capacity);
     const size_t size = text.size();
     text.resize(requested > kMinimumGrownCapacity ? requested : kMinimumGrownCapacity + 1);
     SwiftString grown = swift_string_from_utf8(text);
-    constexpr uint64_t kCountMask = 0x0000ffffffffffffULL;
     grown.count_and_flags = (grown.count_and_flags & ~kCountMask) | size;
-    constexpr size_t kStorageCountOffset = 24;
     memcpy(reinterpret_cast<char*>(grown.object) + kStorageCountOffset, &grown.count_and_flags, sizeof grown.count_and_flags);
     *self = grown;
 }
@@ -367,8 +339,6 @@ SWIFTCC SwiftString string_from_substring(uint64_t start, uint64_t end, SwiftStr
 SWIFTCC StringTriple string_from_utf8_repairing(const char* bytes, int64_t count) {
     return {swift_string_from_utf8(std::string(bytes, static_cast<size_t>(count))), 0};
 }
-
-constexpr size_t kArrayCountOffset = 16;
 constexpr size_t kArrayStorageElements = 32;
 constexpr size_t kStaticStringStride = 24;
 
@@ -387,12 +357,12 @@ SWIFTCC int64_t find_string_switch_case(const char* cases, SwiftString value) {
     return -1;
 }
 
-SWIFTCC SwiftString int_description(SWIFT_SELF const int64_t* self) { return swift_string_from_utf8(std::to_string(*self)); }
+SWIFTCC SwiftString int_description(SWIFT_CONTEXT const int64_t* self) { return swift_string_from_utf8(std::to_string(*self)); }
 
 // Live Activities have no Android equivalent: the app sees none, and that they are switched off.
 void* activity_list(void*) { return empty_array_singleton(); }
-SWIFTCC void* activity_authorization_init(SWIFT_SELF void* self) { return self; }
-SWIFTCC bool activity_enabled(SWIFT_SELF void*) { return false; }
+SWIFTCC void* activity_authorization_init(SWIFT_CONTEXT void* self) { return self; }
+SWIFTCC bool activity_enabled(SWIFT_CONTEXT void*) { return false; }
 
 // AnyHashable is frozen: a three-word inline buffer, then the value's type and Hashable witness table.
 struct AnyHashableValue {
@@ -400,8 +370,6 @@ struct AnyHashableValue {
     void* type;
     void* witnesses;
 };
-
-constexpr uint32_t kFlagNonInline = 0x20000;
 constexpr size_t kBoxHeaderBytes = 16;
 
 struct BoxMetadataWords {
@@ -440,7 +408,7 @@ const SwiftString& any_hashable_string(const AnyHashableValue* value) {
     return *reinterpret_cast<const SwiftString*>(value);
 }
 
-SWIFTCC int64_t any_hashable_raw_hash(int64_t seed, SWIFT_SELF const AnyHashableValue* self) {
+SWIFTCC int64_t any_hashable_raw_hash(int64_t seed, SWIFT_CONTEXT const AnyHashableValue* self) {
     HasherState hasher;
     hasher_seed(&hasher, seed);
     string_hash_into(&hasher, any_hashable_string(self));
@@ -500,7 +468,7 @@ SWIFTCC OptionalIndex string_index_offset_limited(uint64_t index, int64_t distan
     return {make_index(offset), 0};
 }
 
-SWIFTCC SwiftString string_remove_at(uint64_t index, SWIFT_SELF SwiftString* self) {
+SWIFTCC SwiftString string_remove_at(uint64_t index, SWIFT_CONTEXT SwiftString* self) {
     std::string text = swift_string_to_utf8(*self);
     const size_t start = index_offset(index);
     const size_t end = next_scalar(text, start);
@@ -510,7 +478,7 @@ SWIFTCC SwiftString string_remove_at(uint64_t index, SWIFT_SELF SwiftString* sel
     return swift_string_from_utf8(removed);
 }
 
-SWIFTCC void string_remove_subrange(uint64_t start, uint64_t end, SWIFT_SELF SwiftString* self) {
+SWIFTCC void string_remove_subrange(uint64_t start, uint64_t end, SWIFT_CONTEXT SwiftString* self) {
     std::string text = swift_string_to_utf8(*self);
     text.erase(index_offset(start), index_offset(end) - index_offset(start));
     *self = swift_string_from_utf8(text);
@@ -571,7 +539,6 @@ void* array_init_with_copy(char* destination, char* source, size_t count, void* 
 constexpr size_t kEnumPayloadInfoOffset = 20;
 constexpr uint32_t kEnumPayloadCaseMask = 0x00ffffff;
 constexpr uint32_t kEnumPayloadOffsetShift = 24;
-constexpr size_t kMetadataDescriptorWord = 1;
 constexpr size_t kSmallPayloadLimit = 4;
 
 struct EnumShape {
@@ -688,10 +655,8 @@ void swift_will_throw(void*) {}
 std::string enum_case_name(const void* value, const void* type) {
     constexpr uint64_t kKindEnum = 0x201;
     constexpr size_t kGetEnumTagOffset = 0x58;
-    constexpr size_t kDescriptorFieldsOffset = 16;
     constexpr size_t kFieldHeaderBytes = 16;
     constexpr size_t kFieldCountOffset = 12;
-    constexpr size_t kFieldRecordBytes = 12;
     constexpr size_t kRecordNameOffset = 8;
     const auto* words = static_cast<void* const*>(type);
     if (reinterpret_cast<uint64_t>(words[0]) != kKindEnum) return {};
@@ -715,7 +680,6 @@ std::string enum_case_name(const void* value, const void* type) {
 }
 
 constexpr size_t kValueWitnessStrideOffset = 72;
-constexpr uint64_t kCollectionAddressMask = 0x00fffffffffffff8ULL;
 
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
@@ -748,8 +712,6 @@ SWIFTCC SwiftString array_description(void* storage, void* element_type) {
 }
 
 // Array<AnyObject> entry points the compiler specialized: elements are single retained references.
-extern "C" void* rt_swift_retain(void*);
-extern "C" void rt_swift_release(void*);
 
 void object_array_grow(void** self, int64_t minimum_capacity) {
     auto* old = static_cast<HashedHeader*>(*self);
@@ -773,23 +735,21 @@ void object_array_grow(void** self, int64_t minimum_capacity) {
     *self = raw;
 }
 
-SWIFTCC void object_array_make_unique(SWIFT_SELF void** self) {
+SWIFTCC void object_array_make_unique(SWIFT_CONTEXT void** self) {
     auto* header = static_cast<HashedHeader*>(*self);
     const int64_t capacity = header->capacity >> 1;
     if (header->references.load(std::memory_order_relaxed) != 1 || header->count >= capacity) object_array_grow(self, header->count + 1);
 }
 
-SWIFTCC void object_array_create_new_buffer(bool, int64_t minimum_capacity, bool, SWIFT_SELF void** self) { object_array_grow(self, minimum_capacity); }
+SWIFTCC void object_array_create_new_buffer(bool, int64_t minimum_capacity, bool, SWIFT_CONTEXT void** self) { object_array_grow(self, minimum_capacity); }
 
-SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_SELF void** self) {
+SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_CONTEXT void** self) {
     auto* header = static_cast<HashedHeader*>(*self);
     char* elements;
     array_storage_contents(header, any_object_metadata(), &elements);
     memcpy(elements + static_cast<size_t>(old_count) * sizeof element, &element, sizeof element);
     header->count = old_count + 1;
 }
-
-constexpr uint32_t kFlagNonPod = 0x10000;
 
 // Equatable's dispatch thunk; framework types only reach it as String or URL.
 SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, void* table) {
@@ -799,7 +759,7 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
     }
     // Framework values with no references, such as enum tags, are equal when their bytes are.
     if (const auto* witnesses = witnesses_of(type); foreign_type_name(type) != nullptr && (witnesses->flags & kFlagNonPod) == 0) return memcmp(left, right, witnesses->size) == 0;
-    using Equal = SWIFTCC bool (*)(const void*, const void*, void*, void*, SWIFT_SELF void*);
+    using Equal = SWIFTCC bool (*)(const void*, const void*, void*, void*, SWIFT_CONTEXT void*);
     const auto equal = reinterpret_cast<Equal>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSQ2eeoiySbx_xtFZTq")));
     if (equal == nullptr) {
         engine_log("STOP: == on a type with no witness");
@@ -995,7 +955,7 @@ bool escaping_closure_check(const void*, const void*, int32_t, int32_t, int32_t)
 }
 
 // A sequence of Characters, which in this runtime means a String or an array of them.
-SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWIFT_SELF SwiftString* self) {
+SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWIFT_CONTEXT SwiftString* self) {
     std::string text = swift_string_to_utf8(*self);
     if (type == type_system_symbol("$sSSN")) {
         text += swift_string_to_utf8(*static_cast<const SwiftString*>(sequence));
@@ -1003,7 +963,7 @@ SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWI
         uint64_t word;
         memcpy(&word, sequence, sizeof word);
         char* elements;
-        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kCollectionAddressMask), element, &elements);
+        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kBridgePointerMask), element, &elements);
         for (size_t i = 0; i < count; ++i) text += swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(elements + i * sizeof(SwiftString)));
     } else {
         engine_log("STOP: append(contentsOf:) on a sequence other than String or Array");
@@ -1013,7 +973,7 @@ SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWI
 }
 
 // Hashable's dispatch thunk: framework values hash by what they hold, and the app's types by their own witness.
-SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_SELF const void* self) {
+SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_CONTEXT const void* self) {
     if (type == type_system_symbol("$sSSN")) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(swift_string_to_utf8(*static_cast<const SwiftString*>(self))));
     const char* name = foreign_type_name(type);
     if (name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(foundation_url_text(*static_cast<void* const*>(self))));
@@ -1021,7 +981,7 @@ SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_
         const std::string bytes(static_cast<const char*>(self), witnesses->size);
         return seed ^ static_cast<int64_t>(std::hash<std::string>{}(bytes));
     }
-    using RawHash = SWIFTCC int64_t (*)(int64_t, void*, void*, SWIFT_SELF const void*);
+    using RawHash = SWIFTCC int64_t (*)(int64_t, void*, void*, SWIFT_CONTEXT const void*);
     const auto raw = reinterpret_cast<RawHash>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSH13_rawHashValue4seedS2i_tFTq")));
     if (raw == nullptr) {
         engine_log("STOP: hash of a type with no witness");
@@ -1031,7 +991,7 @@ SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_
 }
 
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
-SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
+SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_CONTEXT const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
         engine_log("STOP: joined(separator:) on a collection other than Array");
         abort();

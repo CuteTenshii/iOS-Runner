@@ -21,6 +21,7 @@
 #include "macho.h"
 #include "stdlib_shim.h"
 #include "swift_runtime.h"
+#include "swift_abi.h"
 
 extern "C" void (*storage_destroyer_for(const char* symbol))(void*);
 
@@ -32,43 +33,16 @@ constexpr uint64_t kKindTuple = 0x301;
 constexpr uint64_t kKindFunction = 0x302;
 constexpr uint64_t kKindExistential = 0x303;
 constexpr uint64_t kKindMetatype = 0x304;
-
-constexpr uint32_t kFlagNonPod = 0x10000;
-constexpr uint32_t kFlagNonInline = 0x20000;
 constexpr size_t kInlineBufferSize = 24;
 constexpr size_t kPointerSize = 8;
 constexpr uint32_t kPointerExtraInhabitants = 0x1000;
-constexpr uint64_t kBridgePointerMask = 0x00fffffffffffff8ULL;
-constexpr uint64_t kBridgeImmediateBit = 1ULL << 63;
-constexpr uint64_t kImmortal = 1ULL << 63;
 constexpr uint32_t kDescriptorGeneric = 0x80;
 constexpr uint32_t kRequirementKindMask = 0xf;
 constexpr uint32_t kRequirementKindProtocol = 0;
 constexpr uint32_t kRequirementHasKeyArgument = 0x80;
-constexpr uint8_t kMarkerAccessFunction = 0xff;
-constexpr uint8_t kSymbolicAccessFunction = 0x09;
 constexpr uint32_t kDescriptorKindMask = 0x1f;
 constexpr uint32_t kDescriptorKindOpaque = 4;
 constexpr size_t kGenericHeaderSize = 8;
-constexpr size_t kGenericRequirementSize = 12;
-
-struct ValueWitnessTable {
-    void* (*initialize_buffer_with_copy)(void*, void*, void*);
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-    void* (*initialize_with_take)(void*, void*, void*);
-    void* (*assign_with_take)(void*, void*, void*);
-    uint32_t (*get_enum_tag_single_payload)(const void*, uint32_t, void*);
-    void (*store_enum_tag_single_payload)(void*, uint32_t, uint32_t, void*);
-    size_t size;
-    size_t stride;
-    uint32_t flags;
-    uint32_t extra_inhabitants;
-    uint32_t (*get_enum_tag)(const void*, void*);
-    void (*destructive_project_enum_data)(void*, void*);
-    void (*destructive_inject_enum_tag)(void*, uint32_t, void*);
-};
 
 enum class LayoutKind { Pod,
                         NativeReference,
@@ -113,21 +87,7 @@ struct Metadata {
 MetadataAllocation* allocation_of(const void* metadata) {
     return reinterpret_cast<MetadataAllocation*>(const_cast<char*>(static_cast<const char*>(metadata)) - 2 * sizeof(void*));
 }
-ValueWitnessTable* witnesses_of(const void* metadata) { return static_cast<void* const*>(metadata)[-1] == nullptr ? nullptr : static_cast<ValueWitnessTable*>(static_cast<void* const*>(metadata)[-1]); }
 Layout* layout_of(const void* metadata) { return allocation_of(metadata)->layout; }
-
-struct HeapObject {
-    void* metadata;
-    std::atomic<uint64_t> references;
-};
-
-extern "C" void rt_call_destroyer(void* destroyer, void* object);
-
-// Null, tagged immediates, and small words: framework enums kept in one word hold plain case numbers.
-inline bool is_not_object(const void* raw) {
-    constexpr uintptr_t kFirstValidAddress = 0x1000;
-    return reinterpret_cast<uintptr_t>(raw) < kFirstValidAddress || reinterpret_cast<intptr_t>(raw) < 0;
-}
 
 void retain(void* raw) {
     if (is_not_object(raw)) return;
@@ -1252,11 +1212,7 @@ private:
             memcpy(&protocol_offset, requirement + 8, sizeof protocol_offset);
             // The low bit of the offset marks a mangled name.
             const char* param_name = requirement + 4 + (param_offset & ~1);
-            size_t length = 0;
-            while (param_name[length] != 0) {
-                const auto byte = static_cast<uint8_t>(param_name[length]);
-                length += byte >= 1 && byte <= 0x17 ? 5 : 1;
-            }
+            const size_t length = mangled_name_length(param_name);
             MangledName parameter(param_name, length, types.data());
             parameter.use_context(context_for_requirements_);
             parameter.limit_generics(types.size());
@@ -1316,11 +1272,7 @@ private:
             int32_t offset;
             memcpy(&offset, trailing + ordinal * sizeof(int32_t), sizeof offset);
             const char* underlying = trailing + ordinal * sizeof(int32_t) + offset;
-            size_t length = 0;
-            while (underlying[length] != 0) {
-                const auto byte = static_cast<uint8_t>(underlying[length]);
-                length += byte >= 1 && byte <= 0x17 ? 5 : 1;
-            }
+            const size_t length = mangled_name_length(underlying);
             MangledName nested(underlying, length, arguments.data());
             nested.use_context(descriptor);
             node.type = nested.parse();
@@ -1649,7 +1601,6 @@ constexpr uint32_t kSingletonInitialization = 1u << 16;
 constexpr size_t kValueTypeHeaderSize = 28;
 constexpr size_t kClassHeaderSize = 44;
 constexpr uint32_t kClassHasResilientSuperclass = 1u << 29;
-constexpr size_t kValueWitnessSizeOffset = offsetof(ValueWitnessTable, size);
 
 struct MetadataResponse {
     void* metadata;
@@ -1883,11 +1834,7 @@ extern "C" MetadataResponse rt_getOpaqueTypeMetadata(size_t, void* const* argume
         trailing += kGenericHeaderSize + ((params + 3u) & ~3u) + requirements * kGenericRequirementSize;
     }
     const char* underlying = relative_address(trailing + ordinal * sizeof(int32_t));
-    size_t length = 0;
-    while (underlying[length] != 0) {
-        const auto byte = static_cast<uint8_t>(underlying[length]);
-        length += byte >= 1 && byte <= 0x17 ? 5 : 1;
-    }
+    const size_t length = mangled_name_length(underlying);
     return {static_cast<Metadata*>(rt_getTypeByMangledNameInContext2(underlying, length, descriptor, arguments)), 0};
 }
 
@@ -2053,12 +2000,8 @@ extern "C" void rt_initEnumMetadataMultiPayload(void** metadata, size_t, size_t 
     if (const uint32_t offset = cases_and_offset >> kEnumPayloadSizeOffsetShift) metadata[offset] = reinterpret_cast<void*>(largest);
     install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), largest + tag, alignment_mask, flags, 0);
 }
-
-constexpr size_t kClassSuperclassOffset = 8;
 constexpr size_t kClassInstanceSizeOffset = 48;
 constexpr size_t kClassInstanceAlignOffset = 52;
-constexpr size_t kClassDataOffset = 32;
-constexpr size_t kRoInstanceSizeOffset = 8;
 constexpr size_t kRoIvarsOffset = 48;
 constexpr uint32_t kRootInstanceSize = sizeof(HeapObject);
 
@@ -2268,11 +2211,7 @@ extern "C" void* rt_initClassMetadata2(char* metadata, size_t flags, size_t fiel
     const uint32_t immediate = read_u32_at(descriptor + kClassImmediateMembersOffset);
     void* const* arguments = words + positive - immediate;
     if (const char* name = relative_address(descriptor + kClassSuperclassTypeOffset)) {
-        size_t length = 0;
-        while (name[length] != 0) {
-            const auto byte = static_cast<uint8_t>(name[length]);
-            length += byte >= 1 && byte <= 0x17 ? 5 : 1;
-        }
+        const size_t length = mangled_name_length(name);
         auto** super = static_cast<void**>(rt_getTypeByMangledNameInContext2(name, length, descriptor, arguments));
         words[1] = super;
         if (super != nullptr && unresolved_symbol_at(reinterpret_cast<uintptr_t>(super)) == nullptr && super[kClassDescriptionWord] != nullptr) {
@@ -2421,11 +2360,7 @@ const char* foreign_type_name(const void* metadata) {
 }
 
 void* resolve_mangled_type(const char* name, void* const* generics) {
-    size_t length = 0;
-    while (name[length] != 0) {
-        const auto byte = static_cast<uint8_t>(name[length]);
-        length += byte >= 1 && byte <= 0x17 ? 5 : 1;
-    }
+    const size_t length = mangled_name_length(name);
     return rt_getTypeByMangledNameInContext2(name, length, nullptr, generics);
 }
 
@@ -2516,14 +2451,13 @@ constexpr size_t kAnyTypeWord = 3;
 
 // `as? [T]` and `as? [String: T]` convert element by element, failing as a whole if one element does not fit.
 bool cast_collection(void* destination, void* value, void* contained, void* target_type) {
-    constexpr uint64_t kCollectionAddressMask = 0x00FFFFFFFFFFFFF8ULL;
     uint64_t word;
     void* target_element = array_element_type(target_type);
     void* source_element = array_element_type(contained);
     if (target_element != nullptr && source_element != nullptr) {
         memcpy(&word, value, sizeof word);
         char* from;
-        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kCollectionAddressMask), source_element, &from);
+        const size_t count = array_storage_contents(reinterpret_cast<void*>(word & kBridgePointerMask), source_element, &from);
         char* to;
         void* storage = make_array_storage(target_element, count, &to);
         const size_t from_stride = witnesses_of(source_element)->stride;
@@ -2546,7 +2480,7 @@ bool cast_collection(void* destination, void* value, void* contained, void* targ
     std::vector<std::pair<std::string, size_t>> converted;
     std::vector<char> bytes;
     bool failed = false;
-    visit_string_dictionary(reinterpret_cast<void*>(word & kCollectionAddressMask), [&](const std::string& key, void* member) {
+    visit_string_dictionary(reinterpret_cast<void*>(word & kBridgePointerMask), [&](const std::string& key, void* member) {
         if (failed) return;
         const size_t at = bytes.size();
         bytes.resize(at + stride);

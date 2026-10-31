@@ -32,12 +32,9 @@
 #include "localization.h"
 #include "objc_runtime.h"
 #include "stdlib_shim.h"
+#include "swift_abi.h"
 #include "type_system.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_SELF __attribute__((swift_context))
-#define SWIFT_CTX __attribute__((swift_context))
 
 uint64_t* empty_array_singleton();
 
@@ -47,7 +44,6 @@ bool strings_json_from_object(void* object, std::string& json);
 bool date_from_object(void* object, double& seconds);
 void* new_date_object(double seconds);
 
-extern "C" void* rt_swift_retain(void*);
 extern "C" void* darwin_block_copy(const void*);
 
 namespace {
@@ -56,7 +52,6 @@ constexpr uint64_t kSmallStringBit = 1ULL << 61;
 constexpr uint64_t kSmallAsciiBit = 1ULL << 62;
 constexpr uint64_t kImmortalBit = 1ULL << 63;
 constexpr uint64_t kObjectPointerMask = 0x0fffffffffffffffULL;
-constexpr uint64_t kCountMask = 0x0000ffffffffffffULL;
 constexpr uint64_t kAsciiFlag = 1ULL << 63;
 constexpr uint64_t kNfcFlag = 1ULL << 62;
 constexpr size_t kSmallStringCapacity = 15;
@@ -65,31 +60,19 @@ constexpr uint64_t kSmallCountMask = 0x0f;
 constexpr size_t kNativeBias = 32;
 constexpr const char* kDefaultsFileName = ".defaults";
 
-struct NativeObject {
-    void* isa;
-    uint64_t references;
-};
-
 struct AnyValue {
     uint64_t buffer[3];
     void* type;
 };
 
 struct NSStringObject {
-    NativeObject header;
+    HeapObject header;
     std::string* text;
 };
 
 constexpr size_t kStorageCapacityOffset = 16;
-constexpr size_t kStorageCountOffset = 24;
 
-struct StorageMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-const StorageMetadata kStringStorageMetadata = {free, nullptr, 0};
+const HeapMetadata kStringHeapMetadata = {free, nullptr, 0};
 
 void* g_nsstring_class = nullptr;
 void* g_defaults_class = nullptr;
@@ -102,7 +85,7 @@ void destroy_nsstring(void* raw) {
 
 void* new_nsstring(const std::string& text) {
     auto* object = static_cast<NSStringObject*>(calloc(1, sizeof(NSStringObject)));
-    object->header.isa = g_nsstring_class;
+    object->header.metadata = g_nsstring_class;
     object->header.references = 1;
     object->text = new std::string(text);
     return object;
@@ -168,9 +151,9 @@ UserDefaults& defaults() {
 }
 
 void* defaults_standard(void*, const char*) {
-    static NativeObject* singleton = [] {
-        auto* object = static_cast<NativeObject*>(calloc(1, sizeof(NativeObject)));
-        object->isa = g_defaults_class;
+    static HeapObject* singleton = [] {
+        auto* object = static_cast<HeapObject*>(calloc(1, sizeof(HeapObject)));
+        object->metadata = g_defaults_class;
         object->references = 1ULL << 63;
         return object;
     }();
@@ -190,7 +173,7 @@ bool bridged_collection_value(void* object, void*& value);
 extern "C" void* rt_swift_bridgeObjectRetain(void*);
 
 struct NSNumberObject {
-    NativeObject header;
+    HeapObject header;
     int64_t value;
     bool is_bool;
 };
@@ -199,7 +182,7 @@ void* g_nsnumber_class = nullptr;
 
 void* new_nsnumber(int64_t value, bool is_bool) {
     auto* number = static_cast<NSNumberObject*>(calloc(1, sizeof(NSNumberObject)));
-    number->header.isa = g_nsnumber_class;
+    number->header.metadata = g_nsnumber_class;
     number->header.references = 1;
     number->value = value;
     number->is_bool = is_bool;
@@ -260,7 +243,7 @@ void defaults_set_integer(void*, const char*, int64_t value, void* key) {
 }
 
 void defaults_set_object(void*, const char*, void* value, void* key) {
-    const void* isa = value != nullptr ? static_cast<NativeObject*>(value)->isa : nullptr;
+    const void* isa = value != nullptr ? static_cast<HeapObject*>(value)->metadata : nullptr;
     if (value == nullptr) {
         defaults().values.erase(nsstring_text(key));
     } else if (isa == g_nsstring_class) {
@@ -306,11 +289,11 @@ struct OperatingSystemVersion {
 OperatingSystemVersion process_info_version(void*, const char*) { return {kReportedOsMajorVersion, 0, 0}; }
 
 void* framework_singleton(const char* class_name) {
-    static std::map<std::string, NativeObject*> singletons;
+    static std::map<std::string, HeapObject*> singletons;
     auto*& instance = singletons[class_name];
     if (instance == nullptr) {
-        instance = static_cast<NativeObject*>(calloc(1, sizeof(NativeObject)));
-        instance->isa = objc_native_class(class_name, free);
+        instance = static_cast<HeapObject*>(calloc(1, sizeof(HeapObject)));
+        instance->metadata = objc_native_class(class_name, free);
         instance->references = 1ULL << 63;
     }
     return instance;
@@ -329,7 +312,7 @@ const double kLocationAccuracyKilometer = 1000.0;
 
 // NSArray keeps retained references; the app only receives arrays from this runtime.
 struct NSArrayObject {
-    NativeObject header;
+    HeapObject header;
     std::vector<void*>* items;
 };
 
@@ -343,7 +326,7 @@ void destroy_nsarray(void* raw) {
 
 void* new_nsarray() {
     auto* array = static_cast<NSArrayObject*>(calloc(1, sizeof(NSArrayObject)));
-    array->header.isa = g_nsarray_class;
+    array->header.metadata = g_nsarray_class;
     array->header.references = 1;
     array->items = new std::vector<void*>();
     return array;
@@ -365,7 +348,6 @@ bool is_url_type(void* type) {
 }
 
 constexpr size_t kArrayHeaderBytes = 32;
-constexpr size_t kArrayCountOffset = 16;
 constexpr size_t kArrayCapacityOffset = 24;
 
 SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
@@ -390,8 +372,8 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
         return converted;
     }
     auto* storage = static_cast<char*>(calloc(1, kArrayHeaderBytes + count * sizeof(void*)));
-    auto* header = reinterpret_cast<NativeObject*>(storage);
-    header->isa = storage_class_metadata("_$ss23_ContiguousArrayStorageCMn", &element_type, 1);
+    auto* header = reinterpret_cast<HeapObject*>(storage);
+    header->metadata = storage_class_metadata("_$ss23_ContiguousArrayStorageCMn", &element_type, 1);
     header->references = 1;
     const uint64_t words[] = {count, count * 2};
     memcpy(storage + kArrayCountOffset, words, sizeof words);
@@ -475,7 +457,7 @@ void destroy_url(void* raw) {
     free(box);
 }
 
-const StorageMetadata kUrlMetadata = {destroy_url, nullptr, 0};
+const HeapMetadata kUrlMetadata = {destroy_url, nullptr, 0};
 
 URLBox* new_url(const std::string& text) {
     auto* box = static_cast<URLBox*>(calloc(1, sizeof(URLBox)));
@@ -516,9 +498,9 @@ std::string path_last_component(std::string path) {
 
 std::string text_without_query(const std::string& text) { return text.substr(0, text.find_first_of("?#")); }
 
-SWIFTCC void url_file_with_path(__attribute__((swift_indirect_result)) URLBox** out, SwiftString path) { *out = new_url("file://" + swift_string_to_utf8(path)); }
+SWIFTCC void url_file_with_path(SWIFT_OUT URLBox** out, SwiftString path) { *out = new_url("file://" + swift_string_to_utf8(path)); }
 
-SWIFTCC void url_documents(__attribute__((swift_indirect_result)) URLBox** out) { *out = new_url("file://" + engine_bundle_dir() + "/.Documents/"); }
+SWIFTCC void url_documents(SWIFT_OUT URLBox** out) { *out = new_url("file://" + engine_bundle_dir() + "/.Documents/"); }
 
 std::string appended_component(const std::string& text, const std::string& component, bool directory) {
     const std::string base = text_without_query(text);
@@ -529,21 +511,21 @@ std::string appended_component(const std::string& text, const std::string& compo
     return joined;
 }
 
-SWIFTCC void url_appending_component(__attribute__((swift_indirect_result)) URLBox** out, SwiftString component, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_appending_component(SWIFT_OUT URLBox** out, SwiftString component, SWIFT_CONTEXT URLBox** self) {
     *out = new_url(appended_component(*(*self)->text, swift_string_to_utf8(component), false));
 }
 
-SWIFTCC void url_appending_directory(__attribute__((swift_indirect_result)) URLBox** out, SwiftString component, bool directory, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_appending_directory(SWIFT_OUT URLBox** out, SwiftString component, bool directory, SWIFT_CONTEXT URLBox** self) {
     *out = new_url(appended_component(*(*self)->text, swift_string_to_utf8(component), directory));
 }
 
-SWIFTCC void url_appending_extension(__attribute__((swift_indirect_result)) URLBox** out, SwiftString extension, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_appending_extension(SWIFT_OUT URLBox** out, SwiftString extension, SWIFT_CONTEXT URLBox** self) {
     std::string base = text_without_query(*(*self)->text);
     while (base.size() > 1 && base.back() == '/') base.pop_back();
     *out = new_url(base + "." + swift_string_to_utf8(extension));
 }
 
-SWIFTCC void url_deleting_extension(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_deleting_extension(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox** self) {
     std::string base = text_without_query(*(*self)->text);
     while (base.size() > 1 && base.back() == '/') base.pop_back();
     const size_t dot = base.rfind('.');
@@ -552,24 +534,24 @@ SWIFTCC void url_deleting_extension(__attribute__((swift_indirect_result)) URLBo
     *out = new_url(base);
 }
 
-SWIFTCC SwiftString url_last_component(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(path_last_component(url_path(*(*self)->text))); }
+SWIFTCC SwiftString url_last_component(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(path_last_component(url_path(*(*self)->text))); }
 
-SWIFTCC SwiftString url_path_extension(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC SwiftString url_path_extension(SWIFT_CONTEXT URLBox** self) {
     const std::string name = path_last_component(url_path(*(*self)->text));
     const size_t dot = name.rfind('.');
     return swift_string_from_utf8(dot == std::string::npos || dot == 0 ? std::string() : name.substr(dot + 1));
 }
 
-SWIFTCC SwiftString url_path_percent(bool, __attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
-SWIFTCC bool url_is_file(__attribute__((swift_context)) URLBox** self) { return (*self)->text->rfind("file:", 0) == 0; }
-SWIFTCC bool url_has_directory_path(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC SwiftString url_path_percent(bool, SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
+SWIFTCC bool url_is_file(SWIFT_CONTEXT URLBox** self) { return (*self)->text->rfind("file:", 0) == 0; }
+SWIFTCC bool url_has_directory_path(SWIFT_CONTEXT URLBox** self) {
     const std::string base = text_without_query(*(*self)->text);
     return !base.empty() && base.back() == '/';
 }
 SWIFTCC bool url_equal(URLBox** left, URLBox** right) { return *(*left)->text == *(*right)->text; }
-SWIFTCC bool url_start_security_scope(__attribute__((swift_context)) void*) { return true; }
-SWIFTCC void url_absolute(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) { *out = new_url(*(*self)->text); }
-SWIFTCC void url_no_base(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) void*) { *out = nullptr; }
+SWIFTCC bool url_start_security_scope(SWIFT_CONTEXT void*) { return true; }
+SWIFTCC void url_absolute(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox** self) { *out = new_url(*(*self)->text); }
+SWIFTCC void url_no_base(SWIFT_OUT URLBox** out, SWIFT_CONTEXT void*) { *out = nullptr; }
 
 struct UrlAuthority {
     std::string host;
@@ -592,7 +574,7 @@ UrlAuthority url_authority(const std::string& text) {
     return result;
 }
 
-SWIFTCC void url_string_relative(__attribute__((swift_indirect_result)) URLBox** out, SwiftString value, URLBox** base) {
+SWIFTCC void url_string_relative(SWIFT_OUT URLBox** out, SwiftString value, URLBox** base) {
     const std::string relative = swift_string_to_utf8(value);
     if (base == nullptr || *base == nullptr || relative.find("://") != std::string::npos) {
         *out = new_url(relative);
@@ -606,38 +588,38 @@ struct OptionalIntResult {
     bool is_none;
 };
 
-SWIFTCC OptionalIntResult url_port(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC OptionalIntResult url_port(SWIFT_CONTEXT URLBox** self) {
     const int64_t port = url_authority(*(*self)->text).port;
     return {port < 0 ? 0 : port, port < 0};
 }
 
-SWIFTCC void url_application_support(__attribute__((swift_indirect_result)) URLBox** out) {
+SWIFTCC void url_application_support(SWIFT_OUT URLBox** out) {
     const std::string directory = engine_bundle_dir() + "/.Library/Application Support";
     make_directories(directory);
     *out = new_url(kFileScheme + directory + "/");
 }
 
-SWIFTCC void url_from_string(__attribute__((swift_indirect_result)) URLBox** out, SwiftString value) {
+SWIFTCC void url_from_string(SWIFT_OUT URLBox** out, SwiftString value) {
     const std::string text = swift_string_to_utf8(value);
     *out = text.empty() ? nullptr : new_url(text);
 }
 
-SWIFTCC SwiftString url_absolute_string(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
-SWIFTCC SwiftString url_path_getter(__attribute__((swift_context)) URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
+SWIFTCC SwiftString url_absolute_string(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
+SWIFTCC SwiftString url_path_getter(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(url_path(*(*self)->text)); }
 
 struct OptionalSwiftString {
     uint64_t count_and_flags;
     uint64_t object;
 };
 
-SWIFTCC OptionalSwiftString url_host(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC OptionalSwiftString url_host(SWIFT_CONTEXT URLBox** self) {
     const std::string host = url_authority(*(*self)->text).host;
     if (host.empty()) return {0, 0};
     const SwiftString value = swift_string_from_utf8(host);
     return {value.count_and_flags, value.object};
 }
 
-SWIFTCC OptionalSwiftString url_query(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC OptionalSwiftString url_query(SWIFT_CONTEXT URLBox** self) {
     const std::string& text = *(*self)->text;
     const size_t question = text.find('?');
     if (question == std::string::npos) return {0, 0};
@@ -645,20 +627,20 @@ SWIFTCC OptionalSwiftString url_query(__attribute__((swift_context)) URLBox** se
     return {value.count_and_flags, value.object};
 }
 
-SWIFTCC OptionalSwiftString url_scheme(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC OptionalSwiftString url_scheme(SWIFT_CONTEXT URLBox** self) {
     const size_t end = (*self)->text->find(':');
     if (end == std::string::npos) return {0, 0};
     const SwiftString scheme = swift_string_from_utf8((*self)->text->substr(0, end));
     return {scheme.count_and_flags, scheme.object};
 }
 
-SWIFTCC void url_appending_path(__attribute__((swift_indirect_result)) URLBox** out, const SwiftString* component, const void*, void*, void*, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_appending_path(SWIFT_OUT URLBox** out, const SwiftString* component, const void*, void*, void*, SWIFT_CONTEXT URLBox** self) {
     std::string base = *(*self)->text;
     if (!base.empty() && base.back() != '/') base += '/';
     *out = new_url(base + swift_string_to_utf8(*component));
 }
 
-SWIFTCC void url_deleting_last_component(__attribute__((swift_indirect_result)) URLBox** out, __attribute__((swift_context)) URLBox** self) {
+SWIFTCC void url_deleting_last_component(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox** self) {
     std::string text = *(*self)->text;
     if (!text.empty() && text.back() == '/') text.pop_back();
     const size_t slash = text.rfind('/');
@@ -671,7 +653,7 @@ URLBox* make_url_box(const std::string& text) { return new_url(text); }
 
 void* new_nsurl(const std::string& text) {
     auto* object = static_cast<NSStringObject*>(new_nsstring(text));
-    object->header.isa = g_nsurl_class;
+    object->header.metadata = g_nsurl_class;
     return object;
 }
 
@@ -679,7 +661,7 @@ std::string file_url_text(const std::string& path) { return "file://" + path; }
 
 std::string nsobject_path(void* object) {
     const std::string& text = nsstring_text(object);
-    return static_cast<NativeObject*>(object)->isa == g_nsurl_class ? url_path(text) : text;
+    return static_cast<HeapObject*>(object)->metadata == g_nsurl_class ? url_path(text) : text;
 }
 
 void set_cocoa_error(void** error, const std::string& message) {
@@ -822,13 +804,13 @@ void* file_manager_contents_url(void*, const char*, void* url, void*, uint64_t, 
     return directory_listing(path, true);
 }
 
-SWIFTCC void* url_bridge_to_objc(__attribute__((swift_context)) URLBox** self) {
+SWIFTCC void* url_bridge_to_objc(SWIFT_CONTEXT URLBox** self) {
     auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->text));
-    object->header.isa = g_nsurl_class;
+    object->header.metadata = g_nsurl_class;
     return object;
 }
 
-SWIFTCC void url_bridge_from_objc(__attribute__((swift_indirect_result)) URLBox** out, void* object) { *out = new_url(nsstring_text(object)); }
+SWIFTCC void url_bridge_from_objc(SWIFT_OUT URLBox** out, void* object) { *out = new_url(nsstring_text(object)); }
 
 const int32_t kDirectoryHintInferFromPath = 2;
 
@@ -839,14 +821,14 @@ bool file_manager_create_directory(void*, const char*, void* url, bool, void*, v
 
 SWIFTCC void localization_value_literal(SWIFT_OUT LocalizedBox** out, SwiftString literal) { *out = new_localized_box(swift_string_to_utf8(literal)); }
 SWIFTCC void localization_interpolation_init(SWIFT_OUT LocalizedBox** out, int64_t, int64_t) { *out = new_localized_box(""); }
-SWIFTCC void localization_append_literal(SwiftString literal, SWIFT_SELF LocalizedBox** self) { *(*self)->key += swift_string_to_utf8(literal); }
+SWIFTCC void localization_append_literal(SwiftString literal, SWIFT_CONTEXT LocalizedBox** self) { *(*self)->key += swift_string_to_utf8(literal); }
 
-SWIFTCC void localization_append_string(SwiftString value, SWIFT_SELF LocalizedBox** self) {
+SWIFTCC void localization_append_string(SwiftString value, SWIFT_CONTEXT LocalizedBox** self) {
     *(*self)->key += "%@";
     (*self)->arguments->push_back(swift_string_to_utf8(value));
 }
 
-SWIFTCC void localization_append_integer(const int64_t* value, SwiftString specifier, void*, void*, SWIFT_SELF LocalizedBox** self) {
+SWIFTCC void localization_append_integer(const int64_t* value, SwiftString specifier, void*, void*, SWIFT_CONTEXT LocalizedBox** self) {
     *(*self)->key += swift_string_to_utf8(specifier);
     (*self)->arguments->push_back(std::to_string(*value));
 }
@@ -894,7 +876,7 @@ void destroy_data_storage(void* raw) {
     free(storage);
 }
 
-const StorageMetadata kDataStorageMetadata = {destroy_data_storage, nullptr, 0};
+const HeapMetadata kDataHeapMetadata = {destroy_data_storage, nullptr, 0};
 
 struct DataValue {
     uint64_t range;
@@ -904,7 +886,7 @@ struct DataValue {
 DataValue make_data(const std::string& bytes) {
     if (bytes.empty()) return {0, kDataEmptyTag};
     auto* storage = static_cast<DataStorage*>(calloc(1, sizeof(DataStorage)));
-    storage->metadata = const_cast<uint64_t*>(&kDataStorageMetadata.kind);
+    storage->metadata = const_cast<uint64_t*>(&kDataHeapMetadata.kind);
     new (&storage->references) std::atomic<uint64_t>(1);
     storage->bytes = static_cast<uint8_t*>(malloc(bytes.size()));
     memcpy(storage->bytes, bytes.data(), bytes.size());
@@ -943,27 +925,27 @@ void data_storage_fill(DataStorage* self, const void* bytes, int64_t length, int
     self->offset = offset;
 }
 
-SWIFTCC DataStorage* data_storage_init_bytes(const void* bytes, int64_t length, __attribute__((swift_context)) DataStorage* self) {
+SWIFTCC DataStorage* data_storage_init_bytes(const void* bytes, int64_t length, SWIFT_CONTEXT DataStorage* self) {
     data_storage_fill(self, bytes, length, 0);
     return self;
 }
 
-SWIFTCC DataStorage* data_storage_init_length(int64_t length, __attribute__((swift_context)) DataStorage* self) {
+SWIFTCC DataStorage* data_storage_init_length(int64_t length, SWIFT_CONTEXT DataStorage* self) {
     data_storage_fill(self, nullptr, length, 0);
     return self;
 }
 
-using DataDeallocator = SWIFTCC void (*)(void*, int64_t, __attribute__((swift_context)) void*);
+using DataDeallocator = SWIFTCC void (*)(void*, int64_t, SWIFT_CONTEXT void*);
 
-SWIFTCC DataStorage* data_storage_init_full(void* bytes, int64_t length, bool, DataDeallocator deallocator, void* deallocator_context, int64_t offset, __attribute__((swift_context)) DataStorage* self) {
+SWIFTCC DataStorage* data_storage_init_full(void* bytes, int64_t length, bool, DataDeallocator deallocator, void* deallocator_context, int64_t offset, SWIFT_CONTEXT DataStorage* self) {
     data_storage_fill(self, bytes, length, offset);
     if (deallocator != nullptr) deallocator(bytes, length, deallocator_context);
     return self;
 }
 
-SWIFTCC uint8_t* data_storage_bytes(__attribute__((swift_context)) DataStorage* self) { return self->bytes; }
-SWIFTCC int64_t data_storage_length(__attribute__((swift_context)) DataStorage* self) { return self->length; }
-SWIFTCC int64_t data_storage_offset(__attribute__((swift_context)) DataStorage* self) { return self->offset; }
+SWIFTCC uint8_t* data_storage_bytes(SWIFT_CONTEXT DataStorage* self) { return self->bytes; }
+SWIFTCC int64_t data_storage_length(SWIFT_CONTEXT DataStorage* self) { return self->length; }
+SWIFTCC int64_t data_storage_offset(SWIFT_CONTEXT DataStorage* self) { return self->offset; }
 
 // An Error existential is one reference to a box; this box carries a domain, a code and a message.
 struct ErrorBox {
@@ -979,7 +961,7 @@ void destroy_error_box(void* raw) {
     free(box);
 }
 
-const StorageMetadata kErrorBoxMetadata = {destroy_error_box, nullptr, 0};
+const HeapMetadata kErrorBoxMetadata = {destroy_error_box, nullptr, 0};
 
 void* make_error(const std::string& message, int64_t code) {
     auto* box = static_cast<ErrorBox*>(calloc(1, sizeof(ErrorBox)));
@@ -1000,7 +982,6 @@ struct GuestErrorBox {
 
 constexpr size_t kGuestErrorValueOffset = sizeof(GuestErrorBox);
 constexpr size_t kWitnessDestroyOffset = sizeof(void*);
-constexpr size_t kWitnessSizeOffset = 0x40;
 constexpr size_t kWitnessFlagsOffset = 0x50;
 constexpr size_t kWitnessInitTakeOffset = 4 * sizeof(void*);
 constexpr size_t kWitnessInitCopyOffset = 2 * sizeof(void*);
@@ -1022,7 +1003,7 @@ void destroy_guest_error(void* raw) {
     free(raw);
 }
 
-const StorageMetadata kGuestErrorMetadata = {destroy_guest_error, nullptr, 0};
+const HeapMetadata kGuestErrorMetadata = {destroy_guest_error, nullptr, 0};
 
 struct AllocatedError {
     void* box;
@@ -1031,7 +1012,7 @@ struct AllocatedError {
 
 SWIFTCC AllocatedError swift_alloc_error(void* type, void* witnesses, void* initial, bool is_take) {
     size_t size;
-    memcpy(&size, value_witnesses(type) + kWitnessSizeOffset, sizeof size);
+    memcpy(&size, value_witnesses(type) + kValueWitnessSizeOffset, sizeof size);
     const size_t offset = guest_error_value_offset(type);
     auto* box = static_cast<GuestErrorBox*>(calloc(1, offset + size + 1));
     box->metadata = const_cast<uint64_t*>(&kGuestErrorMetadata.kind);
@@ -1063,12 +1044,12 @@ void swift_get_error_value(void* error, void**, ErrorValue* out) {
     }
 }
 
-SWIFTCC SwiftString error_localized_description(void* type, void*, __attribute__((swift_context)) void* value) {
+SWIFTCC SwiftString error_localized_description(void* type, void*, SWIFT_CONTEXT void* value) {
     if (type == nullptr) return swift_string_from_utf8(*static_cast<ErrorBox*>(value)->message);
     return swift_string_from_utf8("The operation could not be completed.");
 }
 
-SWIFTCC DataValue data_contents_of(URLBox** url, uint64_t, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+SWIFTCC DataValue data_contents_of(URLBox** url, uint64_t, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     const std::string path = url_path(*(*url)->text);
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -1079,7 +1060,7 @@ SWIFTCC DataValue data_contents_of(URLBox** url, uint64_t, __attribute__((swift_
     return make_data(bytes);
 }
 
-SWIFTCC void data_write(URLBox** url, uint64_t, uint64_t range, uint64_t storage, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+SWIFTCC void data_write(URLBox** url, uint64_t, uint64_t range, uint64_t storage, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     const std::string path = url_path(*(*url)->text);
     const size_t slash = path.rfind('/');
     if (slash != std::string::npos) make_directories(path.substr(0, slash));
@@ -1115,7 +1096,7 @@ void destroy_url_request(void* raw) {
     free(box);
 }
 
-const StorageMetadata kUrlRequestMetadata = {destroy_url_request, nullptr, 0};
+const HeapMetadata kUrlRequestMetadata = {destroy_url_request, nullptr, 0};
 
 SWIFTCC void url_request_init(SWIFT_OUT URLRequestBox** out, URLBox** url, uint64_t, double) {
     auto* box = static_cast<URLRequestBox*>(calloc(1, sizeof(URLRequestBox)));
@@ -1128,11 +1109,11 @@ SWIFTCC void url_request_init(SWIFT_OUT URLRequestBox** out, URLBox** url, uint6
     *out = box;
 }
 
-SWIFTCC void url_request_set_method(SwiftString method, SWIFT_CTX URLRequestBox** self) {
+SWIFTCC void url_request_set_method(SwiftString method, SWIFT_CONTEXT URLRequestBox** self) {
     if (method.object != 0) *(*self)->method = swift_string_to_utf8(method);
 }
 
-SWIFTCC void url_request_set_header(SwiftString value, SwiftString field, SWIFT_CTX URLRequestBox** self) {
+SWIFTCC void url_request_set_header(SwiftString value, SwiftString field, SWIFT_CONTEXT URLRequestBox** self) {
     if (value.object != 0) *(*self)->headers += swift_string_to_utf8(field) + ": " + swift_string_to_utf8(value) + "\n";
 }
 
@@ -1160,24 +1141,24 @@ std::string data_bytes(uint64_t range, uint64_t storage) {
 
 void store_data(DataValue* self, const std::string& bytes) { *self = make_data(bytes); }
 
-SWIFTCC void data_append(const char* start, const char* end, __attribute__((swift_context)) DataValue* self) {
+SWIFTCC void data_append(const char* start, const char* end, SWIFT_CONTEXT DataValue* self) {
     std::string bytes = data_bytes(self->range, self->storage);
     if (start != nullptr) bytes.append(start, static_cast<size_t>(end - start));
     store_data(self, bytes);
 }
 
-SWIFTCC void data_replace_subrange(int64_t lower, int64_t upper, const char* replacement, int64_t count, __attribute__((swift_context)) DataValue* self) {
+SWIFTCC void data_replace_subrange(int64_t lower, int64_t upper, const char* replacement, int64_t count, SWIFT_CONTEXT DataValue* self) {
     std::string bytes = data_bytes(self->range, self->storage);
     bytes.replace(static_cast<size_t>(lower), static_cast<size_t>(upper - lower), replacement != nullptr ? std::string(replacement, static_cast<size_t>(count)) : std::string());
     store_data(self, bytes);
 }
 
-SWIFTCC void url_request_set_body(uint64_t range, uint64_t storage, SWIFT_CTX URLRequestBox** self) { *(*self)->body = data_bytes(range, storage); }
-SWIFTCC void url_request_get_url(SWIFT_OUT URLBox** out, SWIFT_CTX URLRequestBox** self) { *out = new_url(*(*self)->url); }
+SWIFTCC void url_request_set_body(uint64_t range, uint64_t storage, SWIFT_CONTEXT URLRequestBox** self) { *(*self)->body = data_bytes(range, storage); }
+SWIFTCC void url_request_get_url(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLRequestBox** self) { *out = new_url(*(*self)->url); }
 
 // NSHTTPURLResponse: the only part the app reads is the status.
 struct HTTPResponseObject {
-    NativeObject header;
+    HeapObject header;
     int64_t status;
 };
 
@@ -1198,7 +1179,7 @@ AsyncDataResult perform_request(const std::string& url, const std::string& metho
     engine_log("HTTP: %s %s -> %d, %zu bytes", method.c_str(), url.c_str(), result.status, result.body.size());
     if (result.status < 0) return {{0, kDataEmptyTag}, nullptr, make_error("The network request could not be completed.", 1)};
     auto* response = static_cast<HTTPResponseObject*>(calloc(1, sizeof(HTTPResponseObject)));
-    response->header.isa = g_http_response_class;
+    response->header.metadata = g_http_response_class;
     response->header.references = 1;
     response->status = result.status;
     return {make_data(result.body), response, nullptr};
@@ -1223,13 +1204,11 @@ AsyncFunctionRecord g_url_session_request_record;
 
 // A bridged collection only needs to stay alive until framework code uses it, so it wraps the Swift value.
 struct BridgedCollection {
-    NativeObject header;
+    HeapObject header;
     void* value;
 };
 
 void* g_bridged_collection_class = nullptr;
-extern "C" void rt_swift_release(void*);
-extern "C" void* rt_swift_retain(void*);
 extern "C" void* rt_swift_bridgeObjectRetain(void*);
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 
@@ -1240,14 +1219,14 @@ void destroy_bridged_collection(void* raw) {
 
 SWIFTCC void* collection_bridge_to_objc(void* value) {
     auto* wrapper = static_cast<BridgedCollection*>(calloc(1, sizeof(BridgedCollection)));
-    wrapper->header.isa = g_bridged_collection_class;
+    wrapper->header.metadata = g_bridged_collection_class;
     wrapper->header.references = 1;
     wrapper->value = rt_swift_bridgeObjectRetain(value);
     return wrapper;
 }
 
 bool bridged_collection_value(void* object, void*& value) {
-    if (object == nullptr || static_cast<NativeObject*>(object)->isa != g_bridged_collection_class) return false;
+    if (object == nullptr || static_cast<HeapObject*>(object)->metadata != g_bridged_collection_class) return false;
     value = static_cast<BridgedCollection*>(object)->value;
     return true;
 }
@@ -1258,7 +1237,7 @@ constexpr uint64_t kCompactNotationFlag = 1;
 
 SWIFTCC void integer_style_init(SWIFT_OUT uint64_t* out, const void*, void*) { *out = kStyleWord; }
 SWIFTCC void notation_compact_name(SWIFT_OUT uint64_t* out) { *out = kStyleWord | kCompactNotationFlag; }
-SWIFTCC void integer_style_notation(SWIFT_OUT uint64_t* out, const uint64_t* notation, void*, SWIFT_CTX const uint64_t* self) { *out = *self | (*notation & kCompactNotationFlag); }
+SWIFTCC void integer_style_notation(SWIFT_OUT uint64_t* out, const uint64_t* notation, void*, SWIFT_CONTEXT const uint64_t* self) { *out = *self | (*notation & kCompactNotationFlag); }
 
 std::string group_thousands(int64_t value) {
     std::string digits = std::to_string(value < 0 ? -value : value);
@@ -1289,24 +1268,22 @@ std::string compact_number(int64_t value) {
 }
 
 // FormatOutput is String for every style this app uses, written through the indirect result.
-SWIFTCC void integer_formatted_style(SWIFT_OUT SwiftString* out, const uint64_t* style, void*, void*, SWIFT_CTX const int64_t* self) {
+SWIFTCC void integer_formatted_style(SWIFT_OUT SwiftString* out, const uint64_t* style, void*, void*, SWIFT_CONTEXT const int64_t* self) {
     const int64_t value = *self;
     *out = swift_string_from_utf8((*style & kCompactNotationFlag) ? compact_number(value) : group_thousands(value));
 }
 
-SWIFTCC SwiftString integer_formatted(void*, void*, SWIFT_CTX const int64_t* self) { return swift_string_from_utf8(group_thousands(*self)); }
+SWIFTCC SwiftString integer_formatted(void*, void*, SWIFT_CONTEXT const int64_t* self) { return swift_string_from_utf8(group_thousands(*self)); }
 
 SWIFTCC void date_now(SWIFT_OUT double* out) {
     struct timespec now{};
     clock_gettime(CLOCK_REALTIME, &now);
-    constexpr double kSecondsFrom1970To2001 = 978307200.0;
     *out = static_cast<double>(now.tv_sec) - kSecondsFrom1970To2001 + static_cast<double>(now.tv_nsec) * 1e-9;
 }
 
 SWIFTCC void date_style_word(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
 
-SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CTX const double* self) {
-    constexpr double kSecondsFrom1970To2001 = 978307200.0;
+SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CONTEXT const double* self) {
     const auto seconds = static_cast<time_t>(*self + kSecondsFrom1970To2001);
     struct tm local{};
     localtime_r(&seconds, &local);
@@ -1356,8 +1333,8 @@ SwiftString swift_string_from_utf8(const std::string& text) {
     constexpr size_t kMinimumCapacity = 32;
     const size_t capacity = text.size() < kMinimumCapacity ? kMinimumCapacity : text.size();
     auto* storage = static_cast<char*>(calloc(1, kNativeBias + capacity + 1));
-    auto* header = reinterpret_cast<NativeObject*>(storage);
-    header->isa = const_cast<uint64_t*>(&kStringStorageMetadata.kind);
+    auto* header = reinterpret_cast<HeapObject*>(storage);
+    header->metadata = const_cast<uint64_t*>(&kStringHeapMetadata.kind);
     header->references = 1;
     const uint64_t flags = kNfcFlag | kNativeFlag | kTailAllocatedFlag | (ascii ? kAsciiFlag : 0);
     const uint64_t count_and_flags = text.size() | flags;
@@ -1401,14 +1378,9 @@ __asm__(
 __asm__(
     ".text\n" URL_SESSION_ENTRY(rt_url_session_data_url, rt_url_session_fetch_url)
         URL_SESSION_ENTRY(rt_url_session_data_request, rt_url_session_fetch_request));
-
-constexpr size_t kDictionaryKeysOffset = 48;
-constexpr size_t kDictionaryValuesOffset = 56;
-constexpr size_t kDictionaryBitmapOffset = 64;
 constexpr size_t kDictionaryScaleOffset = 32;
 constexpr size_t kAnyHashableStride = 40;
 constexpr size_t kAnyStride = 32;
-constexpr uint64_t kCollectionPointerMask = 0x00fffffffffffff8ULL;
 constexpr size_t kBitsPerWord = 64;
 
 // The session's headers are a [AnyHashable: Any] of strings, read directly from its native storage.
@@ -1416,7 +1388,7 @@ void session_set_headers(void*, const char*, void* wrapper) {
     g_session_headers.clear();
     if (wrapper == nullptr) return;
     const auto bits = reinterpret_cast<uint64_t>(static_cast<BridgedCollection*>(wrapper)->value);
-    const auto* storage = reinterpret_cast<const char*>(bits & kCollectionPointerMask);
+    const auto* storage = reinterpret_cast<const char*>(bits & kBridgePointerMask);
     const int scale = static_cast<int8_t>(storage[kDictionaryScaleOffset]);
     const char* keys;
     const char* values;
@@ -1440,7 +1412,7 @@ SWIFTCC void* url_error_ns_error(void*) { return make_error("The server's respon
 struct WebConfiguration {
     std::vector<std::string> scripts;
     std::string application_name;
-    NativeObject* controller = nullptr;
+    HeapObject* controller = nullptr;
 };
 
 std::map<const void*, WebConfiguration*>& web_configurations() {
@@ -1498,9 +1470,9 @@ void* user_script_init(void* self, const char*, void* source, int64_t, bool) {
 void* configuration_controller(void* self, const char*) {
     auto* configuration = configuration_of(self);
     if (configuration->controller == nullptr) {
-        configuration->controller = static_cast<NativeObject*>(calloc(1, sizeof(NativeObject)));
+        configuration->controller = static_cast<HeapObject*>(calloc(1, sizeof(HeapObject)));
         static void* controller_class = objc_native_class("WKUserContentController", free);
-        configuration->controller->isa = controller_class;
+        configuration->controller->metadata = controller_class;
         configuration->controller->references = 1ULL << 63;
         web_configurations()[configuration->controller] = configuration;
     }
@@ -1534,9 +1506,9 @@ std::unordered_map<void*, URLRequestBox*>& bridged_requests() {
     return requests;
 }
 
-SWIFTCC void* url_request_bridge_to_objc(SWIFT_CTX URLRequestBox** self) {
+SWIFTCC void* url_request_bridge_to_objc(SWIFT_CONTEXT URLRequestBox** self) {
     auto* object = static_cast<NSStringObject*>(new_nsstring(*(*self)->url));
-    object->header.isa = g_nsurl_class;
+    object->header.metadata = g_nsurl_class;
     rt_swift_retain(*self);
     bridged_requests()[object] = *self;
     return object;
@@ -1551,7 +1523,7 @@ void* web_view_url(void* self, const char*) {
     const std::string& url = web_views()[self].url;
     if (url.empty()) return nullptr;
     auto* object = static_cast<NSStringObject*>(new_nsstring(url));
-    object->header.isa = g_nsurl_class;
+    object->header.metadata = g_nsurl_class;
     return object;
 }
 
@@ -1572,7 +1544,7 @@ std::string value_to_json(void* value, void* type) {
         memcpy(&stride, value_witnesses(element) + kWitnessStrideOffset, sizeof stride);
         return stride;
     };
-    const auto storage_of = [&]() { return reinterpret_cast<const char*>(*static_cast<uint64_t*>(value) & kCollectionPointerMask); };
+    const auto storage_of = [&]() { return reinterpret_cast<const char*>(*static_cast<uint64_t*>(value) & kBridgePointerMask); };
     if (void* element = array_element_type(type)) {
         const char* storage = storage_of();
         int64_t count;
@@ -1634,7 +1606,7 @@ extern "C" void rt_web_view_call_script_entry();
 AsyncFunctionRecord g_web_script_record;
 
 struct NSCookieObject {
-    NativeObject header;
+    HeapObject header;
     std::string* domain;
     std::string* name;
     std::string* value;
@@ -1662,7 +1634,7 @@ void cookie_store_get_all(void*, const char*, BlockHeader* completion) {
         const size_t second = first == std::string::npos ? first : line.find('\t', first + 1);
         if (second == std::string::npos) continue;
         auto* cookie = static_cast<NSCookieObject*>(calloc(1, sizeof(NSCookieObject)));
-        cookie->header.isa = g_cookie_class;
+        cookie->header.metadata = g_cookie_class;
         cookie->header.references = 1;
         cookie->domain = new std::string(line.substr(0, first));
         cookie->name = new std::string(line.substr(first + 1, second - first - 1));
@@ -1744,12 +1716,12 @@ void json_to_any(const Json& json, AnyValue* out) {
 
 // NSData and the object JSONSerialization returns: thin holders that only live until the guest bridges them.
 struct NSDataObject {
-    NativeObject header;
+    HeapObject header;
     std::string* bytes;
 };
 
 struct JSONValueObject {
-    NativeObject header;
+    HeapObject header;
     Json* value;
 };
 
@@ -1768,7 +1740,7 @@ void destroy_json_value(void* raw) {
 
 void* make_nsdata(const std::string& bytes) {
     auto* object = static_cast<NSDataObject*>(calloc(1, sizeof(NSDataObject)));
-    object->header.isa = g_nsdata_class;
+    object->header.metadata = g_nsdata_class;
     object->header.references = 1;
     object->bytes = new std::string(bytes);
     return object;
@@ -1795,13 +1767,13 @@ void* strings_object_from_json(const std::string& json) {
 
 // Every collection the app stores in defaults is a [String].
 bool strings_json_from_object(void* object, std::string& json) {
-    if (static_cast<NativeObject*>(object)->isa != g_bridged_collection_class) return false;
+    if (static_cast<HeapObject*>(object)->metadata != g_bridged_collection_class) return false;
     json = value_to_json(&static_cast<BridgedCollection*>(object)->value, resolve_mangled_type("SaySSG", nullptr));
     return true;
 }
 
 struct NSDateObject {
-    NativeObject header;
+    HeapObject header;
     double seconds;
 };
 
@@ -1809,14 +1781,14 @@ void* g_nsdate_class = nullptr;
 
 void* new_date_object(double seconds) {
     auto* object = static_cast<NSDateObject*>(calloc(1, sizeof(NSDateObject)));
-    object->header.isa = g_nsdate_class;
+    object->header.metadata = g_nsdate_class;
     object->header.references = 1;
     object->seconds = seconds;
     return object;
 }
 
 bool date_from_object(void* object, double& seconds) {
-    if (static_cast<NativeObject*>(object)->isa != g_nsdate_class) return false;
+    if (static_cast<HeapObject*>(object)->metadata != g_nsdate_class) return false;
     seconds = static_cast<NSDateObject*>(object)->seconds;
     return true;
 }
@@ -1834,7 +1806,7 @@ void* defaults_dictionary_representation(void*, const char*) {
         value->members.emplace_back(key, std::move(member));
     }
     auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
-    object->header.isa = g_json_value_class;
+    object->header.metadata = g_json_value_class;
     object->header.references = 1;
     object->value = value;
     return object;
@@ -1842,7 +1814,7 @@ void* defaults_dictionary_representation(void*, const char*) {
 
 SWIFTCC void* dictionary_bridge_from_objc(void* object) {
     if (void* value; bridged_collection_value(object, value)) return rt_swift_bridgeObjectRetain(value);
-    if (object != nullptr && static_cast<NativeObject*>(object)->isa == g_json_value_class) {
+    if (object != nullptr && static_cast<HeapObject*>(object)->metadata == g_json_value_class) {
         AnyValue any;
         json_to_any(*static_cast<JSONValueObject*>(object)->value, &any);
         return reinterpret_cast<void*>(any.buffer[0]);
@@ -1867,7 +1839,7 @@ void* json_object_with_data(void*, const char*, NSDataObject* data, uint64_t, vo
         return nullptr;
     }
     auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
-    object->header.isa = g_json_value_class;
+    object->header.metadata = g_json_value_class;
     object->header.references = 1;
     object->value = parsed.release();
     return object;
@@ -1895,7 +1867,7 @@ void destroy_query_item(void* raw) {
     free(box);
 }
 
-const StorageMetadata kQueryItemMetadata = {destroy_query_item, nullptr, 0};
+const HeapMetadata kQueryItemMetadata = {destroy_query_item, nullptr, 0};
 
 QueryItemBox* new_query_item(const std::string& name, const std::string* value) {
     auto* box = static_cast<QueryItemBox*>(calloc(1, sizeof(QueryItemBox)));
@@ -1915,8 +1887,8 @@ SWIFTCC void query_item_init(SWIFT_OUT QueryItemBox** out, SwiftString name, Swi
     *out = new_query_item(swift_string_to_utf8(name), &text);
 }
 
-SWIFTCC SwiftString query_item_name(SWIFT_CTX QueryItemBox** self) { return swift_string_from_utf8(*(*self)->name); }
-SWIFTCC SwiftString query_item_value(SWIFT_CTX QueryItemBox** self) {
+SWIFTCC SwiftString query_item_name(SWIFT_CONTEXT QueryItemBox** self) { return swift_string_from_utf8(*(*self)->name); }
+SWIFTCC SwiftString query_item_value(SWIFT_CONTEXT QueryItemBox** self) {
     return (*self)->value != nullptr ? swift_string_from_utf8(*(*self)->value) : SwiftString{0, 0};
 }
 
@@ -1940,7 +1912,7 @@ void destroy_components(void* raw) {
     free(box);
 }
 
-const StorageMetadata kComponentsMetadata = {destroy_components, nullptr, 0};
+const HeapMetadata kComponentsMetadata = {destroy_components, nullptr, 0};
 
 std::string* copied(const std::string* text) { return text != nullptr ? new std::string(*text) : nullptr; }
 
@@ -2011,7 +1983,7 @@ std::string percent_encoded_query(const std::string& text) {
 SWIFTCC void components_from_url(SWIFT_OUT ComponentsBox** out, URLBox** url, bool) { *out = parse_components(*(*url)->text); }
 SWIFTCC void components_from_string(SWIFT_OUT ComponentsBox** out, SwiftString text) { *out = parse_components(swift_string_to_utf8(text)); }
 
-SWIFTCC void components_url(SWIFT_OUT URLBox** out, SWIFT_CTX ComponentsBox** self) {
+SWIFTCC void components_url(SWIFT_OUT URLBox** out, SWIFT_CONTEXT ComponentsBox** self) {
     const ComponentsBox* box = *self;
     std::string text;
     if (box->scheme != nullptr) text += *box->scheme + ":";
@@ -2024,9 +1996,9 @@ SWIFTCC void components_url(SWIFT_OUT URLBox** out, SWIFT_CTX ComponentsBox** se
 
 SwiftString optional_text(const std::string* text) { return text != nullptr ? swift_string_from_utf8(*text) : SwiftString{0, 0}; }
 
-SWIFTCC SwiftString components_scheme(SWIFT_CTX ComponentsBox** self) { return optional_text((*self)->scheme); }
-SWIFTCC SwiftString components_path(SWIFT_CTX ComponentsBox** self) { return swift_string_from_utf8(percent_decoded(*(*self)->path)); }
-SWIFTCC SwiftString components_host(SWIFT_CTX ComponentsBox** self) {
+SWIFTCC SwiftString components_scheme(SWIFT_CONTEXT ComponentsBox** self) { return optional_text((*self)->scheme); }
+SWIFTCC SwiftString components_path(SWIFT_CONTEXT ComponentsBox** self) { return swift_string_from_utf8(percent_decoded(*(*self)->path)); }
+SWIFTCC SwiftString components_host(SWIFT_CONTEXT ComponentsBox** self) {
     if ((*self)->authority == nullptr) return {0, 0};
     std::string host = *(*self)->authority;
     if (const size_t at = host.rfind('@'); at != std::string::npos) host.erase(0, at + 1);
@@ -2034,7 +2006,7 @@ SWIFTCC SwiftString components_host(SWIFT_CTX ComponentsBox** self) {
     return swift_string_from_utf8(percent_decoded(host));
 }
 
-SWIFTCC void* components_query_items(SWIFT_CTX ComponentsBox** self) {
+SWIFTCC void* components_query_items(SWIFT_CONTEXT ComponentsBox** self) {
     if ((*self)->query == nullptr) return nullptr;
     std::vector<QueryItemBox*> items;
     const std::string& query = *(*self)->query;
@@ -2058,7 +2030,7 @@ SWIFTCC void* components_query_items(SWIFT_CTX ComponentsBox** self) {
 }
 
 // A new box each time, since URLComponents is a value and a copy may share the old one.
-SWIFTCC void components_set_query_items(void* items, SWIFT_CTX ComponentsBox** self) {
+SWIFTCC void components_set_query_items(void* items, SWIFT_CONTEXT ComponentsBox** self) {
     ComponentsBox* old = *self;
     auto* box = new_components();
     box->scheme = copied(old->scheme);
@@ -2111,7 +2083,7 @@ bool in_character_set(uint32_t scalar, uint64_t set) {
     return (scalar >= 0x0A && scalar <= 0x0D) || scalar == 0x85 || scalar == 0x2028 || scalar == 0x2029;
 }
 
-SWIFTCC SwiftString string_trimming(const uint64_t* set, void* type, void*, SWIFT_CTX const SwiftString* self) {
+SWIFTCC SwiftString string_trimming(const uint64_t* set, void* type, void*, SWIFT_CONTEXT const SwiftString* self) {
     if (type != type_system_symbol("$sSSN")) {
         engine_log("STOP: trimmingCharacters on a type other than String");
         abort();
@@ -2144,14 +2116,14 @@ SWIFTCC void uuid_init(SWIFT_OUT URLBox** out) {
     snprintf(text, sizeof text, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
     *out = new_url(text);
 }
-SWIFTCC SwiftString uuid_string(SWIFT_CTX URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
+SWIFTCC SwiftString uuid_string(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
 
 void stdlib_random(void* buffer, size_t count) { arc4random_buf(buffer, count); }
 
 // Puts an Objective-C object into an Any as its Swift value, as the runtime's bridging does.
 SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     memset(out, 0, sizeof *out);
-    const void* isa = object != nullptr ? static_cast<NativeObject*>(object)->isa : nullptr;
+    const void* isa = object != nullptr ? static_cast<HeapObject*>(object)->metadata : nullptr;
     if (isa == g_json_value_class) {
         json_to_any(*static_cast<JSONValueObject*>(object)->value, out);
     } else if (isa == g_nsdate_class) {
@@ -2220,8 +2192,6 @@ void foundation_cookies_changed() {
 }
 
 std::string foundation_url_text(const void* url) { return *static_cast<const URLBox*>(url)->text; }
-
-constexpr double kSecondsFrom1970To2001 = 978307200;
 
 bool foundation_parse_iso8601(const std::string& text, double& seconds) {
     tm parts{};
@@ -2306,7 +2276,7 @@ SWIFTCC SwiftString string_format_arguments(SwiftString format, void* arguments)
 }
 
 // StringProtocol's Foundation API: Self and its generic arguments are only ever String here, passed by address.
-SWIFTCC bool string_contains(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC bool string_contains(const SwiftString* other, void*, void*, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     return swift_string_to_utf8(*self).find(swift_string_to_utf8(*other)) != std::string::npos;
 }
 
@@ -2315,20 +2285,20 @@ std::string ascii_lowered(std::string text) {
     return text;
 }
 
-SWIFTCC bool string_contains_any_case(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC bool string_contains_any_case(const SwiftString* other, void*, void*, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     return ascii_lowered(swift_string_to_utf8(*self)).find(ascii_lowered(swift_string_to_utf8(*other))) != std::string::npos;
 }
 
 constexpr int64_t kOrderedAscending = -1;
 constexpr int64_t kOrderedDescending = 1;
 
-SWIFTCC int64_t string_compare_any_case(const SwiftString* other, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC int64_t string_compare_any_case(const SwiftString* other, void*, void*, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const int order = ascii_lowered(swift_string_to_utf8(*self)).compare(ascii_lowered(swift_string_to_utf8(*other)));
     return order < 0 ? kOrderedAscending : order > 0 ? kOrderedDescending
                                                      : 0;
 }
 
-SWIFTCC SwiftString string_replacing(const SwiftString* target, const SwiftString* replacement, uint64_t, uint64_t, uint64_t, uint64_t, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC SwiftString string_replacing(const SwiftString* target, const SwiftString* replacement, uint64_t, uint64_t, uint64_t, uint64_t, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     std::string text = swift_string_to_utf8(*self);
     const std::string from = swift_string_to_utf8(*target);
     const std::string to = swift_string_to_utf8(*replacement);
@@ -2340,15 +2310,15 @@ SWIFTCC SwiftString string_replacing(const SwiftString* target, const SwiftStrin
 
 // CharacterSet is one reference to this set of bytes; the framework's sets are all ASCII as far as this runtime goes.
 struct CharacterSetBox {
-    NativeObject header;
+    HeapObject header;
     std::string* members;
 };
 
-const StorageMetadata kCharacterSetMetadata = {free, nullptr, 0};
+const HeapMetadata kCharacterSetMetadata = {free, nullptr, 0};
 
 CharacterSetBox* new_character_set(std::string members) {
     auto* box = static_cast<CharacterSetBox*>(calloc(1, sizeof(CharacterSetBox)));
-    box->header.isa = const_cast<uint64_t*>(&kCharacterSetMetadata.kind);
+    box->header.metadata = const_cast<uint64_t*>(&kCharacterSetMetadata.kind);
     box->header.references = 1;
     box->members = new std::string(std::move(members));
     return box;
@@ -2356,21 +2326,21 @@ CharacterSetBox* new_character_set(std::string members) {
 
 constexpr const char* kAlphanumerics = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-SWIFTCC void set_whitespace(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(" \t"); }
-SWIFTCC void set_newlines(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set("\n\r"); }
-SWIFTCC void set_whitespace_newlines(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(" \t\n\r"); }
-SWIFTCC void set_alphanumerics(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(kAlphanumerics); }
-SWIFTCC void set_url_query(__attribute__((swift_indirect_result)) CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics) + "-._~!$&'()*+,;=:@/?"); }
-SWIFTCC void set_characters_in(__attribute__((swift_indirect_result)) CharacterSetBox** out, SwiftString text) { *out = new_character_set(swift_string_to_utf8(text)); }
-SWIFTCC void set_insert_characters(SwiftString text, __attribute__((swift_context)) CharacterSetBox** self) { *(*self)->members += swift_string_to_utf8(text); }
-SWIFTCC void set_remove_characters(SwiftString text, __attribute__((swift_context)) CharacterSetBox** self) {
+SWIFTCC void set_whitespace(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(" \t"); }
+SWIFTCC void set_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set("\n\r"); }
+SWIFTCC void set_whitespace_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(" \t\n\r"); }
+SWIFTCC void set_alphanumerics(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(kAlphanumerics); }
+SWIFTCC void set_url_query(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics) + "-._~!$&'()*+,;=:@/?"); }
+SWIFTCC void set_characters_in(SWIFT_OUT CharacterSetBox** out, SwiftString text) { *out = new_character_set(swift_string_to_utf8(text)); }
+SWIFTCC void set_insert_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) { *(*self)->members += swift_string_to_utf8(text); }
+SWIFTCC void set_remove_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) {
     for (const char c : swift_string_to_utf8(text)) {
         std::string& members = *(*self)->members;
         members.erase(std::remove(members.begin(), members.end(), c), members.end());
     }
 }
 
-SWIFTCC SwiftString string_trimming_set(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC SwiftString string_trimming_set(CharacterSetBox** set, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
     const size_t first = text.find_first_not_of(*(*set)->members);
     if (first == std::string::npos) return swift_string_from_utf8("");
@@ -2387,7 +2357,7 @@ void* string_array(const std::vector<std::string>& parts) {
     return storage;
 }
 
-SWIFTCC void* string_components_string(const SwiftString* separator, void*, void*, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC void* string_components_string(const SwiftString* separator, void*, void*, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
     const std::string by = swift_string_to_utf8(*separator);
     std::vector<std::string> parts;
@@ -2400,7 +2370,7 @@ SWIFTCC void* string_components_string(const SwiftString* separator, void*, void
     return string_array(parts);
 }
 
-SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
     std::vector<std::string> parts;
     size_t start = 0;
@@ -2412,7 +2382,7 @@ SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, __attri
     return string_array(parts);
 }
 
-SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     std::string out;
     for (const char c : swift_string_to_utf8(*self)) {
         if ((*set)->members->find(c) != std::string::npos) {
@@ -2427,7 +2397,7 @@ SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, 
     return {value.count_and_flags, value.object};
 }
 
-SWIFTCC OptionalSwiftString string_removing_percent(void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC OptionalSwiftString string_removing_percent(void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
     std::string out;
     for (size_t i = 0; i < text.size(); ++i) {
@@ -2442,7 +2412,7 @@ SWIFTCC OptionalSwiftString string_removing_percent(void*, void*, __attribute__(
     return {value.count_and_flags, value.object};
 }
 
-SWIFTCC SwiftString string_capitalized(void*, void*, __attribute__((swift_context)) const SwiftString* self) {
+SWIFTCC SwiftString string_capitalized(void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     std::string text = ascii_lowered(swift_string_to_utf8(*self));
     bool start = true;
     for (char& c : text) {
@@ -2458,14 +2428,14 @@ constexpr uint64_t kEncodingUtf8 = 4;
 constexpr uint64_t kEncodingLatin1 = 5;
 
 template <uint64_t Encoding>
-SWIFTCC void encoding_getter(__attribute__((swift_indirect_result)) uint64_t* out) { *out = Encoding; }
+SWIFTCC void encoding_getter(SWIFT_OUT uint64_t* out) { *out = Encoding; }
 
-SWIFTCC void encoding_from_raw(__attribute__((swift_indirect_result)) uint64_t* out, uint64_t raw) { *out = raw; }
+SWIFTCC void encoding_from_raw(SWIFT_OUT uint64_t* out, uint64_t raw) { *out = raw; }
 
 // `Data?`'s none has this tag in its second word, where Data's own storage tags never reach.
 constexpr uint64_t kOptionalDataNoneTag = 0xF000000000000000ULL;
 
-SWIFTCC DataValue string_data_using(const uint64_t*, bool, void*, void*, __attribute__((swift_context)) const SwiftString* self) { return make_data(swift_string_to_utf8(*self)); }
+SWIFTCC DataValue string_data_using(const uint64_t*, bool, void*, void*, SWIFT_CONTEXT const SwiftString* self) { return make_data(swift_string_to_utf8(*self)); }
 
 SWIFTCC OptionalSwiftString string_from_data(uint64_t range, uint64_t storage, const uint64_t*) {
     if (storage == kOptionalDataNoneTag) return {0, 0};
@@ -2473,7 +2443,7 @@ SWIFTCC OptionalSwiftString string_from_data(uint64_t range, uint64_t storage, c
     return {value.count_and_flags, value.object};
 }
 
-SWIFTCC SwiftString string_contents_of(URLBox** url, const uint64_t*, __attribute__((swift_context)) void*, __attribute__((swift_error_result)) void** error) {
+SWIFTCC SwiftString string_contents_of(URLBox** url, const uint64_t*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     const std::string path = url_path(*(*url)->text);
     FILE* file = fopen(path.c_str(), "rb");
     if (file == nullptr) {
@@ -2487,7 +2457,7 @@ SWIFTCC SwiftString string_contents_of(URLBox** url, const uint64_t*, __attribut
     return swift_string_from_utf8(text);
 }
 
-SWIFTCC void string_write_to(URLBox** url, bool, const uint64_t*, void*, void*, __attribute__((swift_context)) const SwiftString* self, __attribute__((swift_error_result)) void** error) {
+SWIFTCC void string_write_to(URLBox** url, bool, const uint64_t*, void*, void*, SWIFT_CONTEXT const SwiftString* self, SWIFT_ERROR void** error) {
     FILE* file = fopen(url_path(*(*url)->text).c_str(), "wb");
     if (file == nullptr) {
         *error = foundation_make_error("The file couldn't be saved.", 512);
@@ -2502,7 +2472,7 @@ SWIFTCC SwiftString ns_localized_string(SwiftString key) { return swift_string_f
 
 // A task from dataTask(with:completionHandler:): the request happens once resume is called.
 struct DataTask {
-    NativeObject header;
+    HeapObject header;
     std::string* url;
     std::string* method;
     std::string* headers;
@@ -2585,7 +2555,7 @@ void session_task_resume(void* self, const char*) { dispatch_enqueue(run_data_ta
 void session_task_cancel(void*, const char*) {}
 void* session_task_response(void* self, const char*) { return static_cast<DataTask*>(self)->response; }
 
-SWIFTCC void date_unbridge(__attribute__((swift_indirect_result)) double* out, void* object) {
+SWIFTCC void date_unbridge(SWIFT_OUT double* out, void* object) {
     double seconds = 0;
     if (object != nullptr) foundation_object_date(object, seconds);
     *out = seconds;
@@ -2599,18 +2569,18 @@ double seconds_now_since_2001() {
 
 constexpr double kDistantPast = -63114076800.0;
 
-SWIFTCC void date_distant_past(__attribute__((swift_indirect_result)) double* out) { *out = kDistantPast; }
-SWIFTCC double date_interval_since(const double* other, __attribute__((swift_context)) const double* self) { return *self - *other; }
-SWIFTCC void date_adding(__attribute__((swift_indirect_result)) double* out, double interval, __attribute__((swift_context)) const double* self) { *out = *self + interval; }
-SWIFTCC void date_plus(__attribute__((swift_indirect_result)) double* out, const double* date, double interval) { *out = *date + interval; }
-SWIFTCC void date_from_interval_since(__attribute__((swift_indirect_result)) double* out, double interval, const double* date) { *out = *date + interval; }
+SWIFTCC void date_distant_past(SWIFT_OUT double* out) { *out = kDistantPast; }
+SWIFTCC double date_interval_since(const double* other, SWIFT_CONTEXT const double* self) { return *self - *other; }
+SWIFTCC void date_adding(SWIFT_OUT double* out, double interval, SWIFT_CONTEXT const double* self) { *out = *self + interval; }
+SWIFTCC void date_plus(SWIFT_OUT double* out, const double* date, double interval) { *out = *date + interval; }
+SWIFTCC void date_from_interval_since(SWIFT_OUT double* out, double interval, const double* date) { *out = *date + interval; }
 SWIFTCC bool date_greater(const double* left, const double* right) { return *left > *right; }
 SWIFTCC bool date_less(const double* left, const double* right) { return *left < *right; }
 SWIFTCC bool date_equal(const double* left, const double* right) { return *left == *right; }
-SWIFTCC void date_from_since_now(__attribute__((swift_indirect_result)) double* out, double interval) { *out = seconds_now_since_2001() + interval; }
-SWIFTCC double date_since_now(__attribute__((swift_context)) const double* self) { return *self - seconds_now_since_2001(); }
-SWIFTCC void date_from_1970(__attribute__((swift_indirect_result)) double* out, double interval) { *out = interval - kSecondsFrom1970To2001; }
-SWIFTCC double date_since_1970(__attribute__((swift_context)) const double* self) { return *self + kSecondsFrom1970To2001; }
+SWIFTCC void date_from_since_now(SWIFT_OUT double* out, double interval) { *out = seconds_now_since_2001() + interval; }
+SWIFTCC double date_since_now(SWIFT_CONTEXT const double* self) { return *self - seconds_now_since_2001(); }
+SWIFTCC void date_from_1970(SWIFT_OUT double* out, double interval) { *out = interval - kSecondsFrom1970To2001; }
+SWIFTCC double date_since_1970(SWIFT_CONTEXT const double* self) { return *self + kSecondsFrom1970To2001; }
 
 // `result` is a String? written in place.
 SWIFTCC bool string_conditional_bridge(void* object, SwiftString* result, void*) {
@@ -2623,7 +2593,7 @@ SWIFTCC void string_force_bridge(void* object, SwiftString* result, void*) { *re
 void* bundle_identifier_object(void*, const char*) { return new_nsstring(bundle_info_string("CFBundleIdentifier")); }
 
 struct ScannerObject {
-    NativeObject header;
+    HeapObject header;
     std::string* text;
 };
 
@@ -2689,7 +2659,7 @@ bool operation_is_cancelled(void* self, const char*) { return cancelled_operatio
 void object_key_change_ignored(void*, const char*, void*) {}
 
 struct BlockOperation {
-    NativeObject header;
+    HeapObject header;
     void* block;
 };
 
@@ -2706,7 +2676,7 @@ void lock_nothing(void*, const char*) {}
 
 // NSCache that keeps everything: nothing here reacts to memory pressure.
 struct CacheObject {
-    NativeObject header;
+    HeapObject header;
     std::unordered_map<void*, void*>* entries;
 };
 
@@ -2767,7 +2737,7 @@ std::string strftime_pattern(const std::string& format) {
 }
 
 struct DateFormatterObject {
-    NativeObject header;
+    HeapObject header;
     std::string* format;
 };
 
@@ -2803,18 +2773,18 @@ void* date_formatter_string(void* self, const char*, void* date) {
 }
 
 std::string foundation_object_text(void* object) {
-    const void* isa = static_cast<NativeObject*>(object)->isa;
+    const void* isa = static_cast<HeapObject*>(object)->metadata;
     return isa == g_nsstring_class || isa == g_nsurl_class ? nsstring_text(object) : std::string();
 }
 
 bool foundation_object_date(void* object, double& seconds) {
-    if (static_cast<NativeObject*>(object)->isa != g_nsdate_class) return false;
+    if (static_cast<HeapObject*>(object)->metadata != g_nsdate_class) return false;
     seconds = static_cast<NSDateObject*>(object)->seconds;
     return true;
 }
 
 std::string foundation_encode_object(void* object) {
-    const void* isa = static_cast<NativeObject*>(object)->isa;
+    const void* isa = static_cast<HeapObject*>(object)->metadata;
     if (isa == g_nsstring_class) return "s" + nsstring_text(object);
     if (isa == g_nsurl_class) return "u" + nsstring_text(object);
     if (isa == g_nsdate_class) return "d" + std::to_string(static_cast<NSDateObject*>(object)->seconds);
@@ -2826,7 +2796,7 @@ void* foundation_decode_object(const std::string& encoded) {
     const std::string body = encoded.substr(1);
     if (encoded[0] == 'd') return new_date_object(strtod(body.c_str(), nullptr));
     auto* object = static_cast<NSStringObject*>(new_nsstring(body));
-    if (encoded[0] == 'u') object->header.isa = g_nsurl_class;
+    if (encoded[0] == 'u') object->header.metadata = g_nsurl_class;
     return object;
 }
 
@@ -2853,7 +2823,7 @@ void foundation_defaults_store_string(const std::string& key, const std::string&
 
 void foundation_register_classes() {
     if (g_nsstring_class == nullptr) g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
-    for (void* constant : string_constants()) static_cast<NativeObject*>(constant)->isa = g_nsstring_class;
+    for (void* constant : string_constants()) static_cast<HeapObject*>(constant)->metadata = g_nsstring_class;
     const auto make_record = [](AsyncFunctionRecord& record, void (*entry)()) {
         record.context_size = kUrlSessionContextBytes;
         record.function = static_cast<int32_t>(reinterpret_cast<intptr_t>(entry) - reinterpret_cast<intptr_t>(&record));

@@ -28,15 +28,10 @@
 #include "swift_runtime.h"
 #include "symbols.h"
 #include "type_system.h"
+#include "swift_abi.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_CONTEXT __attribute__((swift_context))
 
 namespace {
-
-constexpr size_t kBodyBufferSize = 64 * 1024;
-constexpr uint32_t kFlagNonPod = 0x10000;
 const MachSection* g_view_conformances = nullptr;
 
 void* rt_swift_getWitnessTable_for_view(const char* conformance, void* type) {
@@ -44,43 +39,19 @@ void* rt_swift_getWitnessTable_for_view(const char* conformance, void* type) {
 }
 constexpr int kMaximumDepth = 64;
 
-struct ValueWitnessTable {
-    void* (*initialize_buffer_with_copy)(void*, void*, void*);
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-    void* (*initialize_with_take)(void*, void*, void*);
-    void* (*assign_with_take)(void*, void*, void*);
-    uint32_t (*get_enum_tag_single_payload)(const void*, uint32_t, void*);
-    void (*store_enum_tag_single_payload)(void*, uint32_t, uint32_t, void*);
-    size_t size;
-    size_t stride;
-    uint32_t flags;
-    uint32_t extra_inhabitants;
-};
-
-const ValueWitnessTable* witnesses_of(const void* metadata) {
-    return static_cast<const ValueWitnessTable*>(static_cast<void* const*>(metadata)[-1]);
-}
-
-struct HeapHeader {
-    void* metadata;
-    std::atomic<uint64_t> references;
-};
-
 // Runtime-owned object behind a framework value; the guest only sees it as one retained reference.
 struct ViewBox {
-    HeapHeader header;
+    HeapObject header;
     const void* closure;
     void* closure_context;
     void* content_type;
     void** content_witnesses;
 };
 
-void destroy_box(HeapHeader* object) { free(object); }
+void destroy_box(HeapObject* object) { free(object); }
 
 struct BoxMetadata {
-    void (*destroyer)(HeapHeader*);
+    void (*destroyer)(HeapObject*);
     const void* witnesses;
     uint64_t kind;
 };
@@ -93,8 +64,6 @@ ViewBox* new_box() {
     new (&box->header.references) std::atomic<uint64_t>(1);
     return box;
 }
-
-constexpr uint64_t kImmediate = 1ULL << 63;
 const int32_t kStorageCaseValueTag = 0;
 const int32_t kTitleDisplayInline = 2;
 char g_view_body_requirement;
@@ -139,7 +108,7 @@ enum class BindingKind : uint32_t { State,
 
 // A two-way reference to a value, in whichever of SwiftUI's forms the app created it.
 struct BindingNode {
-    HeapHeader header;
+    HeapObject header;
     BindingKind kind;
     void* source;  // The state box, parent binding or observed object, retained.
     void* key_path;
@@ -150,11 +119,9 @@ struct BindingNode {
     void* setter_context;
 };
 
-extern "C" void* rt_swift_retain(void*);
-extern "C" void rt_swift_release(void*);
 extern "C" void* rt_swift_bridgeObjectRetain(void*);
 
-void destroy_binding(HeapHeader* object) {
+void destroy_binding(HeapObject* object) {
     auto* binding = reinterpret_cast<BindingNode*>(object);
     rt_swift_release(binding->source);
     rt_swift_release(binding->key_path);
@@ -233,7 +200,7 @@ enum class NodeKind : uint32_t {
 
 // Runtime object behind a resilient view: its properties plus already-evaluated child values.
 struct ViewNode {
-    HeapHeader header;
+    HeapObject header;
     NodeKind kind;
     std::string* title;
     std::string* system_image;
@@ -255,7 +222,7 @@ std::unordered_set<const void*>& live_nodes() {
     return nodes;
 }
 
-void destroy_node(HeapHeader* object) {
+void destroy_node(HeapObject* object) {
     auto* node = reinterpret_cast<ViewNode*>(object);
     live_nodes().erase(node);
     delete node->title;
@@ -379,7 +346,6 @@ SWIFTCC void picker_init(SWIFT_OUT ViewNode** out, const uint64_t* selection, vo
 
 constexpr size_t kArrayCountOffsetBytes = 16;
 constexpr size_t kArrayElementsOffsetBytes = 32;
-constexpr uint64_t kCollectionPointerMask = 0x00fffffffffffff8ULL;
 
 const std::vector<void*>& fetched_results_contents(void* value);
 
@@ -401,7 +367,7 @@ void evaluate_rows(ViewNode* node, void* data, void* data_type, const void* row,
         abort();
     }
     const auto* elements = witnesses_of(element);
-    const auto storage = reinterpret_cast<const char*>(*static_cast<uint64_t*>(data) & kCollectionPointerMask);
+    const auto storage = reinterpret_cast<const char*>(*static_cast<uint64_t*>(data) & kBridgePointerMask);
     int64_t count;
     memcpy(&count, storage + kArrayCountOffsetBytes, sizeof count);
     const size_t mask = elements->flags & 0xff;
@@ -746,11 +712,6 @@ SWIFTCC void view_alert_string(SWIFT_OUT ViewNode** out, const SwiftString* titl
     make_alert(out, swift_string_to_utf8(*title), location, actions, actions_context, actions_type, self_type, self);
 }
 
-SWIFTCC void view_alert_message(SWIFT_OUT ViewNode** out, SwiftString key, uint64_t, LocalizedBox* interpolation, uint64_t, BindingNode* location, uint64_t, const void* actions, void* actions_context, const void* message, void* message_context, void* self_type, void* actions_type, void* message_type, void*, void*, SWIFT_CONTEXT void* self) {
-    make_alert(out, interpolation != nullptr ? localized_text(interpolation) : localization_lookup(swift_string_to_utf8(key)), location, actions, actions_context, actions_type, self_type, self);
-    evaluate_child(*out, message, message_context, message_type);
-}
-
 // Binding<String> and the optional prompt fill the registers, so Self arrives on the stack.
 SWIFTCC void view_searchable(SWIFT_OUT ViewNode** out, uint64_t, BindingNode* location, uint64_t, uint64_t, const void*, uint64_t, uint64_t, uint64_t, uint64_t, void* self_type, void*, SWIFT_CONTEXT void* self) {
     auto* node = new_node(NodeKind::Searchable);
@@ -965,18 +926,17 @@ SWIFTCC void builder_identity(SWIFT_OUT void* out, void* value, void* type, void
 
 // Layout-only descriptions: nothing reads them, but the app passes them around as one word.
 SWIFTCC uint64_t immediate_value() { return kImmediate; }
-SWIFTCC void immediate_indirect(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
 
 SWIFTCC void with_transaction(SWIFT_OUT void* out, void*, const void* body, void* context) { rt_call_witness(body, out, context, nullptr, nullptr); }
 
 struct FetchRequestBox {
-    HeapHeader header;
+    HeapObject header;
     std::string* entity;
     void* sort_descriptors;
     void* predicate;
 };
 
-void destroy_fetch_request(HeapHeader* object) {
+void destroy_fetch_request(HeapObject* object) {
     auto* box = reinterpret_cast<FetchRequestBox*>(object);
     delete box->entity;
     free(box);
@@ -995,11 +955,11 @@ SWIFTCC void fetch_request_init(SWIFT_OUT FetchRequestBox** out, void* entity, v
 }
 
 struct FetchedResultsBox {
-    HeapHeader header;
+    HeapObject header;
     std::vector<void*>* objects;
 };
 
-void destroy_fetched_results(HeapHeader* object) {
+void destroy_fetched_results(HeapObject* object) {
     auto* box = reinterpret_cast<FetchedResultsBox*>(object);
     delete box->objects;
     free(box);
@@ -1145,7 +1105,7 @@ SWIFTCC SizeValue geometry_size(SWIFT_CONTEXT void*) { return {390, 844}; }
 
 // Backing store of @State, attached to the inline LazyState through its location word.
 struct StateBox {
-    HeapHeader header;
+    HeapObject header;
     void* type;
     void* value;
 };
@@ -1288,24 +1248,24 @@ void binding_write(BindingNode* binding, void* value, void* type);
 
 // AppStorage is one reference to this box: the key, and the default until something is stored.
 struct AppStorageBox {
-    HeapHeader header;
+    HeapObject header;
     std::string* key;
     std::string* fallback_text;
     int64_t fallback_number;
 };
 
-void destroy_app_storage(HeapHeader* object) {
+void destroy_app_storage(HeapObject* object) {
     auto* box = reinterpret_cast<AppStorageBox*>(object);
     delete box->key;
     delete box->fallback_text;
     free(box);
 }
 
-const BoxMetadata kAppStorageMetadata = {destroy_app_storage, nullptr, 0};
+const BoxMetadata kAppHeapMetadata = {destroy_app_storage, nullptr, 0};
 
 AppStorageBox* new_app_storage(SwiftString key) {
     auto* box = static_cast<AppStorageBox*>(calloc(1, sizeof(AppStorageBox)));
-    box->header.metadata = const_cast<uint64_t*>(&kAppStorageMetadata.kind);
+    box->header.metadata = const_cast<uint64_t*>(&kAppHeapMetadata.kind);
     new (&box->header.references) std::atomic<uint64_t>(1);
     box->key = new std::string(swift_string_to_utf8(key));
     box->fallback_text = new std::string();
@@ -1720,91 +1680,11 @@ struct EdgeInsetsValue {
 
 SWIFTCC EdgeInsetsValue edge_insets_all(double value) { return {value, value, value, value}; }
 
-const char* node_kind_name(NodeKind kind) {
-    switch (kind) {
-        case NodeKind::TabView:
-            return "TabView";
-        case NodeKind::Tab:
-            return "Tab";
-        case NodeKind::NavigationStack:
-            return "NavigationStack";
-        case NodeKind::List:
-            return "List";
-        case NodeKind::Button:
-            return "Button";
-        case NodeKind::Label:
-            return "Label";
-        case NodeKind::Toggle:
-            return "Toggle";
-        case NodeKind::Modifier:
-            return "Modifier";
-        case NodeKind::Sheet:
-            return "Sheet";
-        case NodeKind::Toolbar:
-            return "Toolbar";
-        case NodeKind::OnChange:
-            return "OnChange";
-        case NodeKind::Task:
-            return "Task";
-        case NodeKind::Picker:
-            return "Picker";
-        case NodeKind::ForEach:
-            return "ForEach";
-        case NodeKind::Section:
-            return "Section";
-        case NodeKind::ProgressView:
-            return "ProgressView";
-        case NodeKind::Stepper:
-            return "Stepper";
-        case NodeKind::Image:
-            return "Image";
-        case NodeKind::AsyncImage:
-            return "AsyncImage";
-        case NodeKind::Disclosure:
-            return "Disclosure";
-        case NodeKind::LabeledContent:
-            return "LabeledContent";
-        case NodeKind::Unavailable:
-            return "Unavailable";
-        case NodeKind::Menu:
-            return "Menu";
-        case NodeKind::Link:
-            return "Link";
-        case NodeKind::ToolbarItem:
-            return "ToolbarItem";
-        case NodeKind::ImageResource:
-            return "ImageResource";
-        case NodeKind::RowMenu:
-            return "RowMenu";
-        case NodeKind::PresentedSheet:
-            return "PresentedSheet";
-        case NodeKind::Alert:
-            return "Alert";
-        case NodeKind::NavigationLink:
-            return "NavigationLink";
-        case NodeKind::TextField:
-            return "TextField";
-        case NodeKind::Stack:
-            return "Stack";
-        case NodeKind::Divider:
-            return "Divider";
-        case NodeKind::Searchable:
-            return "Searchable";
-    }
-    return "?";
-}
-
 constexpr const char* kViewProtocolSymbol = "_$s7SwiftUI4ViewMp";
 constexpr const char* kToolbarContentSymbol = "_$s7SwiftUI14ToolbarContentMp";
 constexpr const char* kViewModifierSymbol = "_$s7SwiftUI12ViewModifierMp";
 constexpr const char* kRepresentableSymbol = "_$s7SwiftUI19UIViewRepresentableMp";
-constexpr size_t kConformanceTypeOffset = 4;
 constexpr size_t kConformanceFlagsOffset = 12;
-constexpr uint32_t kTypeReferenceKindMask = 0x7u << 3;
-constexpr uint32_t kTypeReferenceIndirect = 0x1u << 3;
-constexpr size_t kMetadataDescriptorWord = 1;
-constexpr size_t kMetadataArgumentsWord = 2;
-constexpr size_t kDescriptorNameOffset = 8;
 
 const void* relative_pointer(const char* field) {
     int32_t offset;
@@ -1922,11 +1802,8 @@ std::map<std::string, StateBox*>& preserved_states() {
     static std::map<std::string, StateBox*> states;
     return states;
 }
-
-constexpr size_t kDescriptorFieldsOffset = 16;
 constexpr size_t kStructFieldOffsetVectorOffset = 24;
 constexpr size_t kFieldDescriptorHeaderBytes = 16;
-constexpr size_t kFieldRecordBytes = 12;
 constexpr size_t kFieldRecordTypeOffset = 4;
 constexpr uint32_t kDescriptorIsGeneric = 0x80;
 constexpr const char* kLazyStateSymbol = "_$s7SwiftUI9LazyStateVMn";
@@ -2066,13 +1943,6 @@ const char* font_name(uint64_t style) {
 
 using Nodes = std::vector<Json>;
 using Properties = std::vector<std::pair<std::string, Json>>;
-
-Json json_text(const std::string& text) {
-    Json value;
-    value.kind = Json::Kind::String;
-    value.text = text;
-    return value;
-}
 
 Json json_number(int64_t number) {
     Json value;

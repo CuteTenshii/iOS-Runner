@@ -11,45 +11,12 @@
 #include <vector>
 
 #include "key_path.h"
+#include "swift_abi.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_CONTEXT __attribute__((swift_context))
 
-extern "C" void* rt_swift_retain(void*);
-extern "C" void rt_swift_release(void*);
 extern "C" void rt_registrar_mark_dirty_c();
 
 namespace {
-
-struct ValueWitnesses {
-    void* initialize_buffer_with_copy;
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-    void* (*initialize_with_take)(void*, void*, void*);
-    void* (*assign_with_take)(void*, void*, void*);
-    void* get_enum_tag;
-    void* store_enum_tag;
-    size_t size;
-};
-
-const ValueWitnesses* witnesses_of(const void* metadata) {
-    return static_cast<const ValueWitnesses*>(static_cast<void* const*>(metadata)[-1]);
-}
-
-struct HeapHeader {
-    void* metadata;
-    std::atomic<uint64_t> references;
-};
-
-struct HeapMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-extern "C" void* rt_call_witness(const void* function, void* out, void* self, void* type, void* table);
 
 struct Subscriber {
     uint64_t id;
@@ -59,7 +26,7 @@ struct Subscriber {
 
 // Everything a publisher chain does here is forward values to its sinks, so each chain shares one of these.
 struct Publisher {
-    HeapHeader header;
+    HeapObject header;
     std::vector<Subscriber>* subscribers;
     const void* create;  // Set for Deferred: builds the upstream publisher on first subscription.
     void* create_context;
@@ -104,7 +71,7 @@ void publish(Publisher* publisher, void* value) {
 
 // Published<T> is one reference to this box, which stands in for the framework's storage.
 struct PublishedBox {
-    HeapHeader header;
+    HeapObject header;
     void* type;
     void* value;
     Publisher* publisher;
@@ -207,7 +174,7 @@ SWIFTCC void publisher_deferred(SWIFT_OUT Publisher** out, const void* create, v
 }
 
 struct Cancellable {
-    HeapHeader header;
+    HeapObject header;
     Publisher* publisher;
     uint64_t id;
 };

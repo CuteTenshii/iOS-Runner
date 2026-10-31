@@ -7,6 +7,7 @@
 #include <new>
 
 #include "engine.h"
+#include "swift_abi.h"
 #include "type_system.h"
 
 namespace {
@@ -30,15 +31,6 @@ constexpr uint32_t kComputedSettable = 0x00400000;
 constexpr uint32_t kComputedHasArguments = 0x00080000;
 constexpr size_t kTemporaryBufferSize = 512;
 
-struct ValueWitnessTable {
-    void* (*initialize_buffer_with_copy)(void*, void*, void*);
-    void (*destroy)(void*, void*);
-    void* (*initialize_with_copy)(void*, void*, void*);
-    void* (*assign_with_copy)(void*, void*, void*);
-};
-
-const ValueWitnessTable* witnesses_of(void* type) { return static_cast<const ValueWitnessTable*>(static_cast<void**>(type)[-1]); }
-
 struct KeyPathObject {
     void* metadata;
     std::atomic<uint64_t> references;
@@ -46,13 +38,7 @@ struct KeyPathObject {
     const void* arguments;
 };
 
-struct ObjectMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
-const ObjectMetadata kKeyPathMetadata = {free, nullptr, 0};
+const HeapMetadata kKeyPathMetadata = {free, nullptr, 0};
 
 uint32_t read_u32(const char* at) {
     uint32_t value;
@@ -284,7 +270,7 @@ struct ModifyState {
     void* type;
 };
 
-__attribute__((swiftcall)) void finish_modify(void** buffer, bool) {
+SWIFTCC void finish_modify(void** buffer, bool) {
     auto* state = static_cast<ModifyState*>(*buffer);
     key_path_set(state->key_path, state->root, state->value, state->type);
     witnesses_of(state->type)->destroy(state->value, state->type);
@@ -292,14 +278,12 @@ __attribute__((swiftcall)) void finish_modify(void** buffer, bool) {
     free(state);
 }
 
-constexpr size_t kWitnessSizeOffset = 0x40;
-
 }  // namespace
 
-__attribute__((swiftcall)) KeyPathModification key_path_begin_modify(void** buffer, void* root, const void* key_path) {
+SWIFTCC KeyPathModification key_path_begin_modify(void** buffer, void* root, const void* key_path) {
     void* type = key_path_value_type(key_path);
     size_t size;
-    memcpy(&size, static_cast<const char*>(static_cast<void**>(type)[-1]) + kWitnessSizeOffset, sizeof size);
+    memcpy(&size, static_cast<const char*>(static_cast<void**>(type)[-1]) + kValueWitnessSizeOffset, sizeof size);
     auto* state = static_cast<ModifyState*>(calloc(1, sizeof(ModifyState)));
     *state = {key_path, root, calloc(1, size == 0 ? 1 : size), type};
     key_path_get(key_path, root, state->value, type);

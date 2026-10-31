@@ -15,14 +15,10 @@
 #include "engine.h"
 #include "foundation_shim.h"
 #include "key_path.h"
+#include "swift_abi.h"
 #include "type_system.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_CTX __attribute__((swift_context))
-#define SWIFT_ERROR __attribute__((swift_error_result))
 
-extern "C" void* rt_swift_retain(void*);
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 extern "C" void* rt_swift_bridgeObjectRetain(void*);
 
@@ -301,12 +297,6 @@ bool match_node(const Node& node, const std::string& text, size_t at, Spans& spa
     return false;
 }
 
-struct StorageMetadata {
-    void (*destroyer)(void*);
-    const void* witnesses;
-    uint64_t kind;
-};
-
 struct RegexBox {
     void* metadata;
     std::atomic<uint64_t> references;
@@ -319,7 +309,7 @@ void destroy_regex(void* raw) {
     free(raw);
 }
 
-const StorageMetadata kRegexMetadata = {destroy_regex, nullptr, 0};
+const HeapMetadata kRegexMetadata = {destroy_regex, nullptr, 0};
 
 // Regex.Match: the Output value, laid out as the app's compiled key paths expect.
 struct MatchBox {
@@ -333,7 +323,7 @@ void destroy_match(void* raw) {
     free(raw);
 }
 
-const StorageMetadata kMatchMetadata = {destroy_match, nullptr, 0};
+const HeapMetadata kMatchMetadata = {destroy_match, nullptr, 0};
 
 SWIFTCC void regex_init(SWIFT_OUT RegexBox** out, SwiftString pattern, int64_t) {
     auto* box = static_cast<RegexBox*>(calloc(1, sizeof(RegexBox)));
@@ -348,7 +338,7 @@ SWIFTCC void regex_init(SWIFT_OUT RegexBox** out, SwiftString pattern, int64_t) 
     *out = box;
 }
 
-SWIFTCC void regex_component_regex(SWIFT_OUT RegexBox** out, void*, void*, SWIFT_CTX RegexBox** self) {
+SWIFTCC void regex_component_regex(SWIFT_OUT RegexBox** out, void*, void*, SWIFT_CONTEXT RegexBox** self) {
     *out = static_cast<RegexBox*>(rt_swift_retain(*self));
 }
 
@@ -368,7 +358,7 @@ SubstringWords substring_of(const SwiftString& guts, size_t start, size_t end) {
 }
 
 // `regex_type` is Regex<Output>, whose first generic argument is the Output.
-SWIFTCC void regex_whole_match(SWIFT_OUT MatchBox** out, uint64_t start, uint64_t end, SwiftString guts, void* regex_type, SWIFT_CTX RegexBox** self, SWIFT_ERROR void**) {
+SWIFTCC void regex_whole_match(SWIFT_OUT MatchBox** out, uint64_t start, uint64_t end, SwiftString guts, void* regex_type, SWIFT_CONTEXT RegexBox** self, SWIFT_ERROR void**) {
     const std::string whole = swift_string_to_utf8(guts);
     const size_t low = start >> kIndexOffsetShift;
     const size_t high = end >> kIndexOffsetShift;
@@ -381,7 +371,6 @@ SWIFTCC void regex_whole_match(SWIFT_OUT MatchBox** out, uint64_t start, uint64_
     }
     spans[0] = {0, text.size()};
     void* output_type = static_cast<void**>(regex_type)[2];
-    constexpr size_t kValueWitnessSizeOffset = 0x40;
     size_t size;
     memcpy(&size, static_cast<const char*>(static_cast<void**>(output_type)[-1]) + kValueWitnessSizeOffset, sizeof size);
     auto* output = static_cast<char*>(calloc(1, size));
@@ -404,12 +393,12 @@ SWIFTCC void regex_whole_match(SWIFT_OUT MatchBox** out, uint64_t start, uint64_
     *out = box;
 }
 
-SWIFTCC void regex_match_member(SWIFT_OUT void* out, const void* key_path, void* value_type, void*, SWIFT_CTX MatchBox** self) {
+SWIFTCC void regex_match_member(SWIFT_OUT void* out, const void* key_path, void* value_type, void*, SWIFT_CONTEXT MatchBox** self) {
     key_path_get(key_path, (*self)->output, out, value_type);
 }
 
 // String.replacing(_:with:maxReplacements:); the app only replaces in String, with a String.
-SWIFTCC void regex_replacing(SWIFT_OUT SwiftString* out, RegexBox** regex, const SwiftString* replacement, int64_t maximum, void*, void*, void*, void*, void*, SWIFT_CTX const SwiftString* self) {
+SWIFTCC void regex_replacing(SWIFT_OUT SwiftString* out, RegexBox** regex, const SwiftString* replacement, int64_t maximum, void*, void*, void*, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
     const std::string with = swift_string_to_utf8(*replacement);
     std::string result;

@@ -12,19 +12,13 @@
 #include "concurrency_shim.h"
 #include "engine.h"
 #include "objc_runtime.h"
+#include "swift_abi.h"
 
-#define SWIFTCC __attribute__((swiftcall))
-#define SWIFT_OUT __attribute__((swift_indirect_result))
-#define SWIFT_CONTEXT __attribute__((swift_context))
 
-extern "C" void* rt_call_witness(const void* function, void* out, void* self, void* type, void* table);
 extern "C" void* darwin_block_copy(const void*);
 extern "C" void rt_registrar_mark_dirty_c();
-extern "C" void* rt_swift_retain(void*);
 
 namespace {
-
-constexpr uint64_t kImmediate = 1ULL << 63;
 constexpr int64_t kNanosecondsPerSecond = 1000000000;
 
 struct BlockLiteral {
@@ -108,7 +102,6 @@ SWIFTCC void time_from_uptime(SWIFT_OUT uint64_t* out, uint64_t nanoseconds) { *
 SWIFTCC uint64_t time_uptime(SWIFT_CONTEXT const uint64_t* self) { return *self; }
 SWIFTCC void time_plus_seconds(SWIFT_OUT uint64_t* out, const uint64_t* time, double seconds) { *out = *time + static_cast<uint64_t>(seconds * kNanosecondsPerSecond); }
 
-SWIFTCC void immediate_indirect(SWIFT_OUT uint64_t* out) { *out = kImmediate; }
 
 struct GroupState {
     int64_t entered = 0;
