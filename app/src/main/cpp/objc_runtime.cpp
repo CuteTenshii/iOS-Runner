@@ -148,6 +148,51 @@ extern "C" const void* rt_objc_super_lookup(void* const* super_info, const char*
     stop_unknown_message(std::string("unknown superclass -[? ") + selector + "]");
 }
 
+constexpr size_t kRoInstanceStartOffset = 4;
+constexpr size_t kRoInstanceVariablesOffset = 48;
+constexpr size_t kIvarListHeaderSize = 8;
+constexpr size_t kSwiftInstanceSizeOffset = 0x30;
+constexpr uintptr_t kClassIsSwiftBits = 3;
+constexpr uint32_t kRefcountWordSize = sizeof(void*);
+
+bool has_objc_root(const char* cls) {
+    while (cls != nullptr) {
+        const std::string framework = framework_class_name(cls);
+        if (!framework.empty()) return framework.find("SwiftObject") == std::string::npos;
+        memcpy(&cls, cls + kClassSuperclassOffset, sizeof cls);
+    }
+    return false;
+}
+
+void add_to_u32(char* address, uint32_t amount) {
+    uint32_t value;
+    memcpy(&value, address, sizeof value);
+    value += amount;
+    memcpy(address, &value, sizeof value);
+}
+
+// Objects keep their refcount in the word after the class, where real ObjC instances start their ivars.
+// Like the ObjC runtime does when a superclass grows, this moves every ivar past it.
+void slide_instance_variables(char* cls) {
+    uintptr_t data;
+    memcpy(&data, cls + kClassDataOffset, sizeof data);
+    auto* read_only = reinterpret_cast<char*>(data & kClassDataMask);
+    add_to_u32(read_only + kRoInstanceStartOffset, kRefcountWordSize);
+    add_to_u32(read_only + kRoInstanceSizeOffset, kRefcountWordSize);
+    if (data & kClassIsSwiftBits) add_to_u32(cls + kSwiftInstanceSizeOffset, kRefcountWordSize);
+    char* ivars;
+    memcpy(&ivars, read_only + kRoInstanceVariablesOffset, sizeof ivars);
+    if (ivars == nullptr) return;
+    uint32_t entry_size, count;
+    memcpy(&entry_size, ivars, sizeof entry_size);
+    memcpy(&count, ivars + sizeof entry_size, sizeof count);
+    for (uint32_t i = 0; i < count; ++i) {
+        char* offset_variable;
+        memcpy(&offset_variable, ivars + kIvarListHeaderSize + i * entry_size, sizeof offset_variable);
+        if (offset_variable != nullptr) add_to_u32(offset_variable, kRefcountWordSize);
+    }
+}
+
 extern "C" void rt_objc_msgSend();
 extern "C" void rt_objc_msgSendSuper2();
 
@@ -218,6 +263,17 @@ __asm__(
                             "")
     // x0 points at {receiver, class}; the method itself must see the receiver.
     OBJC_DISPATCH(rt_objc_msgSendSuper2, rt_objc_super_lookup, "", "  ldr x0, [x0]\n"));
+
+void objc_attach_image(const MachImage& image) {
+    const MachSection* list = image.section("__DATA_CONST", "__objc_classlist");
+    if (list == nullptr) list = image.section("__DATA", "__objc_classlist");
+    if (list == nullptr) return;
+    for (size_t offset = 0; offset + sizeof(void*) <= list->size; offset += sizeof(void*)) {
+        char* cls;
+        memcpy(&cls, reinterpret_cast<const char*>(list->address + offset), sizeof cls);
+        if (has_objc_root(cls)) slide_instance_variables(cls);
+    }
+}
 
 void* objc_runtime_symbol(std::string_view name) {
     if (name == "objc_msgSend") return reinterpret_cast<void*>(rt_objc_msgSend);

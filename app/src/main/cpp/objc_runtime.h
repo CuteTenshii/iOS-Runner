@@ -5,6 +5,9 @@
 // Objective-C message dispatch for the guest, and the framework classes implemented by this runtime.
 void* objc_runtime_symbol(std::string_view name);
 
+struct MachImage;
+void objc_attach_image(const MachImage& image);
+
 // Registers a framework method under its full name, for example "+[NSBundle mainBundle]".
 void objc_register_method(const char* description, const void* implementation);
 

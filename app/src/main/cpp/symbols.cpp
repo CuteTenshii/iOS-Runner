@@ -290,6 +290,7 @@ void runtime_attach_image(const MachImage& image) {
     g_reported_os = image.minimum_os;
     foundation_register_classes();
     coredata_register_classes();
+    objc_attach_image(image);
     coredata_attach_image(image);
     swiftui_attach_image(image);
 }
