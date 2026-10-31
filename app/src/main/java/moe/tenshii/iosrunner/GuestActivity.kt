@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.DialogInterface
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -54,6 +55,8 @@ class GuestActivity : Activity() {
     private val expanded = HashSet<String>()
     private val scrollPositions = HashMap<String, Int>()
     private var sheetDialog: Dialog? = null
+    private var alertDialog: AlertDialog? = null
+    private var alertNode: JSONObject? = null
     private val webViews = HashMap<Int, WebView>()
     private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
@@ -213,7 +216,7 @@ class GuestActivity : Activity() {
         }
         forEachChild(tree) { node ->
             when (node.optString("k")) {
-                "sheet" -> Unit
+                "sheet", "alert" -> Unit
                 // A top-level web view works behind the UI: its page still needs real layout to run.
                 "native" -> detachedWebView(node.optInt("w", -1))?.let { web ->
                     root.addView(web, FrameLayout.LayoutParams(dp(HIDDEN_WEB_WIDTH_DP), dp(HIDDEN_WEB_HEIGHT_DP)))
@@ -224,6 +227,91 @@ class GuestActivity : Activity() {
         root.addView(column, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         restoreScroll(root)
         showSheet(findSheet(tree))
+        showAlert(findAlert(tree))
+    }
+
+    private fun findAlert(nodes: JSONArray): JSONObject? {
+        for (i in 0 until nodes.length()) {
+            val node = nodes.getJSONObject(i)
+            if (node.optString("k") == "alert") return node
+            node.optJSONArray("c")?.let { children -> findAlert(children)?.let { return it } }
+        }
+        return null
+    }
+
+    private fun collectAlertParts(node: JSONObject, kind: String, into: MutableList<JSONObject>) {
+        children(node).forEach { child ->
+            if (child.optString("k") == kind) into.add(child)
+            else if (child.optString("k") != "button") collectAlertParts(child, kind, into)
+        }
+    }
+
+    private fun firstText(node: JSONObject): String {
+        if (node.optString("k") == "text") return node.optString("t")
+        return children(node).firstNotNullOfOrNull { firstText(it).ifEmpty { null } }.orEmpty()
+    }
+
+    private fun alertParts(kind: String): List<JSONObject> =
+        mutableListOf<JSONObject>().also { parts -> alertNode?.let { collectAlertParts(it, kind, parts) } }
+
+    // Runs a button of the alert being shown, looked up now because every redraw renumbers actions.
+    private fun pressAlertButton(index: Int, fields: List<EditText>) {
+        val current = alertNode ?: return
+        alertParts("field").forEachIndexed { i, field ->
+            fields.getOrNull(i)?.let { nativeTextInput(field.optInt("a", -1), it.text.toString()) }
+        }
+        alertParts("button").getOrNull(index)?.let { nativeAction(it.optInt("a", -1)) }
+        nativeAction(current.optInt("d", -1))
+        alertDialog = null
+        alertNode = null
+    }
+
+    // An open dialog stays up across redraws, so typing in it isn't interrupted.
+    private fun showAlert(alert: JSONObject?) {
+        if (alert == null) {
+            alertDialog?.setOnCancelListener(null)
+            alertDialog?.dismiss()
+            alertDialog = null
+            alertNode = null
+            return
+        }
+        val sameDialog = alertDialog != null && alertNode?.optString("t") == alert.optString("t")
+        alertNode = alert
+        if (sameDialog) return
+        alertDialog?.setOnCancelListener(null)
+        alertDialog?.dismiss()
+
+        val message = alertParts("text").joinToString("\n") { it.optString("t") }
+        val fields = alertParts("field").map { field ->
+            EditText(this).apply {
+                hint = field.optString("t")
+                setText(field.optString("v"))
+                inputType = if (field.optBoolean("secure")) {
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                } else {
+                    InputType.TYPE_CLASS_TEXT
+                }
+                isSingleLine = true
+            }
+        }
+        val buttons = alertParts("button")
+        val builder = AlertDialog.Builder(this).setTitle(alert.optString("t"))
+        if (message.isNotEmpty()) builder.setMessage(message)
+        if (fields.isNotEmpty()) {
+            builder.setView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(24), dp(8), dp(24), 0)
+                fields.forEach { addView(it) }
+            })
+        }
+        // A dialog has three button slots: the last action confirms and the first dismisses, as on iOS.
+        val press = { index: Int -> { _: DialogInterface, _: Int -> pressAlertButton(index, fields) } }
+        buttons.lastOrNull()?.let { builder.setPositiveButton(firstText(it), press(buttons.lastIndex)) }
+        if (buttons.size > 1) builder.setNegativeButton(firstText(buttons[0]), press(0))
+        if (buttons.size > 2) builder.setNeutralButton(firstText(buttons[1]), press(1))
+        if (buttons.isEmpty()) builder.setPositiveButton(android.R.string.ok) { _, _ -> pressAlertButton(-1, fields) }
+        builder.setOnCancelListener { pressAlertButton(-1, emptyList()) }
+        alertDialog = builder.show()
     }
 
     private fun findSheet(nodes: JSONArray): JSONObject? {
@@ -288,7 +376,7 @@ class GuestActivity : Activity() {
     }
 
     private fun buildChildren(node: JSONObject, parent: ViewGroup, path: String) {
-        children(node).forEachIndexed { index, child -> if (child.optString("k") != "sheet") build(child, parent, "$path/$index") }
+        children(node).forEachIndexed { index, child -> if (child.optString("k") != "sheet" && child.optString("k") != "alert") build(child, parent, "$path/$index") }
     }
 
     private fun buildTabs(node: JSONObject, parent: ViewGroup, path: String) {

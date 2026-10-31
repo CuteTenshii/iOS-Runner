@@ -2230,12 +2230,12 @@ Nodes render_node(ViewNode* node, const std::string& path, int depth) {
             bool presented = false;
             binding_read(node->binding, &presented, bool_metadata());
             if (!presented) return children;
-            Nodes body = {tree_node("text", {{"t", json_text(*node->title)}, {"font", json_text("body")}, {"bold", json_flag(true)}})};
+            Nodes body;
             for (size_t i = node->children->size(); i-- > 1;) {
                 append_nodes(body, render((*node->children)[i].value, (*node->children)[i].type, path + "/alert" + std::to_string(i), depth + 1));
             }
             const int action = add_action({ActionKind::SetValue, nullptr, nullptr, node->binding, new bool(false), bool_metadata(), 0, {}});
-            children.push_back(tree_node("sheet", {{"d", json_number(action)}}, {tree_node("list", {}, std::move(body))}));
+            children.push_back(tree_node("alert", {{"d", json_number(action)}, {"t", json_text(*node->title)}}, std::move(body)));
             return children;
         }
         case NodeKind::TabView:

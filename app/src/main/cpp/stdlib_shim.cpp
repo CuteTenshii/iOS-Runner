@@ -1006,6 +1006,24 @@ SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWI
     *self = swift_string_from_utf8(text);
 }
 
+// Hashable's dispatch thunk: framework values hash by what they hold, and the app's types by their own witness.
+SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_SELF const void* self) {
+    if (type == type_system_symbol("$sSSN")) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(swift_string_to_utf8(*static_cast<const SwiftString*>(self))));
+    const char* name = foreign_type_name(type);
+    if (name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(foundation_url_text(*static_cast<void* const*>(self))));
+    if (const auto* witnesses = witnesses_of(type); name != nullptr || (witnesses->flags & kFlagNonPod) == 0) {
+        const std::string bytes(static_cast<const char*>(self), witnesses->size);
+        return seed ^ static_cast<int64_t>(std::hash<std::string>{}(bytes));
+    }
+    using RawHash = SWIFTCC int64_t (*)(int64_t, void*, void*, SWIFT_SELF const void*);
+    const auto raw = reinterpret_cast<RawHash>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSH13_rawHashValue4seedS2i_tFTq")));
+    if (raw == nullptr) {
+        engine_log("STOP: hash of a type with no witness");
+        abort();
+    }
+    return raw(seed, type, table, self);
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_SELF const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -1047,6 +1065,7 @@ void* stdlib_symbol(std::string_view name) {
         {"$sSo13os_log_type_ta0A0E7defaultABvgZ", reinterpret_cast<void*>(log_type_getter<0x00>)},
         {"$sSo13os_log_type_ta0A0E5faultABvgZ", reinterpret_cast<void*>(log_type_getter<0x11>)},
         {"$sSS6append10contentsOfyx_tSTRzSJ7ElementRtzlF", reinterpret_cast<void*>(string_append_sequence)},
+        {"$sSH13_rawHashValue4seedS2i_tFTj", reinterpret_cast<void*>(hashable_raw_value)},
         {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
         {"$sSS10describingSSx_tclufC", reinterpret_cast<void*>(string_describing)},
         {"$sSS7cStringSSSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},
