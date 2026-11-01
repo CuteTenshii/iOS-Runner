@@ -430,10 +430,27 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
 // A framework OptionSet is its raw value, whatever the type's witness table says.
 SWIFTCC void option_set_init(SWIFT_OUT void* out, const void* raw, void* type, void*) { memcpy(out, raw, witnesses_of(type)->size); }
 
-// SetAlgebra(sequence): the only framework values built this way are detents and flags, which nothing reads back.
-SWIFTCC void set_algebra_from_sequence(SWIFT_OUT void* out, void*, void* type, void*, void*, void*) {
+// SetAlgebra(sequence): most framework values built this way are detents and flags that nothing reads back.
+// JSONEncoder does read its formatting, whose array literal arrives here as the sequence.
+SWIFTCC void set_algebra_from_sequence(SWIFT_OUT void* out, const void* sequence, void* type, void*, void*, void*) {
     const size_t size = witnesses_of(type)->size;
     memset(out, 0, size);
+    const char* name = foreign_type_name(type);
+    if (name != nullptr && strcmp(name, "_$s10Foundation11JSONEncoderC16OutputFormattingVMn") == 0) {
+        constexpr size_t kCountOffset = 16, kElementsOffset = 32;
+        const char* storage;
+        memcpy(&storage, sequence, sizeof storage);
+        int64_t count;
+        memcpy(&count, storage + kCountOffset, sizeof count);
+        uint64_t combined = 0;
+        for (int64_t i = 0; i < count; ++i) {
+            uint64_t flag;
+            memcpy(&flag, storage + kElementsOffset + static_cast<size_t>(i) * sizeof flag, sizeof flag);
+            combined |= flag;
+        }
+        memcpy(out, &combined, sizeof combined);
+        return;
+    }
     if (foreign_type_name(type) == nullptr && size == sizeof(void*)) {
         void* empty = resolve_symbol("_swiftEmptySetSingleton");
         memcpy(out, &empty, sizeof empty);

@@ -2,6 +2,9 @@
 
 #include "base64.h"
 
+#include <vector>
+#include <utility>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -241,7 +244,19 @@ void write_string(const std::string& text, std::string& out) {
     out += '"';
 }
 
-void write_value(const Json& value, std::string& out) {
+void write_line_break(std::string& out, const JsonWriteOptions& options, size_t depth) {
+    if (!options.pretty) return;
+    out += '\n';
+    out.append(depth * 2, ' ');
+}
+
+// JSONEncoder puts an empty line inside an empty container.
+void write_closing_line_break(std::string& out, const JsonWriteOptions& options, size_t depth, bool empty) {
+    if (empty && options.pretty) out += '\n';
+    write_line_break(out, options, depth);
+}
+
+void write_value(const Json& value, std::string& out, const JsonWriteOptions& options, size_t depth) {
     switch (value.kind) {
         case Json::Kind::Null:
             out += "null";
@@ -275,19 +290,26 @@ void write_value(const Json& value, std::string& out) {
             out += '[';
             for (size_t i = 0; i < value.items.size(); ++i) {
                 if (i != 0) out += ',';
-                write_value(value.items[i], out);
+                write_line_break(out, options, depth + 1);
+                write_value(value.items[i], out, options, depth + 1);
             }
+            write_closing_line_break(out, options, depth, value.items.empty());
             out += ']';
             break;
         }
         case Json::Kind::Object: {
+            std::vector<const std::pair<std::string, Json>*> members;
+            for (const auto& member : value.members) members.push_back(&member);
+            if (options.sorted_keys) std::stable_sort(members.begin(), members.end(), [](const auto* a, const auto* b) { return a->first < b->first; });
             out += '{';
-            for (size_t i = 0; i < value.members.size(); ++i) {
+            for (size_t i = 0; i < members.size(); ++i) {
                 if (i != 0) out += ',';
-                write_string(value.members[i].first, out);
-                out += ':';
-                write_value(value.members[i].second, out);
+                write_line_break(out, options, depth + 1);
+                write_string(members[i]->first, out);
+                out += options.pretty ? " : " : ":";
+                write_value(members[i]->second, out, options, depth + 1);
             }
+            write_closing_line_break(out, options, depth, members.empty());
             out += '}';
             break;
         }
@@ -310,8 +332,8 @@ bool json_parse(const std::string& source, Json& out) {
     return parser.cursor == source.size();
 }
 
-std::string json_write(const Json& value) {
+std::string json_write(const Json& value, const JsonWriteOptions& options) {
     std::string out;
-    write_value(value, out);
+    write_value(value, out, options, 0);
     return out;
 }

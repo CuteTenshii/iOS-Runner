@@ -266,6 +266,7 @@ constexpr FrozenField kSecondArgument = {0, 0, 1, false};
 // SwiftUI's @frozen types, from its public interface: the app's compiled code writes these fields inline.
 const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_layouts() {
     static const std::unordered_map<std::string_view, std::vector<FrozenField>> table = {
+        {"_$s10Foundation11JSONEncoderC16OutputFormattingVMn", {kWord}},
         {"_$s7SwiftUI15ModifiedContentVMn", {kFirstArgument, kSecondArgument}},
         {"_$s7SwiftUI7BindingVMn", {kWord, kReference, kFirstArgument}},
         {"_$s7SwiftUI4TextVMn", {kWord, kReference, kWord, kReference}},

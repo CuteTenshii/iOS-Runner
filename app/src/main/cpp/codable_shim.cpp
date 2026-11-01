@@ -323,10 +323,18 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
     encode(&coder, type, table, value, error);
 }
 
-// JSONDecoder and JSONEncoder hold no state this runtime honours, so one plain object serves as both.
+// One plain object serves every coder, and only JSONEncoder's formatting is honoured.
+struct CoderObject {
+    void* metadata;
+    uint64_t references;
+    uint64_t output_formatting;
+};
+
+constexpr uint64_t kFormattingPretty = 1, kFormattingSortedKeys = 2, kFormattingWithoutEscapingSlashes = 8;
+
 void* coder_class_metadata() {
     static void* block[12] = {};
-    return sized_class_metadata(block, reinterpret_cast<void*>(free), 16);
+    return sized_class_metadata(block, reinterpret_cast<void*>(free), sizeof(CoderObject));
 }
 
 struct MetadataResponse {
@@ -335,7 +343,15 @@ struct MetadataResponse {
 };
 
 SWIFTCC MetadataResponse coder_access(size_t) { return {coder_class_metadata(), 0}; }
-SWIFTCC void* coder_init(SWIFT_CONTEXT void* self) { return self; }
+SWIFTCC void* coder_init(SWIFT_CONTEXT void* self) {
+    static_cast<CoderObject*>(self)->output_formatting = 0;
+    return self;
+}
+
+SWIFTCC void formatting_pretty(SWIFT_OUT uint64_t* out) { *out = kFormattingPretty; }
+SWIFTCC void formatting_sorted_keys(SWIFT_OUT uint64_t* out) { *out = kFormattingSortedKeys; }
+SWIFTCC void formatting_without_escaping_slashes(SWIFT_OUT uint64_t* out) { *out = kFormattingWithoutEscapingSlashes; }
+SWIFTCC void encoder_set_formatting(const uint64_t* value, SWIFT_CONTEXT void* self) { static_cast<CoderObject*>(self)->output_formatting = *value; }
 
 SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
     auto* root = new Json;
@@ -348,11 +364,12 @@ SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uin
     delete root;
 }
 
-SWIFTCC FoundationData json_encoder_encode(const void* value, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+SWIFTCC FoundationData json_encoder_encode(const void* value, void* type, void*, SWIFT_CONTEXT void* self, SWIFT_ERROR void** error) {
     Json root;
     encode_value(type, value, root, error);
     if (*error != nullptr) return foundation_make_data("");
-    return foundation_make_data(json_write(root));
+    const uint64_t formatting = static_cast<CoderObject*>(self)->output_formatting;
+    return foundation_make_data(json_write(root, {(formatting & kFormattingPretty) != 0, (formatting & kFormattingSortedKeys) != 0}));
 }
 
 bool convert_bridged_collection(void* value, void* key_type, void* element_type, Json& out) {
@@ -672,6 +689,10 @@ void* codable_symbol(std::string_view name) {
         {"$s10Foundation11JSONEncoderCACycfc", reinterpret_cast<void*>(coder_init)},
         {"$s10Foundation11JSONDecoderC6decode_4fromxxm_AA4DataVtKSeRzlFTj", reinterpret_cast<void*>(json_decoder_decode)},
         {"$s10Foundation11JSONEncoderC6encodeyAA4DataVxKSERzlFTj", reinterpret_cast<void*>(json_encoder_encode)},
+        {"$s10Foundation11JSONEncoderC16OutputFormattingV13prettyPrintedAEvgZ", reinterpret_cast<void*>(formatting_pretty)},
+        {"$s10Foundation11JSONEncoderC16OutputFormattingV10sortedKeysAEvgZ", reinterpret_cast<void*>(formatting_sorted_keys)},
+        {"$s10Foundation11JSONEncoderC16OutputFormattingV22withoutEscapingSlashesAEvgZ", reinterpret_cast<void*>(formatting_without_escaping_slashes)},
+        {"$s10Foundation11JSONEncoderC16outputFormattingAC06OutputD0VvsTj", reinterpret_cast<void*>(encoder_set_formatting)},
         {"$s10Foundation19PropertyListDecoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListEncoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListDecoderCACycfc", reinterpret_cast<void*>(coder_init)},

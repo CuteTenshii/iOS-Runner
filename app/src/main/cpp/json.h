@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <utility>
 #include <vector>
 
 // A parsed JSON value. Object members keep their source order.
@@ -35,4 +36,9 @@ inline Json json_text(const std::string& text) {
 
 // Returns false on malformed input, which includes anything after the first value.
 bool json_parse(const std::string& source, Json& out);
-std::string json_write(const Json& value);
+struct JsonWriteOptions {
+    bool pretty = false;
+    bool sorted_keys = false;
+};
+
+std::string json_write(const Json& value, const JsonWriteOptions& options = {});
