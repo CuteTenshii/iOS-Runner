@@ -486,6 +486,8 @@ SWIFTCC void decoder_set_date_strategy(void** strategy, SWIFT_CONTEXT void* self
 }
 
 // Same representation as the String it wraps, so dictionaries keyed by it hash and compare as strings.
+SWIFTCC MetadataResponse coding_user_info_key_access(size_t) { return {type_system_symbol("$sSSN"), 0}; }
+
 SWIFTCC void coding_user_info_key_init(SWIFT_OUT SwiftString* out, SwiftString raw_value) { *out = raw_value; }
 
 SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
@@ -776,6 +778,7 @@ void* codable_symbol(std::string_view name) {
         {"$s10Foundation11JSONEncoderC8userInfoSDys010CodingUserD3KeyVypGvMTj", reinterpret_cast<void*>(coder_modify_user_info)},
         {"$s10Foundation11JSONDecoderC20dateDecodingStrategyAC04DatedE0OvsTj", reinterpret_cast<void*>(decoder_set_date_strategy)},
         {"$ss17CodingUserInfoKeyV8rawValueABSgSS_tcfC", reinterpret_cast<void*>(coding_user_info_key_init)},
+        {"$ss17CodingUserInfoKeyVMa", reinterpret_cast<void*>(coding_user_info_key_access)},
         {"$s10Foundation19PropertyListDecoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListEncoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListDecoderCACycfc", reinterpret_cast<void*>(coder_init)},
