@@ -8,6 +8,8 @@ void* type_system_symbol(std::string_view name);
 
 // Names the framework type behind runtime metadata, or nullptr for a type defined by the app.
 const char* foreign_type_name(const void* metadata);
+// The Objective-C class a type reached through a mangled name stands for, or null.
+const char* imported_class_name(const void* metadata);
 
 // The metadata of `any Error`.
 void* error_existential_type();

@@ -116,6 +116,9 @@ Metadata* bridge_type(const std::string& key, const std::vector<void*>& argument
 Metadata* word_type();
 Metadata* bridge_word_type();
 Metadata* native_type();
+// A reference like native_type(), which remembers its class so that casts to it can check.
+Metadata* imported_class_type(const std::string& name);
+const char* imported_class_of(const void* metadata);
 Metadata* two_word_type(const std::string& key, Metadata* first, Metadata* second);
 Metadata* string_type();
 Metadata* thick_function_type();

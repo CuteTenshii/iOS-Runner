@@ -87,6 +87,22 @@ Metadata* native_type() {
     return named_type("Bo", kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants);
 }
 
+static std::unordered_map<const void*, const char*>& imported_classes() {
+    static std::unordered_map<const void*, const char*> table;
+    return table;
+}
+
+Metadata* imported_class_type(const std::string& name) {
+    Metadata* metadata = named_type("So" + name + "C", kKindStruct, new Layout{LayoutKind::NativeReference, {}, nullptr}, kPointerSize, kPointerSize, kPointerExtraInhabitants);
+    if (imported_classes().find(metadata) == imported_classes().end()) imported_classes()[metadata] = strdup(name.c_str());
+    return metadata;
+}
+
+const char* imported_class_of(const void* metadata) {
+    const auto found = imported_classes().find(metadata);
+    return found == imported_classes().end() ? nullptr : found->second;
+}
+
 Metadata* two_word_type(const std::string& key, Metadata* first, Metadata* second) {
     return named_type(key, kKindStruct, new Layout{LayoutKind::Aggregate, {{first, 0}, {second, kPointerSize}}, nullptr},
                       2 * kPointerSize, kPointerSize, witnesses_of(first)->extra_inhabitants + witnesses_of(second)->extra_inhabitants);

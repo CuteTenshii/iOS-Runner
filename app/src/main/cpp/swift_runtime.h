@@ -15,6 +15,8 @@ void* swift_runtime_witness_table(const char* conformance, void* type, void* arg
 
 // Finds the witness table of `type` for a protocol: from the app's conformance list, else a framework table.
 void* swift_runtime_find_conformance(void* type, const void* protocol);
+// What swift_conformsToProtocol answers: null if a type the app defines does not conform.
+void* swift_runtime_conforms_to(void* type, const void* protocol);
 
 // Gives the runtime the app's conformance list.
 void swift_runtime_attach_conformances(const void* section, size_t size);

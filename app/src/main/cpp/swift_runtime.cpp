@@ -1,4 +1,5 @@
 #include "swift_runtime.h"
+#include "objc_runtime.h"
 
 #include <pthread.h>
 
@@ -538,7 +539,7 @@ void swift_runtime_attach_conformances(const void* section, size_t size) {
     g_conformance_sections.emplace_back(static_cast<const char*>(section), size);
 }
 
-void* swift_runtime_find_conformance(void* type, const void* protocol) {
+static void* declared_conformance(void* type, const void* protocol) {
     const auto wanted = reinterpret_cast<uintptr_t>(protocol) & ~kProtocolPointerTagMask;
     // Below this a metadata's first word is its kind; above it, a class's isa pointer.
     constexpr uintptr_t kLastMetadataKind = 0x7ff;
@@ -566,8 +567,25 @@ void* swift_runtime_find_conformance(void* type, const void* protocol) {
             if (conforming == descriptor || same_import) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
         }
     }
+    return nullptr;
+}
+
+void* swift_runtime_find_conformance(void* type, const void* protocol) {
+    if (void* table = declared_conformance(type, protocol)) return table;
     // A framework type's conformance only needs to be distinct; thunks and the walker supply its behaviour.
     return rt_swift_getWitnessTable(static_cast<const char*>(protocol), type, nullptr);
+}
+
+void* swift_runtime_conforms_to(void* type, const void* protocol) {
+    constexpr uintptr_t kLastMetadataKind = 0x7ff;
+    constexpr size_t kSuperclassWord = 1;
+    if (foreign_type_name(type) != nullptr) return swift_runtime_find_conformance(type, protocol);
+    if (reinterpret_cast<uintptr_t>(static_cast<void**>(type)[0]) <= kLastMetadataKind) return declared_conformance(type, protocol);
+    // A class inherits its ancestors' conformances, up to the first class this image doesn't define.
+    for (void* cls = type; cls != nullptr && unresolved_symbol_at(reinterpret_cast<uintptr_t>(cls)) == nullptr && objc_framework_class_name(cls).empty(); cls = static_cast<void**>(cls)[kSuperclassWord]) {
+        if (void* table = declared_conformance(cls, protocol)) return table;
+    }
+    return nullptr;
 }
 
 void* swift_runtime_placeholder_conformance(const void* protocol) {

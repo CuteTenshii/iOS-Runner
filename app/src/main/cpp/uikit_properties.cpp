@@ -227,7 +227,9 @@ std::vector<void*> object_array_items(void* array) {
     return *static_cast<foundation::NSArrayObject*>(array)->items;
 }
 
-bool object_is_kind(void* object, const char* framework_class) {
+}  // namespace uikit
+
+bool uikit_class_inherits(const std::string& framework_class, const std::string& ancestor) {
     static const std::map<std::string, std::string> kParents = {
         {"UIAlertController", "UIViewController"},
         {"UITabBarController", "UIViewController"},
@@ -249,16 +251,22 @@ bool object_is_kind(void* object, const char* framework_class) {
         {"UITableViewCell", "UIView"},
         {"UICollectionReusableView", "UIView"},
         {"UICollectionViewCell", "UICollectionReusableView"},
+        {"UICollectionViewListCell", "UICollectionViewCell"},
     };
-    std::string name = objc_framework_root_of(object);
+    if (ancestor == "NSObject") return true;
+    std::string name = framework_class;
     while (!name.empty()) {
-        if (name == framework_class) return true;
+        if (name == ancestor) return true;
         const auto parent = kParents.find(name);
         if (parent == kParents.end()) return false;
         name = parent->second;
     }
     return false;
 }
+
+namespace uikit {
+
+bool object_is_kind(void* object, const char* framework_class) { return uikit_class_inherits(objc_framework_root_of(object), framework_class); }
 
 void property_set_word(void* object, const std::string& key, int64_t value) {
     const std::lock_guard guard(property_lock());
@@ -298,6 +306,7 @@ void uikit_register_classes() {
     uikit::register_property_fallback();
     uikit::register_nib_classes();
     uikit::register_view_classes();
+    uikit::register_collection_classes();
     register_device_classes();
 }
 
@@ -309,6 +318,7 @@ void* uikit_symbol(std::string_view name) {
         uikit::SymbolMap all;
         uikit::add_app_symbols(all);
         uikit::add_constant_symbols(all);
+        uikit::add_collection_symbols(all);
         return all;
     }();
     const auto found = table.find(name);

@@ -157,6 +157,11 @@ const char* foreign_type_name(const void* metadata) {
     return found == g_foreign_names.end() ? nullptr : found->second;
 }
 
+const char* imported_class_name(const void* metadata) {
+    const std::lock_guard guard(g_types_lock);
+    return imported_class_of(metadata);
+}
+
 void* resolve_mangled_type(const char* name, void* const* generics) {
     const size_t length = mangled_name_length(name);
     return rt_getTypeByMangledNameInContext2(name, length, nullptr, generics);

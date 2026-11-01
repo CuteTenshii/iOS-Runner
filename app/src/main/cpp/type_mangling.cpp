@@ -328,7 +328,7 @@ private:
         }
         Node base = pop();
         // Objective-C generics are erased: NSFetchRequest<T> is just a reference to the class.
-        if (base.tag == Node::Tag::Type && base.type == native_type()) {
+        if (base.tag == Node::Tag::Type && (base.type == native_type() || imported_class_name(base.type) != nullptr)) {
             stack_.push_back(base);
             substitute(base);
             return;
@@ -494,13 +494,13 @@ private:
         // A tuple element's label: no effect on layout, but as an identifier it takes a substitution slot.
         if (code >= '1' && code <= '9') {
             --cursor_;
-            cursor_ += read_natural();
+            read_literal_identifier();
             substitute(Node{});
             return;
         }
         // The same, spelled with words from earlier identifiers.
         if (code == '0') {
-            skip_word_substituted_identifier();
+            read_word_substituted_identifier();
             if (failure_.empty()) substitute(Node{});
             return;
         }
@@ -610,30 +610,65 @@ private:
         }
     }
 
-    // After its leading 0: lowercase letters are earlier words, an uppercase one the last word, and literals sit
-    // between them. A literal after the last word ends it, and otherwise a 0 does. Only the extent matters here.
-    void skip_word_substituted_identifier() {
+    // Each identifier's literal text adds words that later identifiers can refer back to, as swiftc numbers them.
+    void remember_words(const char* text, size_t length) {
+        constexpr size_t kMaxWords = 26, kMinWordLength = 2;
+        int64_t start = -1;
+        char previous = 0;
+        for (size_t position = 0; position <= length; ++position) {
+            const char current = position < length ? text[position] : '\0';
+            const bool ends = current == '_' || current == '\0' || (isupper(static_cast<unsigned char>(previous)) == 0 && isupper(static_cast<unsigned char>(current)) != 0);
+            if (start >= 0 && ends) {
+                const size_t word_length = position - static_cast<size_t>(start);
+                if (word_length >= kMinWordLength && words_.size() < kMaxWords) words_.emplace_back(text + start, word_length);
+                start = -1;
+            }
+            if (start < 0 && current != '\0' && current != '_' && isdigit(static_cast<unsigned char>(current)) == 0) start = static_cast<int64_t>(position);
+            previous = current;
+        }
+    }
+
+    std::string read_literal_identifier() {
+        const uint64_t length = read_natural();
+        if (static_cast<uint64_t>(end_ - cursor_) < length) {
+            fail("truncated identifier");
+            return {};
+        }
+        std::string text(cursor_, length);
+        remember_words(cursor_, length);
+        cursor_ += length;
+        return text;
+    }
+
+    // After its leading 0: lowercase letters are earlier words, an uppercase one the last word, and literals
+    // between them. A literal after the last word ends it, and otherwise a 0 does.
+    std::string read_word_substituted_identifier() {
+        std::string text;
         bool more_words = true;
         while (more_words) {
             while (more_words && cursor_ < end_ && isalpha(static_cast<unsigned char>(*cursor_))) {
-                if (isupper(static_cast<unsigned char>(*cursor_)) != 0) more_words = false;
-                ++cursor_;
+                const char letter = *cursor_++;
+                const bool last = isupper(static_cast<unsigned char>(letter)) != 0;
+                const size_t word = static_cast<size_t>(letter - (last ? 'A' : 'a'));
+                if (word >= words_.size()) {
+                    fail("word substitution out of range");
+                    return text;
+                }
+                text += words_[word];
+                if (last) more_words = false;
             }
             if (cursor_ < end_ && *cursor_ == '0') {
                 ++cursor_;
-                return;
+                return text;
             }
             if (cursor_ >= end_ || isdigit(static_cast<unsigned char>(*cursor_)) == 0) {
                 fail("malformed word-substituted identifier");
-                return;
+                return text;
             }
-            const uint64_t length = read_natural();
-            if (static_cast<uint64_t>(end_ - cursor_) < length) {
-                fail("truncated identifier");
-                return;
-            }
-            cursor_ += length;
+            text += read_literal_identifier();
+            if (!failure_.empty()) return text;
         }
+        return text;
     }
 
     // An imported C or Objective-C type named inline: classes and protocols are references, enums are tag words.
@@ -641,24 +676,20 @@ private:
         std::string name;
         if (cursor_ < end_ && *cursor_ == '0') {
             ++cursor_;
-            skip_word_substituted_identifier();
-            if (!failure_.empty()) return;
+            name = read_word_substituted_identifier();
         } else {
-            const uint64_t length = read_natural();
-            if (static_cast<uint64_t>(end_ - cursor_) < length + 1) {
-                fail("truncated imported type");
-                return;
-            }
-            name.assign(cursor_, length);
-            cursor_ += length;
+            name = read_literal_identifier();
         }
+        if (!failure_.empty()) return;
         if (cursor_ >= end_) {
             fail("truncated imported type");
             return;
         }
         const char kind = *cursor_++;
         Node node;
-        if (kind == 'C' || kind == 'a') {
+        if (kind == 'C') {
+            node.type = imported_class_type(name);
+        } else if (kind == 'a') {
             node.type = native_type();
         } else if (kind == 'O') {
             node.type = pod_type("So" + name, kPointerSize);
@@ -808,6 +839,7 @@ private:
     void* const* generics_;
     std::vector<Node> stack_;
     std::vector<Node> substitutions_;
+    std::vector<std::string> words_;
     std::string failure_;
     std::vector<uint64_t> depth_bases_;
     const void* context_for_requirements_ = nullptr;

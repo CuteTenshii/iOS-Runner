@@ -1,5 +1,6 @@
 #include "stdlib_internal.h"
 #include "symbols.h"
+#include "uikit_shim.h"
 
 using namespace stdlib;
 
@@ -639,6 +640,10 @@ void* dynamic_cast_class_unconditional(void* object, const void* target, const c
     return result;
 }
 
+    const char* imported = imported_class_name(target);
+    if (imported != nullptr) {
+        if (const void* named = objc_class_named(imported)) target = named;
+    }
 const void* dynamic_cast_metatype(const void* type, const void* target) { return class_inherits(type, target) ? type : nullptr; }
 
 void* identity_cast(void* object) { return object; }
@@ -857,7 +862,7 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"swift_willThrowTypedImpl", reinterpret_cast<void*>(+[](void*, void*, void*) {})},
         {"swift_deallocPartialClassInstance", reinterpret_cast<void*>(+[](void* object, void*, size_t, size_t) { free(object); })},
         {"swift_coroFrameAlloc", reinterpret_cast<void*>(+[](size_t size, uint64_t) { return malloc(size); })},
-        {"swift_conformsToProtocol", reinterpret_cast<void*>(+[](void* type, const void* protocol) { return swift_runtime_find_conformance(type, protocol); })},
+        {"swift_conformsToProtocol", reinterpret_cast<void*>(swift_runtime_conforms_to)},
         {"swift_isUniquelyReferencedNonObjC_nonNull", reinterpret_cast<void*>(is_uniquely_referenced)},
         {"swift_release_n", reinterpret_cast<void*>(release_n)},
         {"swift_unknownObjectRelease_n", reinterpret_cast<void*>(release_n)},
