@@ -500,38 +500,43 @@ uint64_t* empty_array_singleton() { return g_empty_array; }
 
 namespace {
 
-const char* g_conformance_section = nullptr;
-size_t g_conformance_section_size = 0;
+const uint64_t kSwiftIsaMask = 0x00007ffffffffff8ULL;
+std::vector<std::pair<const char*, size_t>> g_conformance_sections;
 constexpr uintptr_t kProtocolPointerTagMask = 3;
 
 }  // namespace
 
 void swift_runtime_attach_conformances(const void* section, size_t size) {
-    g_conformance_section = static_cast<const char*>(section);
-    g_conformance_section_size = size;
+    g_conformance_sections.emplace_back(static_cast<const char*>(section), size);
 }
 
 void* swift_runtime_find_conformance(void* type, const void* protocol) {
     const auto wanted = reinterpret_cast<uintptr_t>(protocol) & ~kProtocolPointerTagMask;
-    const void* descriptor = static_cast<void**>(type)[kMetadataDescriptorWord];
+    // Below this a metadata's first word is its kind; above it, a class's isa pointer.
+    constexpr uintptr_t kLastMetadataKind = 0x7ff;
+    constexpr size_t kClassDescriptionWordIndex = 8;
+    const bool is_class = reinterpret_cast<uintptr_t>(static_cast<void**>(type)[0]) > kLastMetadataKind;
+    const void* descriptor = static_cast<void**>(type)[is_class ? kClassDescriptionWordIndex : kMetadataDescriptorWord];
     // A framework type the app extends has no descriptor here, so its import's name identifies it.
     const char* foreign_name = foreign_type_name(type);
-    for (size_t i = 0; i + sizeof(int32_t) <= g_conformance_section_size; i += sizeof(int32_t)) {
-        const auto* conformance = static_cast<const char*>(relative_direct(g_conformance_section + i));
-        if ((reinterpret_cast<uintptr_t>(relative_indirectable(conformance)) & ~kProtocolPointerTagMask) != wanted) continue;
-        uint32_t flags;
-        memcpy(&flags, conformance + 12, sizeof flags);
-        const void* conforming;
-        if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
-            int32_t offset;
-            memcpy(&offset, conformance + kConformanceTypeOffset, sizeof offset);
-            memcpy(&conforming, conformance + kConformanceTypeOffset + offset, sizeof conforming);
-        } else {
-            conforming = relative_direct(conformance + kConformanceTypeOffset);
+    for (const auto& [section, section_size] : g_conformance_sections) {
+        for (size_t i = 0; i + sizeof(int32_t) <= section_size; i += sizeof(int32_t)) {
+            const auto* conformance = static_cast<const char*>(relative_direct(section + i));
+            if ((reinterpret_cast<uintptr_t>(relative_indirectable(conformance)) & ~kProtocolPointerTagMask) != wanted) continue;
+            uint32_t flags;
+            memcpy(&flags, conformance + 12, sizeof flags);
+            const void* conforming;
+            if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
+                int32_t offset;
+                memcpy(&offset, conformance + kConformanceTypeOffset, sizeof offset);
+                memcpy(&conforming, conformance + kConformanceTypeOffset + offset, sizeof conforming);
+            } else {
+                conforming = relative_direct(conformance + kConformanceTypeOffset);
+            }
+            const char* conforming_name = foreign_name != nullptr ? unresolved_symbol_at(reinterpret_cast<uintptr_t>(conforming)) : nullptr;
+            const bool same_import = conforming_name != nullptr && strcmp(conforming_name, foreign_name) == 0;
+            if (conforming == descriptor || same_import) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
         }
-        const char* conforming_name = foreign_name != nullptr ? unresolved_symbol_at(reinterpret_cast<uintptr_t>(conforming)) : nullptr;
-        const bool same_import = conforming_name != nullptr && strcmp(conforming_name, foreign_name) == 0;
-        if (conforming == descriptor || same_import) return rt_swift_getWitnessTable(conformance, type, static_cast<void**>(type) + kMetadataArgumentsWord);
     }
     // A framework type's conformance only needs to be distinct; thunks and the walker supply its behaviour.
     return rt_swift_getWitnessTable(static_cast<const char*>(protocol), type, nullptr);
@@ -719,6 +724,7 @@ void* swift_runtime_symbol(std::string_view name) {
         SYM("_swiftEmptyArrayStorage", g_empty_array),
         SYM("_swiftEmptyDictionarySingleton", g_empty_dictionary),
         SYM("_swiftEmptySetSingleton", g_empty_set),
+        SYM("swift_isaMask", const_cast<uint64_t*>(&kSwiftIsaMask)),
         {"$sytWV", const_cast<ValueWitnessTable*>(&kEmptyWitnesses)},
         {"$syycWV", const_cast<ValueWitnessTable*>(&kClosureWitnesses)},
         {"$sBi8_WV", const_cast<ValueWitnessTable*>(&kInt8Witnesses)},

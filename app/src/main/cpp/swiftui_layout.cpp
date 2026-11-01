@@ -126,25 +126,24 @@ const void* indirectable_pointer(const char* field) {
 // Finds an app type's conformance to a framework protocol in the app's own conformance list.
 const char* find_conformance(const void* type, const char* protocol_symbol) {
     const void* descriptor = static_cast<void* const*>(type)[kMetadataDescriptorWord];
-    const MachSection* section = g_view_conformances;
-    if (section == nullptr) return nullptr;
-    for (size_t i = 0; i + sizeof(int32_t) <= section->size; i += sizeof(int32_t)) {
-        const auto* conformance = static_cast<const char*>(relative_pointer(reinterpret_cast<const char*>(section->address + i)));
-        const char* protocol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(indirectable_pointer(conformance)));
-        if (protocol == nullptr || strcmp(protocol, protocol_symbol) != 0) continue;
-        uint32_t flags;
-        memcpy(&flags, conformance + kConformanceFlagsOffset, sizeof flags);
-        const void* conforming;
-        if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
-            conforming = indirectable_pointer(conformance + kConformanceTypeOffset);
-            const char* raw = conformance + kConformanceTypeOffset;
-            int32_t offset;
-            memcpy(&offset, raw, sizeof offset);
-            conforming = *reinterpret_cast<const void* const*>(raw + offset);
-        } else {
-            conforming = relative_pointer(conformance + kConformanceTypeOffset);
+    for (const MachSection* section : g_view_conformances) {
+        for (size_t i = 0; i + sizeof(int32_t) <= section->size; i += sizeof(int32_t)) {
+            const auto* conformance = static_cast<const char*>(relative_pointer(reinterpret_cast<const char*>(section->address + i)));
+            const char* protocol = unresolved_symbol_at(reinterpret_cast<uintptr_t>(indirectable_pointer(conformance)));
+            if (protocol == nullptr || strcmp(protocol, protocol_symbol) != 0) continue;
+            uint32_t flags;
+            memcpy(&flags, conformance + kConformanceFlagsOffset, sizeof flags);
+            const void* conforming;
+            if ((flags & kTypeReferenceKindMask) == kTypeReferenceIndirect) {
+                const char* raw = conformance + kConformanceTypeOffset;
+                int32_t offset;
+                memcpy(&offset, raw, sizeof offset);
+                conforming = *reinterpret_cast<const void* const*>(raw + offset);
+            } else {
+                conforming = relative_pointer(conformance + kConformanceTypeOffset);
+            }
+            if (conforming == descriptor) return conformance;
         }
-        if (conforming == descriptor) return conformance;
     }
     return nullptr;
 }

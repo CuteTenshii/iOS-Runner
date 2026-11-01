@@ -32,7 +32,7 @@
 // Private to the swiftui shim sources.
 namespace swiftui {
 
-extern const MachSection* g_view_conformances;
+extern std::vector<const MachSection*> g_view_conformances;
 
 void* rt_swift_getWitnessTable_for_view(const char* conformance, void* type);
 

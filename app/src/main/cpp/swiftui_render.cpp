@@ -776,8 +776,10 @@ void swiftui_set_text(int action, const std::string& text) {
 }
 
 void swiftui_attach_image(const MachImage& image) {
-    g_view_conformances = image.section("__TEXT", "__swift5_proto");
-    if (g_view_conformances != nullptr) swift_runtime_attach_conformances(reinterpret_cast<const void*>(g_view_conformances->address), g_view_conformances->size);
+    const MachSection* conformances = image.section("__TEXT", "__swift5_proto");
+    if (conformances == nullptr) return;
+    g_view_conformances.push_back(conformances);
+    swift_runtime_attach_conformances(reinterpret_cast<const void*>(conformances->address), conformances->size);
 }
 
 void swiftui_run_scene(void* scene) {

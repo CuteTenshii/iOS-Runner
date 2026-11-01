@@ -2,7 +2,7 @@
 
 namespace swiftui {
 
-const MachSection* g_view_conformances = nullptr;
+std::vector<const MachSection*> g_view_conformances;
 
 void* rt_swift_getWitnessTable_for_view(const char* conformance, void* type) {
     return swift_runtime_witness_table(conformance, type, static_cast<void**>(type) + 2);
