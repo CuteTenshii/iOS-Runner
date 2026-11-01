@@ -419,9 +419,38 @@ void* alert_action_make(void*, const char*, void* title, int64_t style, void* ha
 
 void alert_add_action(void* self, const char*, void* action) { array_property(self, "actions")->items->push_back(object_retain(action)); }
 
+// SFSafariViewController is a Chrome Custom Tab: the host shows it, and says when the user has come back.
+void present_custom_tab(void* presenter, void* controller) {
+    const int id = engine_host_register(
+        [presenter, controller](const std::string&) {
+            property_set_object(presenter, "presentedViewController", nullptr);
+            void* delegate = property_get_object(controller, "delegate");
+            constexpr const char* kDidFinish = "safariViewControllerDidFinish:";
+            if (delegate != nullptr && objc_responds(delegate, kDidFinish)) {
+                using Finish = void (*)(void*, const char*, void*);
+                reinterpret_cast<Finish>(const_cast<void*>(objc_method_for(delegate, kDidFinish)))(delegate, kDidFinish, controller);
+            }
+        },
+        false);
+    Json identifier;
+    identifier.kind = Json::Kind::Integer;
+    identifier.integer = id;
+    Json spec;
+    spec.kind = Json::Kind::Object;
+    spec.members = {{"id", identifier},
+                    {"url", json_text(foundation::nsstring_text(property_get_object(controller, "safariURL")))},
+                    {"bar", json_text(color_hex_text(property_get_object(controller, "preferredBarTintColor")))}};
+    engine_emit("custom-tab", json_write(spec));
+}
+
 void present_controller(void* self, const char*, void* controller, bool, void* completion) {
     property_set_object(self, "presentedViewController", controller);
     property_set_object(controller, "presentingViewController", self);
+    if (object_is_kind(controller, "SFSafariViewController")) {
+        present_custom_tab(self, controller);
+        run_block_now(completion);
+        return;
+    }
     // An alert is drawn by the host as a dialog, and has no view of its own to load.
     if (!object_is_kind(controller, "UIAlertController")) appear(controller);
     run_block_now(completion);

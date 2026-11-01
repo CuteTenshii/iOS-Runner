@@ -3,6 +3,8 @@ package moe.tenshii.iosrunner
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
+import androidx.browser.customtabs.CustomTabColorSchemeParams
+import androidx.browser.customtabs.CustomTabsIntent
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.DialogInterface
@@ -63,6 +65,8 @@ class GuestActivity : Activity() {
     private val webViews = HashMap<Int, WebView>()
     private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
+    private var customTabId: Int? = null
+    private var customTabShown = false
     private var keychain: Keychain? = null
     private val devices by lazy { DeviceServices(this, mainThread, ::nativeHostReply) }
 
@@ -96,6 +100,22 @@ class GuestActivity : Activity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        customTabShown = customTabId != null
+    }
+
+    // A custom tab reports nothing when it closes, and this activity coming back is how that shows.
+    override fun onResume() {
+        super.onResume()
+        val id = customTabId
+        if (id != null && customTabShown) {
+            customTabId = null
+            customTabShown = false
+            nativeHostReply(id, JSONObject().put("opened", true).toString())
+        }
+    }
+
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         devices.onPermissionResult(requestCode, grantResults)
@@ -119,6 +139,8 @@ class GuestActivity : Activity() {
                 draw()
             }
             "open" -> openExternal(payload)
+            "open-url" -> JSONObject(payload).let { nativeHostReply(it.getInt("id"), JSONObject().put("opened", openUrl(it.getString("url"))).toString()) }
+            "custom-tab" -> openCustomTab(JSONObject(payload))
             "statusbar" -> applyStatusBar(JSONObject(payload))
             "webnew" -> createWebView(JSONObject(payload))
             "webload" -> JSONObject(payload).let { webViews[it.getInt("id")]?.loadUrl(it.getString("url")) }
@@ -204,6 +226,40 @@ class GuestActivity : Activity() {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         } catch (_: ActivityNotFoundException) {
             showToastless(getString(R.string.no_browser, url))
+        }
+    }
+
+    private fun viewIntent(url: String): Intent {
+        val uri = Uri.parse(url)
+        val action = when (uri.scheme) {
+            "tel" -> Intent.ACTION_DIAL
+            "sms" -> Intent.ACTION_SENDTO
+            else -> Intent.ACTION_VIEW
+        }
+        return Intent(action, uri)
+    }
+
+    private fun openUrl(url: String): Boolean = try {
+        startActivity(viewIntent(url))
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    }
+
+    private fun canOpenUrl(url: String): Boolean = packageManager.resolveActivity(viewIntent(url), 0) != null
+
+    private fun openCustomTab(spec: JSONObject) {
+        val builder = CustomTabsIntent.Builder().setShowTitle(true)
+        val bar = spec.optString("bar")
+        if (bar.isNotEmpty()) {
+            builder.setDefaultColorSchemeParams(CustomTabColorSchemeParams.Builder().setToolbarColor(Color.parseColor(bar)).build())
+        }
+        val id = spec.getInt("id")
+        try {
+            builder.build().launchUrl(this, Uri.parse(spec.getString("url")))
+            customTabId = id
+        } catch (_: ActivityNotFoundException) {
+            nativeHostReply(id, JSONObject().put("opened", false).toString())
         }
     }
 
@@ -1039,6 +1095,7 @@ class GuestActivity : Activity() {
             "network-status" -> current?.devices?.networkStatus().orEmpty()
             "keychain" -> current?.keychain?.call(JSONObject(argument))?.toString().orEmpty()
             "screen-size" -> current?.screenSizeInPoints().orEmpty()
+            "can-open-url" -> current?.canOpenUrl(argument).toString()
             else -> ""
         }
 

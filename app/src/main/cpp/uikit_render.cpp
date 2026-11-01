@@ -352,3 +352,5 @@ void uikit_run_action(int action) {
 }
 
 }  // namespace uikit
+
+std::string uikit::color_hex_text(void* color) { return uikit::color_text(color); }

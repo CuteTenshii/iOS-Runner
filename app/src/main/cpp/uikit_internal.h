@@ -66,6 +66,7 @@ void* property_get_object(void* object, const std::string& key);
 void property_forget(void* object);
 // Takes a strong reference, for anything held in one of this layer's own lists.
 void* object_retain(void* object);
+std::string color_hex_text(void* color);
 void property_set_word(void* object, const std::string& key, int64_t value);
 void property_set_floats(void* object, const std::string& key, double first, double second);
 double property_get_float(void* object, const std::string& key);

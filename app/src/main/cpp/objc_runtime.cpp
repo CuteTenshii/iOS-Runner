@@ -174,7 +174,7 @@ const void* lookup_framework_method(const std::string& description) {
     const auto inherited = framework_methods().find(root);
     if (inherited != framework_methods().end()) return inherited->second;
     // Location and notification objects keep their state here in every app; SwiftUI apps don't use this for UIKit.
-    const bool generic_class = description.compare(2, 2, "UN") == 0 || description.compare(2, 2, "CL") == 0 || (g_uikit_active && (description.compare(2, 2, "UI") == 0 || description.compare(2, 2, "CA") == 0 || description.compare(2, 8, "NSLayout") == 0 || description.compare(2, 12, "NSPersistent") == 0 || description.compare(2, 12, "NSAttributed") == 0 || description.compare(2, 14, "NSMutableAttri") == 0 || description.compare(2, 17, "NSMutableParagraph") == 0));
+    const bool generic_class = description.compare(2, 2, "UN") == 0 || description.compare(2, 2, "CL") == 0 || description.compare(2, 2, "SF") == 0 || (g_uikit_active && (description.compare(2, 2, "UI") == 0 || description.compare(2, 2, "CA") == 0 || description.compare(2, 8, "NSLayout") == 0 || description.compare(2, 12, "NSPersistent") == 0 || description.compare(2, 12, "NSAttributed") == 0 || description.compare(2, 14, "NSMutableAttri") == 0 || description.compare(2, 17, "NSMutableParagraph") == 0));
     if (generic_class && g_uikit_fallback != nullptr) {
         const std::string selector = description.substr(space + 1, description.size() - space - 2);
         if (const void* generic = g_uikit_fallback(selector.c_str())) return generic;

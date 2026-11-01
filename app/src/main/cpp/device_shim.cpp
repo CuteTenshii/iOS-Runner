@@ -364,7 +364,44 @@ void* device_symbol(std::string_view name) {
     return found == table.end() ? nullptr : found->second;
 }
 
+namespace {
+
+void open_url(const std::string& url, std::function<void(bool)> done) {
+    const int id = engine_host_register(
+        [done = std::move(done)](const std::string& payload) {
+            Json reply;
+            done(json_parse(payload, reply) && flag_at(reply, "opened"));
+        },
+        false);
+    engine_emit("open-url", json_write(json_object({{"id", json_int(id)}, {"url", json_text(url)}})));
+}
+
+void application_open_url_completion(void*, const char*, void* url, void*, void* completion) {
+    void* block = completion != nullptr ? darwin_block_copy(completion) : nullptr;
+    open_url(foundation::nsstring_text(url), [block](bool opened) { invoke_block<bool>(block, opened); });
+}
+
+bool application_open_url(void*, const char*, void* url) {
+    open_url(foundation::nsstring_text(url), [](bool) {});
+    return true;
+}
+
+bool application_can_open_url(void*, const char*, void* url) { return engine_host_query("can-open-url", foundation::nsstring_text(url)) == "true"; }
+
+void* safari_init_with_url(void* self, const char*, void* url) {
+    property_set_object(self, "safariURL", url);
+    return self;
+}
+
+}  // namespace
+
 void register_device_classes() {
+    objc_register_method("-[UIApplication openURL:options:completionHandler:]", reinterpret_cast<const void*>(application_open_url_completion));
+    objc_register_method("-[UIApplication openURL:]", reinterpret_cast<const void*>(application_open_url));
+    objc_register_method("-[UIApplication canOpenURL:]", reinterpret_cast<const void*>(application_can_open_url));
+    objc_register_method("-[SFSafariViewController initWithURL:]", reinterpret_cast<const void*>(safari_init_with_url));
+    objc_register_method("-[SFSafariViewController initWithURL:configuration:]", reinterpret_cast<const void*>(safari_init_with_url));
+    objc_register_method("-[SFSafariViewController initWithURL:entersReaderIfAvailable:]", reinterpret_cast<const void*>(safari_init_with_url));
     objc_register_method("+[UNUserNotificationCenter currentNotificationCenter]", reinterpret_cast<const void*>(notification_center));
     objc_register_method("-[UNUserNotificationCenter requestAuthorizationWithOptions:completionHandler:]", reinterpret_cast<const void*>(notifications_request_authorization));
     objc_register_method("-[UNUserNotificationCenter addNotificationRequest:withCompletionHandler:]", reinterpret_cast<const void*>(notifications_add));
