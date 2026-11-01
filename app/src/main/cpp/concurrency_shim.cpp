@@ -149,7 +149,7 @@ AsyncFunctionPointer g_group_await_all_record;
 AsyncFunctionPointer g_group_next_record;
 
 // The iterator is just the group's one word.
-SWIFTCC void group_make_iterator(SWIFT_OUT void** out, void*, SWIFT_CONTEXT void** self) { *out = *self; }
+SWIFTCC void group_make_iterator(SWIFT_OUT void** out, void* group, void*) { *out = group; }
 
 void* cancellation_handler_add(const void*, void*) { return nullptr; }
 void cancellation_handler_remove(void*) {}
