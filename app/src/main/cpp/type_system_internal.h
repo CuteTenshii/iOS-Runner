@@ -104,6 +104,7 @@ extern std::map<std::string, Metadata*> g_named_types;
 extern std::map<const void*, const char*> g_foreign_names;
 
 extern std::map<const void*, void*> g_array_elements;
+extern std::map<const void*, void*> g_set_elements;
 
 extern std::map<const void*, void*> g_dictionary_values;
 

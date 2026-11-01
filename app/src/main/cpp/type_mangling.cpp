@@ -344,6 +344,7 @@ private:
             for (const void* argument : arguments) key += pointer_key(argument);
             node.type = strcmp(name, "$Pointer") == 0 ? pod_type("Bp", kPointerSize) : bridge_type(key, arguments);
             if (strcmp(name, "$Array") == 0 && !arguments.empty()) g_array_elements[node.type] = arguments[0];
+            if (strcmp(name, "$Set") == 0 && !arguments.empty()) g_set_elements[node.type] = arguments[0];
             if (strcmp(name, "$Dictionary") == 0 && arguments.size() == 2) g_dictionary_values[node.type] = arguments[1];
         } else {
             node.type = metadata_for_descriptor(base.nominal, arguments);

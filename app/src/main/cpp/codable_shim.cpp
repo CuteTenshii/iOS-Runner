@@ -276,6 +276,11 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
             memcpy(&out.number, value, sizeof out.number);
             return;
         }
+        if (strcmp(name, "_$s10Foundation3URLVMn") == 0) {
+            void* url = *static_cast<void* const*>(value);
+            out = json_text(foundation_url_text(url));
+            return;
+        }
         if (strcmp(name, "_$s10Foundation4DataVMn") == 0) {
             out.kind = Json::Kind::Data;
             out.text = foundation_data_bytes(*static_cast<const FoundationData*>(value));
@@ -294,6 +299,17 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
             encode_value(element, elements + i * stride, out.items[i], error);
             if (*error != nullptr) return;
         }
+        return;
+    }
+    if (void* element = set_element_type(type)) {
+        out.kind = Json::Kind::Array;
+        uint64_t word;
+        memcpy(&word, value, sizeof word);
+        visit_set_elements(reinterpret_cast<void*>(word & kBridgeObjectAddressMask), [&](void* item) {
+            if (*error != nullptr) return;
+            out.items.emplace_back();
+            encode_value(element, item, out.items.back(), error);
+        });
         return;
     }
     if (void* value_type = dictionary_value_type(type)) {

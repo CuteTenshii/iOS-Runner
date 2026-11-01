@@ -9,6 +9,7 @@ std::map<std::string, Metadata*> g_named_types;
 std::map<const void*, const char*> g_foreign_names;
 
 std::map<const void*, void*> g_array_elements;
+std::map<const void*, void*> g_set_elements;
 
 std::map<const void*, void*> g_dictionary_values;
 

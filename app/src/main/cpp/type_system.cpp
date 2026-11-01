@@ -206,6 +206,12 @@ bool optional_payload(const void* metadata, const void* value, TypeField& out) {
     return true;
 }
 
+void* set_element_type(const void* metadata) {
+    const std::lock_guard guard(g_types_lock);
+    const auto found = g_set_elements.find(metadata);
+    return found == g_set_elements.end() ? nullptr : found->second;
+}
+
 void* array_element_type(const void* metadata) {
     const std::lock_guard guard(g_types_lock);
     const auto found = g_array_elements.find(metadata);

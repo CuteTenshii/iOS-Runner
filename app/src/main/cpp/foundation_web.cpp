@@ -266,7 +266,7 @@ PlistValue plist_from_json(const Json& value) {
 bool json_from_object(void* object, Json& out) {
     if (object == nullptr) return false;
     const void* cls = static_cast<HeapObject*>(object)->metadata;
-    if (cls == g_nsstring_class) {
+    if (cls == g_nsstring_class || cls == g_nsurl_class) {
         out = json_text(nsstring_text(object));
     } else if (cls == g_nsnumber_class) {
         const auto* number = static_cast<NSNumberObject*>(object);
