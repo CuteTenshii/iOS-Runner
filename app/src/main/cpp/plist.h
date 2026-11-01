@@ -6,7 +6,16 @@
 
 // A value from a property list.
 struct PlistValue {
-    enum class Kind { Null, Boolean, Integer, Real, String, Data, Date, Uid, Array, Dictionary };
+    enum class Kind { Null,
+                      Boolean,
+                      Integer,
+                      Real,
+                      String,
+                      Data,
+                      Date,
+                      Uid,
+                      Array,
+                      Dictionary };
     Kind kind = Kind::Null;
     bool boolean = false;
     int64_t integer = 0;  // Also a Uid's value.

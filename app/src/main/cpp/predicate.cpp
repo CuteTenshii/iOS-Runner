@@ -35,11 +35,30 @@ PredicateValue PredicateValue::of_object(void* value) {
     return out;
 }
 
-enum class CompareOp { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual, In, Contains, BeginsWith, EndsWith, Like, Matches, Between };
-enum class Quantifier { None, Any, All, NoneOf };
+enum class CompareOp { Equal,
+                       NotEqual,
+                       Less,
+                       LessEqual,
+                       Greater,
+                       GreaterEqual,
+                       In,
+                       Contains,
+                       BeginsWith,
+                       EndsWith,
+                       Like,
+                       Matches,
+                       Between };
+enum class Quantifier { None,
+                        Any,
+                        All,
+                        NoneOf };
 
 struct PredicateExpr {
-    enum class Kind { Constant, Self, Variable, Key, Subquery };
+    enum class Kind { Constant,
+                      Self,
+                      Variable,
+                      Key,
+                      Subquery };
     Kind kind = Kind::Constant;
     PredicateValue constant;
     std::string name;  // A variable's name, a key, or a subquery's variable.
@@ -49,7 +68,11 @@ struct PredicateExpr {
 using ExprRef = std::shared_ptr<const PredicateExpr>;
 
 struct PredicateNode {
-    enum class Kind { Constant, And, Or, Not, Compare };
+    enum class Kind { Constant,
+                      And,
+                      Or,
+                      Not,
+                      Compare };
     Kind kind = Kind::Constant;
     bool constant = false;
     std::vector<PredicateRef> operands;
@@ -163,7 +186,8 @@ private:
     bool take_operator(CompareOp& op) {
         if (take_symbol("==") || take_symbol("=<") || take_symbol("=>")) {
             const std::string taken = text_.substr(at_ - 2, 2);
-            op = taken == "==" ? CompareOp::Equal : taken == "=<" ? CompareOp::LessEqual : CompareOp::GreaterEqual;
+            op = taken == "==" ? CompareOp::Equal : taken == "=<" ? CompareOp::LessEqual
+                                                                  : CompareOp::GreaterEqual;
         } else if (take_symbol("!=") || take_symbol("<>")) {
             op = CompareOp::NotEqual;
         } else if (take_symbol("<=")) {
@@ -199,9 +223,12 @@ private:
     PredicateRef parse_comparison() {
         auto node = std::make_shared<PredicateNode>();
         node->kind = PredicateNode::Kind::Compare;
-        if (take_word("ANY") || take_word("SOME")) node->quantifier = Quantifier::Any;
-        else if (take_word("ALL")) node->quantifier = Quantifier::All;
-        else if (take_word("NONE")) node->quantifier = Quantifier::NoneOf;
+        if (take_word("ANY") || take_word("SOME"))
+            node->quantifier = Quantifier::Any;
+        else if (take_word("ALL"))
+            node->quantifier = Quantifier::All;
+        else if (take_word("NONE"))
+            node->quantifier = Quantifier::NoneOf;
         node->left = parse_expression();
         if (!error_.empty()) return nullptr;
         skip_space();
@@ -278,8 +305,10 @@ private:
                 value = key_argument(std::move(value));
             } else {
                 const std::string word = take_identifier();
-                if (word.empty()) fail("expected a key");
-                else value = key_of(std::move(value), word);
+                if (word.empty())
+                    fail("expected a key");
+                else
+                    value = key_of(std::move(value), word);
             }
         }
         return value;
@@ -439,8 +468,10 @@ struct Evaluator {
                 out.kind = PredicateValue::Kind::List;
                 for (const auto& item : base.items) {
                     PredicateValue value = key_of(item, key);
-                    if (value.kind == PredicateValue::Kind::List) out.items.insert(out.items.end(), value.items.begin(), value.items.end());
-                    else if (value.kind != PredicateValue::Kind::Null) out.items.push_back(std::move(value));
+                    if (value.kind == PredicateValue::Kind::List)
+                        out.items.insert(out.items.end(), value.items.begin(), value.items.end());
+                    else if (value.kind != PredicateValue::Kind::Null)
+                        out.items.push_back(std::move(value));
                 }
                 return out;
             }
@@ -477,9 +508,12 @@ struct Evaluator {
     }
 
     static bool as_number(const PredicateValue& value, double& out) {
-        if (value.kind == PredicateValue::Kind::Number) out = value.number;
-        else if (value.kind == PredicateValue::Kind::Boolean) out = value.boolean ? 1 : 0;
-        else return false;
+        if (value.kind == PredicateValue::Kind::Number)
+            out = value.number;
+        else if (value.kind == PredicateValue::Kind::Boolean)
+            out = value.boolean ? 1 : 0;
+        else
+            return false;
         return true;
     }
 

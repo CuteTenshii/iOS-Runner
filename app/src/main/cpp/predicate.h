@@ -8,7 +8,13 @@
 
 // A value an NSPredicate compares: what a key path or format argument holds.
 struct PredicateValue {
-    enum class Kind { Null, Boolean, Number, String, Object, List, Dictionary };
+    enum class Kind { Null,
+                      Boolean,
+                      Number,
+                      String,
+                      Object,
+                      List,
+                      Dictionary };
     Kind kind = Kind::Null;
     bool boolean = false;
     double number = 0;

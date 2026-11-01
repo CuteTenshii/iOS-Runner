@@ -2,11 +2,11 @@
 
 #include "base64.h"
 
-#include <vector>
-#include <utility>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <utility>
+#include <vector>
 
 namespace {
 

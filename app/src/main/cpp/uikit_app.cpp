@@ -117,25 +117,34 @@ void write_placeholder_profile(const std::string& bundle) {
     file.write("\x30\x80", 2);
     file << R"(<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>AppIDName</key><string>)" << name << R"(</string>
-<key>ApplicationIdentifierPrefix</key><array><string>)" << team << R"(</string></array>
+<key>AppIDName</key><string>)"
+         << name << R"(</string>
+<key>ApplicationIdentifierPrefix</key><array><string>)"
+         << team << R"(</string></array>
 <key>CreationDate</key><date>2020-01-01T00:00:00Z</date>
 <key>Platform</key><array><string>iOS</string></array>
 <key>IsXcodeManaged</key><false/>
 <key>DeveloperCertificates</key><array></array>
 <key>Entitlements</key><dict>
-<key>application-identifier</key><string>)" << team << "." << identifier << R"(</string>
-<key>com.apple.developer.team-identifier</key><string>)" << team << R"(</string>
+<key>application-identifier</key><string>)"
+         << team << "." << identifier << R"(</string>
+<key>com.apple.developer.team-identifier</key><string>)"
+         << team << R"(</string>
 <key>get-task-allow</key><true/>
-<key>keychain-access-groups</key><array><string>)" << team << R"(.*</string></array>
+<key>keychain-access-groups</key><array><string>)"
+         << team << R"(.*</string></array>
 </dict>
 <key>ExpirationDate</key><date>2100-01-01T00:00:00Z</date>
-<key>Name</key><string>)" << name << R"(</string>
+<key>Name</key><string>)"
+         << name << R"(</string>
 <key>ProvisionedDevices</key><array></array>
-<key>TeamIdentifier</key><array><string>)" << team << R"(</string></array>
-<key>TeamName</key><string>)" << team << R"(</string>
+<key>TeamIdentifier</key><array><string>)"
+         << team << R"(</string></array>
+<key>TeamName</key><string>)"
+         << team << R"(</string>
 <key>TimeToLive</key><integer>29200</integer>
-<key>UUID</key><string>)" << uuid << R"(</string>
+<key>UUID</key><string>)"
+         << uuid << R"(</string>
 <key>Version</key><integer>1</integer>
 </dict></plist>
 )";

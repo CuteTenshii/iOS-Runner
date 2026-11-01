@@ -199,9 +199,12 @@ struct XmlReader {
             at = text.find('<', at);
             if (at == std::string::npos) return false;
             const char* close = nullptr;
-            if (text.compare(at, 2, "<?") == 0) close = "?>";
-            else if (text.compare(at, 4, "<!--") == 0) close = "-->";
-            else if (text.compare(at, 2, "<!") == 0) close = ">";
+            if (text.compare(at, 2, "<?") == 0)
+                close = "?>";
+            else if (text.compare(at, 4, "<!--") == 0)
+                close = "-->";
+            else if (text.compare(at, 2, "<!") == 0)
+                close = ">";
             if (close == nullptr) return true;
             at = text.find(close, at);
             if (at == std::string::npos) return false;
@@ -248,14 +251,22 @@ struct XmlReader {
                 continue;
             }
             const std::string entity = value.substr(i + 1, semicolon - i - 1);
-            if (entity == "lt") out += '<';
-            else if (entity == "gt") out += '>';
-            else if (entity == "amp") out += '&';
-            else if (entity == "quot") out += '"';
-            else if (entity == "apos") out += '\'';
-            else if (entity.size() > 2 && entity[0] == '#' && entity[1] == 'x') append_utf8(out, static_cast<uint32_t>(strtoul(entity.c_str() + 2, nullptr, 16)));
-            else if (entity.size() > 1 && entity[0] == '#') append_utf8(out, static_cast<uint32_t>(strtoul(entity.c_str() + 1, nullptr, 10)));
-            else out += value.substr(i, semicolon - i + 1);
+            if (entity == "lt")
+                out += '<';
+            else if (entity == "gt")
+                out += '>';
+            else if (entity == "amp")
+                out += '&';
+            else if (entity == "quot")
+                out += '"';
+            else if (entity == "apos")
+                out += '\'';
+            else if (entity.size() > 2 && entity[0] == '#' && entity[1] == 'x')
+                append_utf8(out, static_cast<uint32_t>(strtoul(entity.c_str() + 2, nullptr, 16)));
+            else if (entity.size() > 1 && entity[0] == '#')
+                append_utf8(out, static_cast<uint32_t>(strtoul(entity.c_str() + 1, nullptr, 10)));
+            else
+                out += value.substr(i, semicolon - i + 1);
             i = semicolon;
         }
         return out;
@@ -281,8 +292,10 @@ struct XmlReader {
                 if (closing) return tag == name && !has_key;
                 if (tag == "key") {
                     if (out.kind != PlistValue::Kind::Dictionary || has_key) return false;
-                    if (child_self_closing) key.clear();
-                    else if (!read_content(tag, key)) return false;
+                    if (child_self_closing)
+                        key.clear();
+                    else if (!read_content(tag, key))
+                        return false;
                     has_key = true;
                     continue;
                 }
@@ -390,7 +403,9 @@ struct BinaryWriter {
         size_t count = 0;
         for (size_t i = 0; i < text.size();) {
             const auto first = static_cast<uint8_t>(text[i]);
-            size_t length = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+            size_t length = first < 0x80 ? 1 : first < 0xe0 ? 2
+                                           : first < 0xf0   ? 3
+                                                            : 4;
             if (i + length > text.size()) length = text.size() - i;
             uint32_t scalar = length == 1 ? first : first & (0xff >> (length + 1));
             for (size_t j = 1; j < length; ++j) scalar = (scalar << 6) | (static_cast<uint8_t>(text[i + j]) & 0x3f);
@@ -515,10 +530,14 @@ struct BinaryWriter {
 std::string xml_escaped(const std::string& text) {
     std::string out;
     for (const char c : text) {
-        if (c == '<') out += "&lt;";
-        else if (c == '>') out += "&gt;";
-        else if (c == '&') out += "&amp;";
-        else out += c;
+        if (c == '<')
+            out += "&lt;";
+        else if (c == '>')
+            out += "&gt;";
+        else if (c == '&')
+            out += "&amp;";
+        else
+            out += c;
     }
     return out;
 }
