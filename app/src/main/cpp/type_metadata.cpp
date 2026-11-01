@@ -1,3 +1,4 @@
+#include "symbols.h"
 #include "type_system_internal.h"
 
 namespace type_system {
@@ -376,6 +377,20 @@ constexpr unsigned kEnumPayloadSizeOffsetShift = 24;
 
 constexpr uint32_t kEnumPayloadCasesMask = 0xffffff;
 
+// A multi-payload enum's compiled tag witnesses only re-dispatch through its table, leaving these to the runtime.
+// It reports no extra inhabitants, so tags beyond its cases always go in bytes after the value.
+uint32_t multi_payload_get_enum_tag(const void* value, uint32_t empty_cases, void* self) {
+    using Generic = uint32_t (*)(const void*, uint32_t, void*, void*);
+    static const auto generic = reinterpret_cast<Generic>(resolve_symbol("swift_getEnumTagSinglePayloadGeneric"));
+    return generic(value, empty_cases, self, nullptr);
+}
+
+void multi_payload_store_enum_tag(void* value, uint32_t which, uint32_t empty_cases, void* self) {
+    using Generic = void (*)(void*, uint32_t, uint32_t, void*, void*);
+    static const auto generic = reinterpret_cast<Generic>(resolve_symbol("swift_storeEnumTagSinglePayloadGeneric"));
+    generic(value, which, empty_cases, self, nullptr);
+}
+
 extern "C" void rt_initEnumMetadataMultiPayload(void** metadata, size_t, size_t payload_count, const void* const* payload_layouts) {
     size_t largest = 0;
     size_t alignment_mask = 0;
@@ -393,6 +408,9 @@ extern "C" void rt_initEnumMetadataMultiPayload(void** metadata, size_t, size_t 
     const size_t tag = enum_tag_bytes(largest, empty_cases, cases_and_offset & kEnumPayloadCasesMask);
     if (const uint32_t offset = cases_and_offset >> kEnumPayloadSizeOffsetShift) metadata[offset] = reinterpret_cast<void*>(largest);
     install_enum_witnesses(metadata, static_cast<ValueWitnessTable*>(metadata[-1]), largest + tag, alignment_mask, flags, 0);
+    auto* installed = static_cast<ValueWitnessTable*>(metadata[-1]);
+    installed->get_enum_tag_single_payload = multi_payload_get_enum_tag;
+    installed->store_enum_tag_single_payload = multi_payload_store_enum_tag;
 }
 
 constexpr size_t kClassInstanceSizeOffset = 48;
