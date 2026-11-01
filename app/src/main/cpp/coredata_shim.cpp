@@ -168,11 +168,17 @@ SWIFTCC void* sort_descriptor_init(void* key_path, bool ascending) {
     return descriptor;
 }
 
-struct Predicate {
-    void* isa;
-    uint64_t references;
-    PredicateRef* node;
-};
+// Apps subclass NSCompoundPredicate with their own instance layout, so what a predicate means is kept beside it.
+std::unordered_map<const void*, PredicateRef>& predicate_nodes_by_object() {
+    static std::unordered_map<const void*, PredicateRef> nodes;
+    return nodes;
+}
+
+const PredicateRef& predicate_node(const void* predicate) {
+    static const PredicateRef always_true = predicate_constant(true);
+    const auto found = predicate_nodes_by_object().find(predicate);
+    return found != predicate_nodes_by_object().end() ? found->second : always_true;
+}
 
 struct CVarArgExistential {
     uint64_t buffer[3];
@@ -181,8 +187,8 @@ struct CVarArgExistential {
 };
 
 void* new_predicate(PredicateRef node) {
-    auto* predicate = static_cast<Predicate*>(objc_framework_object("NSPredicate"));
-    predicate->node = new PredicateRef(std::move(node));
+    void* predicate = objc_framework_object("NSPredicate");
+    predicate_nodes_by_object()[predicate] = std::move(node);
     return predicate;
 }
 
@@ -262,23 +268,50 @@ PredicateValue read_predicate_key(void* object, const std::string& key) {
     return PredicateValue::of_number(static_cast<double>(reinterpret_cast<int64_t>(result)));
 }
 
-bool matches(void* object, const Predicate* predicate) {
-    return predicate == nullptr || predicate_evaluate(*predicate->node, PredicateValue::of_object(object), read_predicate_key);
+bool matches(void* object, void* predicate) {
+    if (predicate == nullptr) return true;
+    // A subclass may answer for itself, and framework predicates reach predicate_evaluate_object the same way.
+    constexpr const char* kEvaluate = "evaluateWithObject:";
+    using Evaluate = bool (*)(void*, const char*, void*);
+    return reinterpret_cast<Evaluate>(const_cast<void*>(objc_method_for(predicate, kEvaluate)))(predicate, kEvaluate, object);
+}
+
+std::unordered_map<const void*, void*>& compound_subpredicates() {
+    static std::unordered_map<const void*, void*> subpredicates;
+    return subpredicates;
 }
 
 std::vector<PredicateRef> predicate_nodes(void* array) {
     std::vector<PredicateRef> nodes;
-    for (void* item : uikit::object_array_items(array)) nodes.push_back(*static_cast<Predicate*>(item)->node);
+    for (void* item : uikit::object_array_items(array)) nodes.push_back(predicate_node(item));
     return nodes;
+}
+
+// NSCompoundPredicateType: not, and, or.
+void* predicate_init_compound(void* self, const char*, uint64_t type, void* subpredicates) {
+    constexpr uint64_t kNot = 0, kAnd = 1;
+    std::vector<PredicateRef> nodes = predicate_nodes(subpredicates);
+    if (type == kNot)
+        predicate_nodes_by_object()[self] = nodes.empty() ? predicate_constant(false) : predicate_not(nodes[0]);
+    else
+        predicate_nodes_by_object()[self] = type == kAnd ? predicate_and(std::move(nodes)) : predicate_or(std::move(nodes));
+    rt_swift_retain(subpredicates);
+    compound_subpredicates()[self] = subpredicates;
+    return self;
+}
+
+void* predicate_subpredicates(void* self, const char*) {
+    const auto found = compound_subpredicates().find(self);
+    return found != compound_subpredicates().end() ? found->second : nullptr;
 }
 
 void* predicate_and_of(void*, const char*, void* subpredicates) { return new_predicate(predicate_and(predicate_nodes(subpredicates))); }
 void* predicate_or_of(void*, const char*, void* subpredicates) { return new_predicate(predicate_or(predicate_nodes(subpredicates))); }
-void* predicate_not_of(void*, const char*, void* subpredicate) { return new_predicate(predicate_not(*static_cast<Predicate*>(subpredicate)->node)); }
+void* predicate_not_of(void*, const char*, void* subpredicate) { return new_predicate(predicate_not(predicate_node(subpredicate))); }
 void* predicate_with_value(void*, const char*, bool value) { return new_predicate(predicate_constant(value)); }
 
 bool predicate_evaluate_object(void* self, const char*, void* object) {
-    return predicate_evaluate(*static_cast<Predicate*>(self)->node, predicate_value_from_object(object), read_predicate_key);
+    return predicate_evaluate(predicate_node(self), predicate_value_from_object(object), read_predicate_key);
 }
 
 // Attribute values compare by what they hold: only strings and dates are ever sorted on.
@@ -313,7 +346,7 @@ int compare_by_key_path(void* left, void* right, void* key_path) {
 std::vector<void*> fetch_objects(const std::string& entity, void* predicate, void* sort_descriptors) {
     std::vector<void*> objects;
     for (void* object : store().insertion_order) {
-        if (store().records[object].entity == entity && matches(object, static_cast<Predicate*>(predicate))) objects.push_back(object);
+        if (store().records[object].entity == entity && matches(object, predicate)) objects.push_back(object);
     }
     if (sort_descriptors == nullptr) return objects;
     int64_t count;
@@ -854,6 +887,9 @@ void coredata_register_classes() {
     objc_register_fallback("NSManagedObject", managed_accessor);
     objc_register_method("-[NSManagedObject fetchRequest]", reinterpret_cast<const void*>(managed_fetch_request));
     objc_register_method("-[NSFetchRequest initWithEntityName:]", reinterpret_cast<const void*>(fetch_request_init));
+    objc_register_method("-[NSCompoundPredicate initWithType:subpredicates:]", reinterpret_cast<const void*>(predicate_init_compound));
+    objc_register_method("-[NSCompoundPredicate subpredicates]", reinterpret_cast<const void*>(predicate_subpredicates));
+    objc_register_method("-[NSCompoundPredicate evaluateWithObject:]", reinterpret_cast<const void*>(predicate_evaluate_object));
     objc_register_method("+[NSCompoundPredicate andPredicateWithSubpredicates:]", reinterpret_cast<const void*>(predicate_and_of));
     objc_register_method("+[NSCompoundPredicate orPredicateWithSubpredicates:]", reinterpret_cast<const void*>(predicate_or_of));
     objc_register_method("+[NSCompoundPredicate notPredicateWithSubpredicate:]", reinterpret_cast<const void*>(predicate_not_of));

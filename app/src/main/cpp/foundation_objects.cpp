@@ -702,6 +702,10 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
     objc_register_method("-[NSProcessInfo globallyUniqueString]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(uuid4()); }));
     register_progress_methods();
+    // Observers are accepted but never told of changes: nothing intercepts property setters yet.
+    objc_register_method("-[NSObject addObserver:forKeyPath:options:context:]", reinterpret_cast<const void*>(+[](void*, const char*, void*, void*, uint64_t, void*) {}));
+    objc_register_method("-[NSObject removeObserver:forKeyPath:context:]", reinterpret_cast<const void*>(+[](void*, const char*, void*, void*, void*) {}));
+    objc_register_method("-[NSObject removeObserver:forKeyPath:]", reinterpret_cast<const void*>(+[](void*, const char*, void*, void*) {}));
     register_number_methods();
     // One shared object: main-thread work runs from the guest's run loop, not from this one.
     objc_register_method("+[NSRunLoop mainRunLoop]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* {
