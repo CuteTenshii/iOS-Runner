@@ -1,4 +1,5 @@
 #include "foundation_internal.h"
+#include "symbols.h"
 
 using namespace foundation;
 
@@ -167,13 +168,41 @@ void* scanner_init(void* self, const char*, void* text) {
 
 void* scanner_with_string(void*, const char*, void* text) { return scanner_init(objc_framework_object("NSScanner"), nullptr, text); }
 
-bool scanner_scan_hex(void* self, const char*, uint64_t* out) {
-    const std::string& text = *static_cast<ScannerObject*>(self)->text;
+// Reads a number at the scan position, moving past it, and leaves the position alone if there isn't one.
+bool scanner_scan_number(ScannerObject* scanner, int base, uint64_t& value, bool& negative) {
+    const std::string& text = *scanner->text;
+    size_t at = scanner->position;
+    while (at < text.size() && isspace(static_cast<unsigned char>(text[at]))) ++at;
+    negative = base == 10 && at < text.size() && text[at] == '-';
+    const char* start = text.c_str() + at;
     char* end;
-    const uint64_t value = strtoull(text.c_str(), &end, 16);
-    if (end == text.c_str()) return false;
+    value = strtoull(start, &end, base);
+    if (end == start) return false;
+    scanner->position = at + static_cast<size_t>(end - start);
+    return true;
+}
+
+bool scanner_scan_hex(void* self, const char*, uint64_t* out) {
+    uint64_t value;
+    bool negative;
+    if (!scanner_scan_number(static_cast<ScannerObject*>(self), 16, value, negative)) return false;
     if (out != nullptr) *out = value;
     return true;
+}
+
+// An Int32? comes back with its value in the low half and bit 32 set for nil.
+SWIFTCC uint64_t scanner_scan_int32(const uint64_t* representation, SWIFT_CONTEXT void* self) {
+    constexpr uint64_t kNilInt32 = 1ULL << 32;
+    constexpr char kHexadecimalCase[] = "$sSo9NSScannerC10FoundationE20NumberRepresentationO11hexadecimalyA2EmFWC";
+    static const int32_t hexadecimal = *static_cast<const int32_t*>(resolve_symbol(kHexadecimalCase));
+    const int base = static_cast<int32_t>(*representation) == hexadecimal ? 16 : 10;
+    uint64_t value;
+    bool negative;
+    if (!scanner_scan_number(static_cast<ScannerObject*>(self), base, value, negative)) return kNilInt32;
+    const auto wide = static_cast<int64_t>(value);
+    const bool fits = base == 16 ? value <= INT32_MAX : (wide >= INT32_MIN && wide <= INT32_MAX);
+    if (!fits) return kNilInt32;
+    return static_cast<uint32_t>(static_cast<int32_t>(wide));
 }
 
 // The host's HTTP stack does its own caching, so a URL cache is an object nothing is ever stored in.
@@ -400,6 +429,7 @@ namespace foundation {
 void add_foundation_session_symbols(SymbolTable& table) {
     table.insert({
         {"$sSo9NSScannerC10FoundationE14scanUpToStringySSSgSSF", reinterpret_cast<void*>(scanner_scan_up_to)},
+        {"$sSo9NSScannerC10FoundationE9scanInt3214representations0D0VSgAbCE20NumberRepresentationO_tF", reinterpret_cast<void*>(scanner_scan_int32)},
         {"$s10Foundation4DateV36_unconditionallyBridgeFromObjectiveCyACSo6NSDateCSgFZ", reinterpret_cast<void*>(date_unbridge)},
         {"$s10Foundation4DateV11distantPastACvgZ", reinterpret_cast<void*>(date_distant_past)},
         {"$s10Foundation4DateV17timeIntervalSinceySdACF", reinterpret_cast<void*>(date_interval_since)},
