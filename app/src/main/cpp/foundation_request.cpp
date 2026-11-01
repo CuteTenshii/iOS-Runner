@@ -1,3 +1,4 @@
+#include "base64.h"
 #include "foundation_internal.h"
 #include "symbols.h"
 
@@ -373,42 +374,13 @@ SWIFTCC void data_with_unsafe_bytes(SWIFT_OUT void* out, UnsafeBytesBody body, v
     free(copy);
 }
 
-const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-SWIFTCC SwiftString data_base64_string(uint64_t, uint64_t range, uint64_t storage) {
-    std::string out;
-    uint32_t bits = 0;
-    int count = 0;
-    for (const char c : data_bytes(range, storage)) {
-        bits = (bits << 8) | static_cast<uint8_t>(c);
-        count += 8;
-        while (count >= 6) {
-            count -= 6;
-            out += kBase64Alphabet[(bits >> count) & 63];
-        }
-    }
-    if (count > 0) out += kBase64Alphabet[(bits << (6 - count)) & 63];
-    while (out.size() % 4 != 0) out += '=';
-    return swift_string_from_utf8(out);
-}
+SWIFTCC SwiftString data_base64_string(uint64_t, uint64_t range, uint64_t storage) { return swift_string_from_utf8(base64_encode(data_bytes(range, storage))); }
 
 // Nil as Optional<Data> spells it: a storage tag no real value has.
 SWIFTCC DataValue data_from_base64(SwiftString text, uint64_t) {
     constexpr uint64_t kOptionalDataNil = 0xf000000000000000ULL;
     std::string out;
-    uint32_t bits = 0;
-    int count = 0;
-    for (const char c : swift_string_to_utf8(text)) {
-        if (c == '=') break;
-        const char* found = c != '\0' ? strchr(kBase64Alphabet, c) : nullptr;
-        if (found == nullptr) return {0, kOptionalDataNil};
-        bits = (bits << 6) | static_cast<uint32_t>(found - kBase64Alphabet);
-        count += 6;
-        if (count >= 8) {
-            count -= 8;
-            out += static_cast<char>((bits >> count) & 0xff);
-        }
-    }
+    if (!base64_decode_strict(swift_string_to_utf8(text), out)) return {0, kOptionalDataNil};
     return make_data(out);
 }
 

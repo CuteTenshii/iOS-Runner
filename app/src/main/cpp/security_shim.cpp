@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 
+#include "base64.h"
 #include "engine.h"
 #include "foundation_internal.h"
 #include "json.h"
@@ -18,42 +19,6 @@ namespace {
 
 constexpr int32_t kStatusSuccess = 0, kStatusParam = -50, kStatusNotFound = -25300;
 constexpr size_t kAnyTypeWordIndex = 3;
-
-const char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string base64_encode(const std::string& bytes) {
-    std::string out;
-    uint32_t bits = 0;
-    int count = 0;
-    for (const char c : bytes) {
-        bits = (bits << 8) | static_cast<uint8_t>(c);
-        count += 8;
-        while (count >= 6) {
-            count -= 6;
-            out += kBase64[(bits >> count) & 63];
-        }
-    }
-    if (count > 0) out += kBase64[(bits << (6 - count)) & 63];
-    while (out.size() % 4 != 0) out += '=';
-    return out;
-}
-
-std::string base64_decode(const std::string& text) {
-    std::string out;
-    uint32_t bits = 0;
-    int count = 0;
-    for (const char c : text) {
-        const char* found = c != '\0' ? strchr(kBase64, c) : nullptr;
-        if (found == nullptr) continue;
-        bits = (bits << 6) | static_cast<uint32_t>(found - kBase64);
-        count += 6;
-        if (count >= 8) {
-            count -= 8;
-            out += static_cast<char>((bits >> count) & 0xff);
-        }
-    }
-    return out;
-}
 
 Json object_of(std::vector<std::pair<std::string, Json>> members) {
     Json out;
