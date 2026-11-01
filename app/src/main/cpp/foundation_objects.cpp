@@ -1,6 +1,7 @@
 #include "foundation_internal.h"
 #include "symbols.h"
 #include "uikit_internal.h"
+#include "uuid.h"
 
 using namespace foundation;
 
@@ -588,6 +589,14 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSURLSessionConfiguration defaultSessionConfiguration]", reinterpret_cast<const void*>(url_session_configuration_default));
     objc_register_method("-[NSURLSessionConfiguration setTimeoutIntervalForRequest:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
+    objc_register_method("-[NSProcessInfo globallyUniqueString]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(uuid4()); }));
+    objc_register_method("-[NSProcessInfo processName]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(bundle_info_string("CFBundleExecutable")); }));
+    objc_register_method("-[NSProcessInfo processIdentifier]", reinterpret_cast<const void*>(+[](void*, const char*) -> int32_t { return getpid(); }));
+    objc_register_method("-[NSProcessInfo activeProcessorCount]", reinterpret_cast<const void*>(+[](void*, const char*) -> int64_t { return sysconf(_SC_NPROCESSORS_ONLN); }));
+    objc_register_method("-[NSProcessInfo processorCount]", reinterpret_cast<const void*>(+[](void*, const char*) -> int64_t { return sysconf(_SC_NPROCESSORS_CONF); }));
+    objc_register_method("-[NSProcessInfo isLowPowerModeEnabled]", reinterpret_cast<const void*>(+[](void*, const char*) -> bool { return false; }));
+    objc_register_method("-[NSProcessInfo isiOSAppOnMac]", reinterpret_cast<const void*>(+[](void*, const char*) -> bool { return false; }));
+    objc_register_method("-[NSProcessInfo isMacCatalystApp]", reinterpret_cast<const void*>(+[](void*, const char*) -> bool { return false; }));
     objc_register_method("-[NSProcessInfo isOperatingSystemAtLeastVersion:]", reinterpret_cast<const void*>(process_info_at_least));
     // The end of every guest dealloc chain. A stale property set must not reach whoever reuses this address.
     objc_register_method("-[NSObject dealloc]", reinterpret_cast<const void*>(+[](void* self, const char*) {
