@@ -8,6 +8,10 @@ import androidx.browser.customtabs.CustomTabsIntent
 import android.provider.OpenableColumns
 import android.util.Log
 import java.util.UUID
+import android.content.res.Configuration
+import android.content.res.ColorStateList
+import android.text.TextUtils
+import android.widget.ImageButton
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.DialogInterface
@@ -250,6 +254,8 @@ class GuestActivity : Activity() {
     } catch (_: ActivityNotFoundException) {
         false
     }
+
+    private fun isDarkMode(): Boolean = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
 
     private fun canOpenUrl(url: String): Boolean = packageManager.resolveActivity(viewIntent(url), 0) != null
 
@@ -1187,3 +1193,4 @@ class GuestActivity : Activity() {
         private external fun nativeAction(action: Int)
     }
 }
+            "dark-mode" -> current?.isDarkMode().toString()

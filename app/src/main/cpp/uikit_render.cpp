@@ -9,6 +9,7 @@
 #include "foundation_internal.h"
 #include "json.h"
 #include "swift_abi.h"
+#include "uikit_assets.h"
 #include "uikit_internal.h"
 
 using foundation::NSArrayObject;
@@ -313,6 +314,14 @@ Rect4 window_size_rect() {
             width = w->kind == Json::Kind::Integer ? static_cast<double>(w->integer) : w->number;
             height = h->kind == Json::Kind::Integer ? static_cast<double>(h->integer) : h->number;
         }
+void* color_named(void*, const char*, void* name) {
+    AssetColor color;
+    if (!asset_color(nsstring_text(name), engine_host_query("dark-mode", "") == "true", color)) return nullptr;
+    return make_color(color.red, color.green, color.blue, color.alpha);
+}
+
+void* color_named_in_bundle(void* self, const char* selector, void* name, void*, void*) { return color_named(self, selector, name); }
+
     }
     return {0, 0, width, height};
 }
@@ -330,6 +339,8 @@ void uikit_render_if_changed() {
     property_get_rect(view, "bounds", previous);
     if (previous[2] != screen.width || previous[3] != screen.height) autoresize_children(view, screen.width - previous[2], screen.height - previous[3]);
     const double bounds[4] = {0, 0, screen.width, screen.height};
+        {"colorNamed:", reinterpret_cast<const void*>(color_named)},
+        {"colorNamed:inBundle:compatibleWithTraitCollection:", reinterpret_cast<const void*>(color_named_in_bundle)},
     const double center[4] = {screen.width / 2, screen.height / 2, 0, 0};
     property_set_rect(view, "bounds", bounds);
     property_set_rect(view, "center", center);
