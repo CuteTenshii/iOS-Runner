@@ -857,7 +857,7 @@ SWIFTCC SwiftString string_localized(LocalizedBox** resource) { return swift_str
 SWIFTCC void locale_with_identifier(SWIFT_OUT void** out, uint64_t, uint64_t) { *out = objc_framework_object("NSLocale"); }
 
 // Locale.current is an immediate word rather than an object, and formatters only store what this returns.
-SWIFTCC void* locale_bridge_to_objc(SWIFT_CONTEXT void** self) { return reinterpret_cast<intptr_t>(*self) > 0 ? *self : objc_framework_object("NSLocale"); }
+SWIFTCC void* locale_bridge_to_objc(SWIFT_CONTEXT void** self) { return reinterpret_cast<intptr_t>(*self) > 0 ? rt_swift_retain(*self) : objc_framework_object("NSLocale"); }
 
 SWIFTCC void locale_current(SWIFT_OUT uint64_t* out) { *out = kLocaleImmediate; }
 
