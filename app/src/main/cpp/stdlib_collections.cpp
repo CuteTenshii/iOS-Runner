@@ -166,6 +166,14 @@ SWIFTCC void* dictionary_storage_resize(HashedHeader* original, int64_t capacity
     return allocate_dictionary(metadata, scale_for_capacity(capacity), original->age, 0, false);
 }
 
+// Its count stays 0 until the caller, which writes the elements, sets it.
+SWIFTCC void* array_allocate_uninitialized(int64_t capacity, void* element) {
+    char* elements;
+    auto* storage = static_cast<HashedHeader*>(make_array_storage(element, static_cast<size_t>(capacity), &elements));
+    storage->count = 0;
+    return storage;
+}
+
 SWIFTCC void* set_minimum_capacity(int64_t capacity, void* element, void*) {
     if (capacity == 0) return empty_set_singleton();
     void* arguments[] = {element};
@@ -261,6 +269,7 @@ void add_stdlib_collections_symbols(SymbolTable& table) {
         {"$ss11_SetStorageC8allocate8capacityAByxGSi_tFZ", reinterpret_cast<void*>(set_storage_allocate)},
         {"$ss11_SetStorageC4copy8originalAByxGs05__RawaB0C_tFZ", reinterpret_cast<void*>(set_storage_copy)},
         {"$ss11_SetStorageC6resize8original8capacity4moveAByxGs05__RawaB0C_SiSbtFZ", reinterpret_cast<void*>(set_storage_resize)},
+        {"$sSa28_allocateBufferUninitialized15minimumCapacitys06_ArrayB0VyxGSi_tFZ", reinterpret_cast<void*>(array_allocate_uninitialized)},
         {"$ss18_DictionaryStorageC8allocate8capacityAByxq_GSi_tFZ", reinterpret_cast<void*>(dictionary_storage_allocate)},
         {"$ss18_DictionaryStorageC4copy8originalAByxq_Gs05__RawaB0C_tFZ", reinterpret_cast<void*>(dictionary_storage_copy)},
         {"$ss18_DictionaryStorageC6resize8original8capacity4moveAByxq_Gs05__RawaB0C_SiSbtFZ", reinterpret_cast<void*>(dictionary_storage_resize)},

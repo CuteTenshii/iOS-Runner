@@ -934,3 +934,5 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
 }
 
 }  // namespace stdlib
+
+bool swift_object_is_kind_of(void* object, const void* target) { return dynamic_cast_class(object, target) != nullptr; }

@@ -1,4 +1,5 @@
 #include "foundation_internal.h"
+#include "type_system.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -811,7 +812,7 @@ void* object_from_any(const AnyValue& value) {
     if (value.type == nullptr) return nullptr;
     uint64_t kind;
     memcpy(&kind, value.type, sizeof kind);
-    if (kind == 0 || kind > kLargestMetadataKind) return reinterpret_cast<void*>(value.buffer[0]);
+    if (kind == 0 || kind > kLargestMetadataKind || imported_class_name(value.type) != nullptr) return reinterpret_cast<void*>(value.buffer[0]);
     if (value.type == type_system_symbol("$sSSN")) return new_nsstring(swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(value.buffer)));
     if (value.type == type_system_symbol("$sSbN")) return new_nsnumber(static_cast<uint8_t>(value.buffer[0]) != 0 ? 1 : 0, true);
     if (value.type == type_system_symbol("$sSiN")) return new_nsnumber(static_cast<int64_t>(value.buffer[0]), false);

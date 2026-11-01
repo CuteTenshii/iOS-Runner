@@ -747,6 +747,89 @@ SWIFTCC SwiftString uuid_string(SWIFT_CONTEXT URLBox** self) { return swift_stri
 void stdlib_random(void* buffer, size_t count) { arc4random_buf(buffer, count); }
 
 // Puts an Objective-C object into an Any as its Swift value, as the runtime's bridging does.
+struct ComponentsFormat {
+    uint64_t units = 0;
+    int64_t style = 0;
+    int64_t maximum_units = 0;
+};
+
+std::unordered_map<void*, ComponentsFormat>& components_formats() {
+    static std::unordered_map<void*, ComponentsFormat> table;
+    return table;
+}
+
+void components_set_units(void* self, const char*, uint64_t units) { components_formats()[self].units = units; }
+void components_set_style(void* self, const char*, int64_t style) { components_formats()[self].style = style; }
+void components_set_maximum(void* self, const char*, int64_t maximum) { components_formats()[self].maximum_units = maximum; }
+void components_ignore(void*, const char*, uint64_t) {}
+
+// Largest units first, as NSDateComponentsFormatter's non-positional styles print them in English.
+std::string format_interval(const ComponentsFormat& format, double interval) {
+    struct Unit {
+        uint64_t flag;
+        int64_t seconds;
+        const char* abbreviated;
+        const char* full;
+    };
+    static constexpr Unit kUnits[] = {
+        {1 << 2, 31536000, "y", "year"},
+        {1 << 3, 2592000, "mo", "month"},
+        {1 << 12, 604800, "w", "week"},
+        {1 << 4, 86400, "d", "day"},
+        {1 << 5, 3600, "h", "hour"},
+        {1 << 6, 60, "m", "minute"},
+        {1 << 7, 1, "s", "second"},
+    };
+    constexpr int64_t kStyleAbbreviated = 1, kStylePositional = 0;
+    constexpr uint64_t kDefaultUnits = (1 << 5) | (1 << 6) | (1 << 7);
+    const uint64_t allowed = format.units != 0 ? format.units : kDefaultUnits;
+    auto remaining = static_cast<int64_t>(interval < 0 ? -interval : interval);
+    std::string text;
+    int64_t used = 0;
+    const Unit* smallest = nullptr;
+    for (const Unit& unit : kUnits) {
+        if ((allowed & unit.flag) == 0) continue;
+        smallest = &unit;
+        const int64_t amount = remaining / unit.seconds;
+        if (amount == 0 || (format.maximum_units > 0 && used == format.maximum_units)) continue;
+        remaining -= amount * unit.seconds;
+        ++used;
+        if (!text.empty()) text += format.style == kStylePositional ? ":" : " ";
+        text += std::to_string(amount);
+        if (format.style == kStylePositional) continue;
+        if (format.style == kStyleAbbreviated) {
+            text += unit.abbreviated;
+        } else {
+            text += std::string(" ") + unit.full + (amount == 1 ? "" : "s");
+        }
+    }
+    if (!text.empty() || smallest == nullptr) return text;
+    if (format.style == kStylePositional) return "0";
+    return format.style == kStyleAbbreviated ? std::string("0") + smallest->abbreviated : std::string("0 ") + smallest->full + "s";
+}
+
+void* components_from_interval(void* self, const char*, double interval) { return new_nsstring(format_interval(components_formats()[self], interval)); }
+
+void* components_from_dates(void* self, const char*, void* start, void* end) {
+    double from = 0, to = 0;
+    date_from_object(start, from);
+    date_from_object(end, to);
+    return new_nsstring(format_interval(components_formats()[self], to - from));
+}
+
+// Takes the value at +0: the caller still destroys its copy.
+SWIFTCC void* bridge_anything_to_objective_c(const void* value, void* type) {
+    AnyValue any{};
+    any.type = type;
+    const size_t size = witnesses_of(type)->size;
+    if (size > sizeof any.buffer) {
+        engine_log("STOP: bridging a %zu-byte value to Objective-C", size);
+        abort();
+    }
+    memcpy(any.buffer, value, size);
+    return rt_swift_retain(object_from_any(any));
+}
+
 SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
     memset(out, 0, sizeof *out);
     const void* isa = object != nullptr ? static_cast<HeapObject*>(object)->metadata : nullptr;
@@ -771,7 +854,8 @@ SWIFTCC void bridge_any_object_to_any(SWIFT_OUT AnyValue* out, void* object) {
             out->type = type_system_symbol("$sSiN");
         }
     } else {
-        out->buffer[0] = reinterpret_cast<uint64_t>(object);
+        // The Any owns its value, and the caller goes on to release its own reference.
+        out->buffer[0] = reinterpret_cast<uint64_t>(object != nullptr ? rt_swift_retain(object) : nullptr);
         out->type = any_object_metadata();
     }
 }
@@ -831,11 +915,21 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$sSD10FoundationE34_conditionallyBridgeFromObjectiveC_6resultSbSo12NSDictionaryC_SDyxq_GSgztFZ", reinterpret_cast<void*>(dictionary_conditional_bridge_from_objc)},
         {"$s10Foundation22_convertNSErrorToErrorys0E0_pSo0C0CSgF", reinterpret_cast<void*>(error_identity)},
         {"$s10Foundation22_convertErrorToNSErrorySo0E0Cs0C0_pF", reinterpret_cast<void*>(error_identity)},
+        {"$ss27_bridgeAnythingToObjectiveCyyXlxlF", reinterpret_cast<void*>(bridge_anything_to_objective_c)},
         {"$ss018_bridgeAnyObjectToB0yypyXlSgF", reinterpret_cast<void*>(bridge_any_object_to_any)},
     });
 }
 
 void register_foundation_date_classes() {
+    objc_register_method("-[NSDateComponentsFormatter setAllowedUnits:]", reinterpret_cast<const void*>(components_set_units));
+    objc_register_method("-[NSDateComponentsFormatter setUnitsStyle:]", reinterpret_cast<const void*>(components_set_style));
+    objc_register_method("-[NSDateComponentsFormatter setMaximumUnitCount:]", reinterpret_cast<const void*>(components_set_maximum));
+    objc_register_method("-[NSDateComponentsFormatter setZeroFormattingBehavior:]", reinterpret_cast<const void*>(components_ignore));
+    objc_register_method("-[NSDateComponentsFormatter setIncludesApproximationPhrase:]", reinterpret_cast<const void*>(components_ignore));
+    objc_register_method("-[NSDateComponentsFormatter setIncludesTimeRemainingPhrase:]", reinterpret_cast<const void*>(components_ignore));
+    objc_register_method("-[NSDateComponentsFormatter setCollapsesLargestUnit:]", reinterpret_cast<const void*>(components_ignore));
+    objc_register_method("-[NSDateComponentsFormatter stringFromTimeInterval:]", reinterpret_cast<const void*>(components_from_interval));
+    objc_register_method("-[NSDateComponentsFormatter stringFromDate:toDate:]", reinterpret_cast<const void*>(components_from_dates));
     objc_register_method("-[NSOrderedSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
     objc_register_method("-[NSMutableOrderedSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
     objc_register_method("+[NSMutableOrderedSet orderedSetWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));

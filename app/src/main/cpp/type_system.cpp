@@ -135,6 +135,13 @@ void* type_system_symbol(std::string_view name) {
         if (name == "$sypN") return reinterpret_cast<char*>(any_type()) - sizeof(void*);
         if (name == "$sSSN" || name == "$sSS8UTF8ViewVN" || name == "$ss11_StringGutsVN" || name == "$ss26DefaultStringInterpolationVN") return string_type();
         if (name == "$sSiN") return pod_type("Si", 8);
+        if (name == "$sSuN") return pod_type("Su", 8);
+        if (name == "$sSdN") return pod_type("Sd", 8);
+        if (name == "$sSfN") return pod_type("Sf", 4);
+        if (name == "$ss4Int8VN" || name == "$ss5UInt8VN") return pod_type(std::string(name.substr(2, name.size() - 3)), 1);
+        if (name == "$ss5Int16VN" || name == "$ss6UInt16VN") return pod_type(std::string(name.substr(2, name.size() - 3)), 2);
+        if (name == "$ss5Int32VN" || name == "$ss6UInt32VN") return pod_type(std::string(name.substr(2, name.size() - 3)), 4);
+        if (name == "$ss5Int64VN" || name == "$ss6UInt64VN") return pod_type(std::string(name.substr(2, name.size() - 3)), 8);
         if (name == "$sSbN") return named_type("Sb", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 1, 1, 254);
         if (name == "$sSJN") return two_word_type("SJ", word_type(), bridge_word_type());
         if (name == "$sSsN" || name == "$sSs8UTF8ViewVN") return named_type("Ss", kKindStruct, new Layout{LayoutKind::Aggregate, {{word_type(), 0}, {word_type(), 8}, {word_type(), 16}, {bridge_word_type(), 24}}, nullptr}, 32, 8, kPointerExtraInhabitants);
@@ -337,7 +344,9 @@ bool swift_cast(void* destination, void* source, void* source_type, void* target
         auto** words = static_cast<void**>(source);
         contained = words[kAnyTypeWord];
         if (contained == nullptr) goto fail;
-        if (witnesses_of(contained)->flags & kFlagNonInline) {
+        // Framework classes have no witnesses, and their instances are always one inline reference.
+        const bool framework_object = !objc_framework_class_name(contained).empty();
+        if (!framework_object && (witnesses_of(contained)->flags & kFlagNonInline)) {
             const size_t mask = witnesses_of(contained)->flags & 0xff;
             value = static_cast<char*>(words[0]) + ((sizeof(HeapObject) + mask) & ~mask);
         }
@@ -369,13 +378,24 @@ bool swift_cast(void* destination, void* source, void* source_type, void* target
         if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
         return true;
     }
+    // A class named only by its import: an object's own class chain decides.
+    if (imported_class_name(target_type) != nullptr && (!objc_framework_class_name(contained).empty() || (witnesses_of(contained)->size == sizeof(void*) && (witnesses_of(contained)->flags & kFlagNonPod) != 0))) {
+        if (swift_object_is_kind_of(*static_cast<void**>(value), target_type)) {
+            witnesses_of(target_type)->initialize_with_copy(destination, value, target_type);
+            if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+            return true;
+        }
+        goto fail;
+    }
     if (cast_collection(destination, value, contained, target_type)) {
         if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
         return true;
     }
 fail:
     if (flags & kCastUnconditional) {
-        engine_log("STOP: an unconditional cast failed");
+        const char* from = foreign_type_name(source_type);
+        const char* to = imported_class_name(target_type) != nullptr ? imported_class_name(target_type) : foreign_type_name(target_type);
+        engine_log("STOP: an unconditional cast failed, from %s to %s", from != nullptr ? from : "an app type", to != nullptr ? to : "an app type");
         abort();
     }
     if (flags & kCastDestroyOnFailure) witnesses_of(source_type)->destroy(source, source_type);
