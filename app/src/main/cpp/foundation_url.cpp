@@ -766,7 +766,8 @@ const HeapMetadata kErrorBoxMetadata = {destroy_error_box, nullptr, 0};
 
 void* make_error(const std::string& message, int64_t code) {
     auto* box = static_cast<ErrorBox*>(calloc(1, sizeof(ErrorBox)));
-    box->metadata = const_cast<uint64_t*>(&kErrorBoxMetadata.kind);
+    static void* error_class = objc_native_class("NSError", destroy_error_box);
+    box->metadata = error_class;
     new (&box->references) std::atomic<uint64_t>(1);
     box->message = new std::string(message);
     box->code = code;

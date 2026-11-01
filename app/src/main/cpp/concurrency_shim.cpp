@@ -340,7 +340,8 @@ extern "C" TaskValueReady rt_task_value_begin(void* out, TaskObject* task, void*
     TaskCompletion& completion = *task->completion;
     if (completion.finished) {
         deliver_task_value(completion, out, type);
-        return {1, completion.error};
+        // Every awaiter owns the error it catches, and the task keeps its own reference.
+        return {1, completion.error != nullptr ? rt_swift_retain(completion.error) : nullptr};
     }
     static_cast<void**>(context)[2] = type;
     completion.waiters.push_back({out, context});
@@ -352,7 +353,7 @@ extern "C" void rt_task_completed(TaskCompletion* completion, void* error) {
     completion->error = error;
     for (const TaskWaiter& waiter : completion->waiters) {
         deliver_task_value(*completion, waiter.out, static_cast<void**>(waiter.context)[2]);
-        ready_tasks().push_back({static_cast<AsyncContextHeader*>(waiter.context)->resume_parent, error, nullptr, waiter.context, true, g_current_task});
+        ready_tasks().push_back({static_cast<AsyncContextHeader*>(waiter.context)->resume_parent, error != nullptr ? rt_swift_retain(error) : nullptr, nullptr, waiter.context, true, g_current_task});
     }
     completion->waiters.clear();
 }

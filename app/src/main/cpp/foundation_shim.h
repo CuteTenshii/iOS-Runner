@@ -64,3 +64,6 @@ void* foundation_make_url(const std::string& text);
 
 // Parses "yyyy-MM-ddTHH:mm:ss" with an optional fraction and offset, to seconds since 2001.
 bool foundation_parse_iso8601(const std::string& text, double& seconds);
+
+// The message of an error made by these shims, which has no Swift type behind it.
+SwiftString foundation_error_message(void* error);

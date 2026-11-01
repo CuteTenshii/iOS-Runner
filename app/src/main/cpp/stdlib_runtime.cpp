@@ -1,4 +1,5 @@
 #include "stdlib_internal.h"
+#include "symbols.h"
 
 using namespace stdlib;
 
@@ -317,6 +318,25 @@ std::string enum_case_name(const void* value, const void* type) {
 
 constexpr size_t kValueWitnessStrideOffset = 72;
 
+SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type);
+
+// A thrown value prints as itself; an error made by these shims has no type, only its message.
+static std::string error_description(void* error) {
+    struct ErrorParts {
+        void* value;
+        void* type;
+        void* witnesses;
+    };
+    using GetValue = void (*)(void*, void**, ErrorParts*);
+    static const auto get_value = reinterpret_cast<GetValue>(resolve_symbol("swift_getErrorValue"));
+    ErrorParts parts{};
+    get_value(error, nullptr, &parts);
+    if (parts.type == nullptr) return swift_string_to_utf8(foundation_error_message(error));
+    SwiftString out = swift_string_from_utf8("");
+    print_unlocked(parts.value, &out, parts.type);
+    return swift_string_to_utf8(out);
+}
+
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
     std::string text;
@@ -326,6 +346,8 @@ SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) 
         text = std::to_string(*static_cast<const int64_t*>(value));
     else if (type == type_system_symbol("$sSbN"))
         text = *static_cast<const uint8_t*>(value) != 0 ? "true" : "false";
+    else if (type == error_existential_type())
+        text = error_description(*static_cast<void* const*>(value));
     else
         text = enum_case_name(value, type);
     if (text.empty() && type != type_system_symbol("$sSSN")) text = "(value)";

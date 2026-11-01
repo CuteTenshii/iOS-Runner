@@ -1,4 +1,5 @@
 #include "foundation_internal.h"
+#include "symbols.h"
 
 using namespace foundation;
 
@@ -39,7 +40,11 @@ void destroy_guest_error(void* raw) {
     free(raw);
 }
 
-const HeapMetadata kGuestErrorMetadata = {destroy_guest_error, nullptr, 0};
+// A class like any other, so that a Swift error bridged to NSError can receive messages.
+void* guest_error_class() {
+    static void* cls = objc_native_class("NSError", destroy_guest_error);
+    return cls;
+}
 
 struct AllocatedError {
     void* box;
@@ -51,7 +56,16 @@ SWIFTCC AllocatedError swift_alloc_error(void* type, void* witnesses, void* init
     memcpy(&size, value_witnesses(type) + kValueWitnessSizeOffset, sizeof size);
     const size_t offset = guest_error_value_offset(type);
     auto* box = static_cast<GuestErrorBox*>(calloc(1, offset + size + 1));
-    box->metadata = const_cast<uint64_t*>(&kGuestErrorMetadata.kind);
+    box->metadata = guest_error_class();
+    if (const char* name = foreign_type_name(type)) {
+        engine_log("ERROR: thrown value of type %s", name);
+    } else {
+        // A value type's descriptor follows its kind, and holds its name eight bytes in.
+        const char* descriptor = static_cast<const char* const*>(type)[1];
+        int32_t name_offset;
+        memcpy(&name_offset, descriptor + 8, sizeof name_offset);
+        engine_log("ERROR: thrown value of type %s", descriptor + 8 + name_offset);
+    }
     new (&box->references) std::atomic<uint64_t>(1);
     box->type = type;
     box->witnesses = witnesses;
@@ -73,12 +87,39 @@ struct ErrorValue {
 // Runtime errors report a null type, which localizedDescription uses to tell them apart.
 void swift_get_error_value(void* error, void**, ErrorValue* out) {
     auto* box = static_cast<GuestErrorBox*>(error);
-    if (box->metadata == &kGuestErrorMetadata.kind) {
+    if (box->metadata == guest_error_class()) {
         *out = {reinterpret_cast<char*>(box) + guest_error_value_offset(box->type), box->type, box->witnesses};
     } else {
         *out = {error, nullptr, nullptr};
     }
 }
+
+void* nserror_domain(void* self, const char*) {
+    auto* box = static_cast<GuestErrorBox*>(self);
+    if (box->metadata != guest_error_class()) return new_nsstring("NSCocoaErrorDomain");
+    const char* name = foreign_type_name(box->type);
+    return new_nsstring(name != nullptr ? name : "SwiftError");
+}
+
+int64_t nserror_code(void* self, const char*) {
+    auto* box = static_cast<GuestErrorBox*>(self);
+    return box->metadata == guest_error_class() ? 1 : static_cast<ErrorBox*>(self)->code;
+}
+
+void* nserror_user_info(void*, const char*) { return collection_bridge_to_objc(resolve_symbol("_swiftEmptyDictionarySingleton")); }
+
+void* nserror_description(void* self, const char*) {
+    auto* box = static_cast<GuestErrorBox*>(self);
+    return new_nsstring(box->metadata == guest_error_class() ? "The operation could not be completed." : *static_cast<ErrorBox*>(self)->message);
+}
+
+void* nserror_nothing(void*, const char*) { return nullptr; }
+
+}  // namespace foundation
+
+SwiftString foundation_error_message(void* error) { return swift_string_from_utf8(*static_cast<foundation::ErrorBox*>(error)->message); }
+
+namespace foundation {
 
 SWIFTCC SwiftString error_localized_description(void* type, void*, SWIFT_CONTEXT void* value) {
     if (type == nullptr) return swift_string_from_utf8(*static_cast<ErrorBox*>(value)->message);
@@ -481,6 +522,15 @@ void add_foundation_request_symbols(SymbolTable& table) {
 }
 
 void register_foundation_request_classes() {
+    objc_register_method("-[NSError domain]", reinterpret_cast<const void*>(nserror_domain));
+    objc_register_method("-[NSError code]", reinterpret_cast<const void*>(nserror_code));
+    objc_register_method("-[NSError userInfo]", reinterpret_cast<const void*>(nserror_user_info));
+    objc_register_method("-[NSError description]", reinterpret_cast<const void*>(nserror_description));
+    objc_register_method("-[NSError debugDescription]", reinterpret_cast<const void*>(nserror_description));
+    objc_register_method("-[NSError localizedDescription]", reinterpret_cast<const void*>(nserror_description));
+    objc_register_method("-[NSError localizedFailureReason]", reinterpret_cast<const void*>(nserror_nothing));
+    objc_register_method("-[NSError localizedRecoverySuggestion]", reinterpret_cast<const void*>(nserror_nothing));
+    objc_register_method("-[NSError underlyingErrors]", reinterpret_cast<const void*>(nserror_nothing));
     objc_register_method("-[NSHTTPURLResponse statusCode]", reinterpret_cast<const void*>(http_response_status));
     objc_register_method("-[NSURLSessionConfiguration setHTTPAdditionalHeaders:]", reinterpret_cast<const void*>(session_set_headers));
 }

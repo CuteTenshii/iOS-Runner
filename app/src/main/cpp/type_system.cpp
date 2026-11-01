@@ -1,3 +1,4 @@
+#include "objc_runtime.h"
 #include "type_system_internal.h"
 
 using namespace type_system;
@@ -287,7 +288,20 @@ bool cast_collection(void* destination, void* value, void* contained, void* targ
     return true;
 }
 
+constexpr uint64_t kObjCClassWrapperKind = 0x305;
+
+void* error_existential_type() {
+    const std::lock_guard guard(g_types_lock);
+    return protocol_existential("_$ss5ErrorMp");
+}
+
 bool swift_cast(void* destination, void* source, void* source_type, void* target_type, size_t flags) {
+    // `error as NSError`: every error box here also answers NSError's messages.
+    if (source_type == protocol_existential("_$ss5ErrorMp") && static_cast<Metadata*>(target_type)->kind == kObjCClassWrapperKind && objc_framework_class_name(static_cast<void**>(target_type)[1]) == "NSError") {
+        witnesses_of(source_type)->initialize_with_copy(destination, source, source_type);
+        if (flags & kCastTakeOnSuccess) witnesses_of(source_type)->destroy(source, source_type);
+        return true;
+    }
     const auto* source_metadata = static_cast<Metadata*>(source_type);
     void* value = source;
     void* contained = source_type;
