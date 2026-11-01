@@ -731,6 +731,7 @@ const void* uikit_method_for_selector(const std::string& selector) {
     const auto found = table.find(selector);
     if (found != table.end()) return found->second;
     if (const void* layout = uikit_layout_method_for_selector(selector)) return layout;
+    if (const void* collection = uikit_collection_method_for_selector(selector)) return collection;
     return uikit_color_method_for_selector(selector);
 }
 

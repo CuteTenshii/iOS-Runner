@@ -69,7 +69,7 @@ int add_action(std::function<void()> action);
 
 void describe_container(void* controller, double width, double height, std::vector<Json>& children);
 
-Json describe_view(void* view, double parent_x, double parent_y) {
+Json describe_view(void* view, double parent_x, double parent_y, const std::function<void()>& select = nullptr) {
     double bounds[4], center[4];
     property_get_rect(view, "bounds", bounds);
     property_get_rect(view, "center", center);
@@ -98,7 +98,13 @@ Json describe_view(void* view, double parent_x, double parent_y) {
         const int id = add_action([target, selector, view] { objc_send(target, nsstring_text(selector).c_str(), view); });
         members.emplace_back("a", number(id));
     }
+    if (select) members.emplace_back("a", number(add_action(select)));
     std::vector<Json> children;
+    if (list_is_view(view)) {
+        ListLayout layout = list_layout(view, width);
+        for (const ListLayoutCell& cell : layout.cells) children.push_back(describe_view(cell.view, 0, 0, cell.select));
+        members.emplace_back("scroll", number(layout.content_height));
+    }
     auto* subviews = static_cast<NSArrayObject*>(property_get_object(view, "subviews"));
     if (subviews != nullptr) {
         for (void* child : *subviews->items) children.push_back(describe_view(child, parent_x + x, parent_y + y));

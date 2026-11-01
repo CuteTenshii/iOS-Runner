@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -172,6 +173,11 @@ struct DecodePosition {
     uint32_t index;
 };
 
+std::unordered_map<void*, std::string>& embedded_nibs() {
+    static std::unordered_map<void*, std::string> table;
+    return table;
+}
+
 std::unordered_map<void*, DecodePosition>& decoders() {
     static std::unordered_map<void*, DecodePosition> table;
     return table;
@@ -238,6 +244,11 @@ void apply_values(void* self, NibArchive& archive, uint32_t index) {
     finish_decoded_object(self, object.class_name);
 }
 
+std::string object_data_bytes(const NibArchive& archive, uint32_t index) {
+    const NibValue* bytes = value_named(archive.objects[index], "NS.bytes");
+    return bytes != nullptr ? bytes->data : std::string();
+}
+
 void* build_object(NibArchive& archive, uint32_t index) {
     if (index >= archive.objects.size()) return nullptr;
     NibObject& object = archive.objects[index];
@@ -273,6 +284,10 @@ void* build_object(NibArchive& archive, uint32_t index) {
             object.instance = reinterpret_cast<InitWithCoder>(const_cast<void*>(objc_method_for(object.instance, "initWithCoder:")))(object.instance, "initWithCoder:", decoder);
         } else {
             apply_values(object.instance, archive, index);
+            if (const NibValue* contents = name == "UINib" ? value_named(object, "archiveData") : nullptr) {
+                embedded_nibs()[object.instance] = object_data_bytes(archive, contents->object);
+                property_set_object(object.instance, "storyboard", archive.storyboard);
+            }
         }
     }
     return object.instance;
@@ -350,13 +365,34 @@ void run_connections(NibArchive& archive, uint32_t root) {
 
 }  // namespace
 
+namespace {
+std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard);
+}
+
 std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard) {
-    std::ifstream file(path, std::ios::binary);
+    // A nib built for several OS versions is a directory of archives.
+    const std::string file_path = std::filesystem::is_directory(path) ? path + "/objects-13.0+.nib" : path;
+    std::ifstream file(file_path, std::ios::binary);
     if (!file) {
-        engine_log("UIKIT: no nib at %s", path.c_str());
+        engine_log("UIKIT: no nib at %s", file_path.c_str());
         return {};
     }
     const std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    return instantiate_archive(data, path, owner, storyboard);
+}
+
+std::vector<void*> nib_instantiate_object(void* nib, void* owner) {
+    if (void* path = property_get_object(nib, "nibPath")) return nib_instantiate(nsstring_text(path), owner, nullptr);
+    const auto embedded = embedded_nibs().find(nib);
+    if (embedded == embedded_nibs().end()) {
+        engine_log("UIKIT: a UINib has no contents");
+        return {};
+    }
+    return instantiate_archive(embedded->second, "an embedded nib", owner, property_get_object(nib, "storyboard"));
+}
+
+namespace {
+std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard) {
     // Decoders of guest objects may outlive this call, so an archive is kept for the life of the process.
     auto* archive = new NibArchive;
     if (!parse_archive(data, *archive) || archive->objects.empty()) {
@@ -383,6 +419,7 @@ std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* s
     }
     return top_objects;
 }
+}  // namespace
 
 void register_nib_classes() {
     objc_register_method("-[UINibDecoder decodeObjectForKey:]", reinterpret_cast<const void*>(decode_object));

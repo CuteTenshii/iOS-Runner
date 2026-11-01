@@ -564,13 +564,22 @@ class GuestActivity : Activity() {
             }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         val children = node.optJSONArray("c") ?: return frame
+        val content = if (node.has("scroll")) FrameLayout(this) else frame
+        if (content !== frame) {
+            val height = (node.optDouble("scroll") * resources.displayMetrics.density).roundToInt()
+            frame.addView(ScrollView(this).apply {
+                tag = "uilist:" + node.optString("class")
+                isFillViewport = true
+                addView(content, FrameLayout.LayoutParams(MATCH_PARENT, height))
+            }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
         forEachChild(children) { child ->
             val view = when (child.optString("k")) {
                 "uitabbar" -> buildUiTabBar(child)
                 "uinavbar" -> buildUiNavigationBar(child)
                 else -> buildUiView(child)
             }
-            frame.addView(view, uiViewParams(child))
+            content.addView(view, uiViewParams(child))
         }
         return frame
     }
