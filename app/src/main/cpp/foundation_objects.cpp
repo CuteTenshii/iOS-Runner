@@ -647,12 +647,12 @@ void register_number_methods() {
     objc_register_method("-[NSNumber doubleValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return number_as_double(self); }));
     objc_register_method("-[NSNumber floatValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return static_cast<float>(number_as_double(self)); }));
     objc_register_method("-[NSNumber stringValue]", reinterpret_cast<const void*>(+[](void* self, const char*) -> void* {
-        const auto* number = static_cast<NSNumberObject*>(self);
-        if (!number->is_real) return new_nsstring(std::to_string(number->value));
-        char text[40];
-        snprintf(text, sizeof text, "%.17g", number->real);
-        return new_nsstring(text);
-    }));
+                             const auto* number = static_cast<NSNumberObject*>(self);
+                             if (!number->is_real) return new_nsstring(std::to_string(number->value));
+                             char text[40];
+                             snprintf(text, sizeof text, "%.17g", number->real);
+                             return new_nsstring(text);
+                         }));
 }
 
 void register_progress_methods() {
@@ -667,21 +667,21 @@ void register_progress_methods() {
     objc_register_method("-[NSProgress isFinished]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_fraction(self) >= 1.0; }));
     objc_register_method("-[NSProgress isCancelled]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_states()[self].cancelled; }));
     objc_register_method("-[NSProgress cancel]", reinterpret_cast<const void*>(+[](void* self, const char*) {
-        // Copied first: reaching a child's state can grow the table this reference points into.
-        const auto children = progress_states()[self].children;
-        progress_states()[self].cancelled = true;
-        if (void* handler = progress_states()[self].cancellation_handler) {
-            using Invoke = void (*)(void*);
-            reinterpret_cast<Invoke>(static_cast<BlockHeader*>(handler)->invoke)(handler);
-        }
-        using Cancel = void (*)(void*, const char*);
-        for (const auto& [child, pending] : children) reinterpret_cast<Cancel>(const_cast<void*>(objc_method_for(child, "cancel")))(child, "cancel");
-    }));
+                             // Copied first: reaching a child's state can grow the table this reference points into.
+                             const auto children = progress_states()[self].children;
+                             progress_states()[self].cancelled = true;
+                             if (void* handler = progress_states()[self].cancellation_handler) {
+                                 using Invoke = void (*)(void*);
+                                 reinterpret_cast<Invoke>(static_cast<BlockHeader*>(handler)->invoke)(handler);
+                             }
+                             using Cancel = void (*)(void*, const char*);
+                             for (const auto& [child, pending] : children) reinterpret_cast<Cancel>(const_cast<void*>(objc_method_for(child, "cancel")))(child, "cancel");
+                         }));
     objc_register_method("-[NSProgress setCancellationHandler:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* handler) { progress_states()[self].cancellation_handler = handler != nullptr ? darwin_block_copy(handler) : nullptr; }));
     objc_register_method("-[NSProgress addChild:withPendingUnitCount:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* child, int64_t pending) {
-        rt_swift_retain(child);
-        progress_states()[self].children.emplace_back(child, pending);
-    }));
+                             rt_swift_retain(child);
+                             progress_states()[self].children.emplace_back(child, pending);
+                         }));
 }
 
 }  // namespace
@@ -778,13 +778,13 @@ void register_foundation_objects_classes() {
     objc_register_method("-[NSUserDefaults objectForKey:]", reinterpret_cast<const void*>(defaults_object_for_key));
     // A collection is kept as JSON, which holds either kind; each getter only answers for its own.
     objc_register_method("-[NSUserDefaults arrayForKey:]", reinterpret_cast<const void*>(+[](void* self, const char* selector, void* key) -> void* {
-        void* object = defaults_string_array_for_key(self, selector, key);
-        return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_bridged_collection_class ? object : nullptr;
-    }));
+                             void* object = defaults_string_array_for_key(self, selector, key);
+                             return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_bridged_collection_class ? object : nullptr;
+                         }));
     objc_register_method("-[NSUserDefaults dictionaryForKey:]", reinterpret_cast<const void*>(+[](void* self, const char* selector, void* key) -> void* {
-        void* object = defaults_string_array_for_key(self, selector, key);
-        return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_json_value_class ? object : nullptr;
-    }));
+                             void* object = defaults_string_array_for_key(self, selector, key);
+                             return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_json_value_class ? object : nullptr;
+                         }));
     objc_register_method("-[NSUserDefaults stringArrayForKey:]", reinterpret_cast<const void*>(defaults_string_array_for_key));
     objc_register_method("-[NSUserDefaults boolForKey:]", reinterpret_cast<const void*>(defaults_bool_for_key));
     objc_register_method("-[NSUserDefaults integerForKey:]", reinterpret_cast<const void*>(defaults_integer_for_key));

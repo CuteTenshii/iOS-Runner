@@ -796,9 +796,9 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"swift_isUniquelyReferencedNonObjC_nonNull_bridgeObject", reinterpret_cast<void*>(+[](uint64_t bits, uint32_t) { return is_uniquely_referenced(reinterpret_cast<void*>(bits & kBridgePointerMask)); })},
         {"swift_getInitializedObjCClass", reinterpret_cast<void*>(+[](void* cls) { return cls; })},
         {"swift_isClassType", reinterpret_cast<void*>(+[](const uint64_t* type) {
-            constexpr uint64_t kLargestMetadataKind = 0x7ff;
-            return type[0] == 0 || type[0] > kLargestMetadataKind;
-        })},
+             constexpr uint64_t kLargestMetadataKind = 0x7ff;
+             return type[0] == 0 || type[0] > kLargestMetadataKind;
+         })},
         {"swift_stdlib_isStackAllocationSafe", reinterpret_cast<void*>(+[](size_t, size_t) { return true; })},
         {"swift_dynamicCastUnknownClass", reinterpret_cast<void*>(dynamic_cast_class)},
         {"swift_dynamicCastUnknownClassUnconditional", reinterpret_cast<void*>(dynamic_cast_class_unconditional)},

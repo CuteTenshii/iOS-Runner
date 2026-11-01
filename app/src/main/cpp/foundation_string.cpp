@@ -193,7 +193,9 @@ std::vector<Utf8Scalar> utf8_scalars(const std::string& text) {
     std::vector<Utf8Scalar> scalars;
     for (size_t i = 0; i < text.size();) {
         const auto first = static_cast<unsigned char>(text[i]);
-        size_t length = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+        size_t length = first < 0x80 ? 1 : first < 0xe0 ? 2
+                                       : first < 0xf0   ? 3
+                                                        : 4;
         if (i + length > text.size()) length = text.size() - i;
         char32_t scalar = length == 1 ? first : first & (0xff >> (length + 1));
         for (size_t j = 1; j < length; ++j) scalar = (scalar << 6) | (static_cast<unsigned char>(text[i + j]) & 0x3f);
@@ -253,16 +255,20 @@ SWIFTCC void set_inverted(SWIFT_OUT CharacterSetBox** out, SWIFT_CONTEXT Charact
 void add_to_set(CharacterSetBox* box, const std::u32string& scalars) {
     for (const char32_t scalar : scalars) {
         std::u32string& members = *box->members;
-        if (box->inverted) members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
-        else if (members.find(scalar) == std::u32string::npos) members += scalar;
+        if (box->inverted)
+            members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
+        else if (members.find(scalar) == std::u32string::npos)
+            members += scalar;
     }
 }
 
 void remove_from_set(CharacterSetBox* box, const std::u32string& scalars) {
     for (const char32_t scalar : scalars) {
         std::u32string& members = *box->members;
-        if (!box->inverted) members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
-        else if (members.find(scalar) == std::u32string::npos) members += scalar;
+        if (!box->inverted)
+            members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
+        else if (members.find(scalar) == std::u32string::npos)
+            members += scalar;
     }
 }
 

@@ -270,7 +270,8 @@ bool json_from_object(void* object, Json& out) {
         out = json_text(nsstring_text(object));
     } else if (cls == g_nsnumber_class) {
         const auto* number = static_cast<NSNumberObject*>(object);
-        out.kind = number->is_real ? Json::Kind::Number : number->is_bool ? Json::Kind::Bool : Json::Kind::Integer;
+        out.kind = number->is_real ? Json::Kind::Number : number->is_bool ? Json::Kind::Bool
+                                                                          : Json::Kind::Integer;
         out.flag = number->value != 0;
         out.integer = number->value;
         out.number = number->real;
