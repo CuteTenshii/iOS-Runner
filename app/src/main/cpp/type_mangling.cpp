@@ -327,6 +327,12 @@ private:
             }
         }
         Node base = pop();
+        // Objective-C generics are erased: NSFetchRequest<T> is just a reference to the class.
+        if (base.tag == Node::Tag::Type && base.type == native_type()) {
+            stack_.push_back(base);
+            substitute(base);
+            return;
+        }
         if (base.tag != Node::Tag::Nominal) {
             fail("bound generic base is not a nominal type");
             return;

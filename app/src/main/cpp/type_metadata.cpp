@@ -1,3 +1,4 @@
+#include "objc_runtime.h"
 #include "symbols.h"
 #include "type_system_internal.h"
 
@@ -645,6 +646,15 @@ void install_class_vtable(void** metadata, const char* descriptor) {
     }
 }
 
+// "So8NSObjectC", possibly with erased generic arguments: as a type that's only a reference, but a superclass needs the class.
+void* imported_superclass(const char* name) {
+    if (strncmp(name, "So", 2) != 0) return nullptr;
+    char* end = nullptr;
+    const unsigned long length = strtoul(name + 2, &end, 10);
+    if (length == 0 || end[length] != 'C') return nullptr;
+    return objc_class_named(std::string(end, length));
+}
+
 // Completes a generic class: finds its superclass, inherits that class's slots, then lays out its fields.
 extern "C" void* rt_initClassMetadata2(char* metadata, size_t flags, size_t field_count, const void* const* field_layouts, size_t* field_offsets) {
     auto** words = reinterpret_cast<void**>(metadata);
@@ -654,7 +664,8 @@ extern "C" void* rt_initClassMetadata2(char* metadata, size_t flags, size_t fiel
     void* const* arguments = words + positive - immediate;
     if (const char* name = relative_address(descriptor + kClassSuperclassTypeOffset)) {
         const size_t length = mangled_name_length(name);
-        auto** super = static_cast<void**>(rt_getTypeByMangledNameInContext2(name, length, descriptor, arguments));
+        auto** super = static_cast<void**>(imported_superclass(name));
+        if (super == nullptr) super = static_cast<void**>(rt_getTypeByMangledNameInContext2(name, length, descriptor, arguments));
         words[1] = super;
         if (super != nullptr && unresolved_symbol_at(reinterpret_cast<uintptr_t>(super)) == nullptr && super[kClassDescriptionWord] != nullptr) {
             const uint32_t super_positive = read_u32_at(static_cast<const char*>(super[kClassDescriptionWord]) + kClassPositiveSizeOffset);
