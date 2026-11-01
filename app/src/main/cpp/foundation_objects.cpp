@@ -790,3 +790,16 @@ void register_foundation_objects_classes() {
 }
 
 }  // namespace foundation
+
+void* object_from_any(const AnyValue& value) {
+    constexpr uint64_t kLargestMetadataKind = 0x7ff;
+    if (value.type == nullptr) return nullptr;
+    uint64_t kind;
+    memcpy(&kind, value.type, sizeof kind);
+    if (kind == 0 || kind > kLargestMetadataKind) return reinterpret_cast<void*>(value.buffer[0]);
+    if (value.type == type_system_symbol("$sSSN")) return new_nsstring(swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(value.buffer)));
+    if (value.type == type_system_symbol("$sSbN")) return new_nsnumber(static_cast<uint8_t>(value.buffer[0]) != 0 ? 1 : 0, true);
+    if (value.type == type_system_symbol("$sSiN")) return new_nsnumber(static_cast<int64_t>(value.buffer[0]), false);
+    engine_log("STOP: a value in an [Any] of a type that has no object form");
+    abort();
+}

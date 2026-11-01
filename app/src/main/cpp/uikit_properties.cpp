@@ -215,6 +215,13 @@ std::vector<void*> object_array_items(void* array) {
             for (int64_t i = 0; i < count; ++i) strings.push_back(foundation::new_nsstring(swift_string_to_utf8(text[i])));
             return strings;
         }
+        // An [Any] holds full existentials, which callers expect as the objects inside them.
+        if (static_cast<foundation::BridgedCollection*>(array)->element_type == any_type()) {
+            std::vector<void*> objects;
+            const auto* values = reinterpret_cast<const foundation::AnyValue*>(elements);
+            for (int64_t i = 0; i < count; ++i) objects.push_back(object_from_any(values[i]));
+            return objects;
+        }
         return std::vector<void*>(elements, elements + count);
     }
     return *static_cast<foundation::NSArrayObject*>(array)->items;

@@ -359,6 +359,7 @@ extern void* g_cookie_observer;
 // Only what the script results here need: an object of booleans, or a single value.
 void write_script_result(AnyValue* out, const std::string& json);
 void* any_type();
+void* object_from_any(const AnyValue& value);
 
 // A JSON value as the Swift value Foundation would bridge it to; null stays an object no `as?` accepts.
 void json_to_any(const Json& json, AnyValue* out);

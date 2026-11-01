@@ -272,7 +272,11 @@ void* unique_collection_from_array(void*, const char*, void* source) {
 
 void* collection_as_array(void* self, const char*) { return self; }
 
-std::vector<void*>& array_items_of(void* self) { return *static_cast<NSArrayObject*>(self)->items; }
+// Core Data's to-many relationships read as empty collections before anything is added, which is nil in this store.
+std::vector<void*>& array_items_of(void* self) {
+    static std::vector<void*> empty;
+    return self != nullptr ? *static_cast<NSArrayObject*>(self)->items : empty;
+}
 
 int64_t array_count(void* self, const char*) { return static_cast<int64_t>(array_items_of(self).size()); }
 void* array_object_at(void* self, const char*, int64_t index) { return array_items_of(self).at(static_cast<size_t>(index)); }
