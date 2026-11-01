@@ -236,6 +236,7 @@ bool uikit_class_inherits(const std::string& framework_class, const std::string&
         {"UINavigationController", "UIViewController"},
         {"UITableViewController", "UIViewController"},
         {"UICollectionViewController", "UIViewController"},
+        {"UIImageNibPlaceholder", "UIImage"},
         {"UIWindow", "UIView"},
         {"UILabel", "UIView"},
         {"UIImageView", "UIView"},
@@ -307,6 +308,7 @@ void uikit_register_classes() {
     uikit::register_nib_classes();
     uikit::register_view_classes();
     uikit::register_collection_classes();
+    uikit::register_image_classes();
     register_device_classes();
 }
 

@@ -58,6 +58,7 @@ std::string color_text(void* color) {
 
 std::string text_of(void* view) {
     if (void* title = property_get_object(view, "buttonTitle")) return nsstring_text(title);
+    if (object_is_kind(view, "UIButton")) return button_nib_title(view);
     void* text = property_get_object(view, "text");
     if (text != nullptr && objc_framework_class_name(*static_cast<void**>(text)) == "NSString") return nsstring_text(text);
     void* attributed = property_get_object(view, "attributedText");
@@ -66,6 +67,36 @@ std::string text_of(void* view) {
 }
 
 int add_action(std::function<void()> action);
+
+bool is_dark_mode() { return engine_host_query("dark-mode", "") == "true"; }
+
+// The nearest tint up the view hierarchy, as templates draw in; the image's own comes first.
+std::string inherited_tint(void* view, void* image) {
+    if (const std::string own = color_text(property_get_object(image, "tintColor")); !own.empty()) return own;
+    for (void* current = view; current != nullptr; current = property_get_object(current, "superview")) {
+        if (const std::string tint = color_text(property_get_object(current, "tintColor")); !tint.empty()) return tint;
+    }
+    return {};
+}
+
+void add_image_members(void* image, std::vector<std::pair<std::string, Json>>& members) {
+    ImageDescription description;
+    if (!describe_image(image, is_dark_mode(), description)) return;
+    if (description.template_image) members.emplace_back("tmpl", number(1));
+    if (!description.symbol.empty()) {
+        members.emplace_back("sym", json_text(description.symbol));
+        return;
+    }
+    members.emplace_back("img", json_text(description.file));
+    members.emplace_back("iw", number(description.width));
+    members.emplace_back("ih", number(description.height));
+    if (description.crop_width > 0) {
+        members.emplace_back("cx", number(description.crop_x));
+        members.emplace_back("cy", number(description.crop_y));
+        members.emplace_back("cw", number(description.crop_width));
+        members.emplace_back("ch", number(description.crop_height));
+    }
+}
 
 void describe_container(void* controller, double width, double height, std::vector<Json>& children);
 
@@ -93,6 +124,11 @@ Json describe_view(void* view, double parent_x, double parent_y, const std::func
         members.emplace_back("lines", number(static_cast<double>(property_get_word(view, "numberOfLines"))));
     }
     if (property_get_word(view, "hidden") != 0) members.emplace_back("hidden", number(1));
+    if (void* image = image_of_view(view)) {
+        add_image_members(image, members);
+        members.emplace_back("mode", number(static_cast<double>(property_get_word(view, "contentMode"))));
+        if (const std::string tint = inherited_tint(view, image); !tint.empty()) members.emplace_back("tint", json_text(tint));
+    }
     if (void* target = property_get_object(view, "actionTarget")) {
         void* selector = property_get_object(view, "actionSelector");
         const int id = add_action([target, selector, view] { objc_send(target, nsstring_text(selector).c_str(), view); });
@@ -170,7 +206,9 @@ void describe_tab_controller(void* controller, double width, double height, std:
     for (size_t i = 0; i < items.size(); ++i) {
         const int id = add_action([controller, i] { objc_send(controller, "setSelectedIndex:", reinterpret_cast<void*>(i)); });
         void* tab_item = property_get_object(items[i], "tabBarItem");
-        tabs.push_back(tree_leaf("uitab", {{"a", number(id)}, {"t", json_text(tab_item != nullptr ? text_property(tab_item, "title") : std::string())}, {"on", number(i == selected ? 1 : 0)}}));
+        std::vector<std::pair<std::string, Json>> tab = {{"a", number(id)}, {"t", json_text(tab_item != nullptr ? text_property(tab_item, "title") : std::string())}, {"on", number(i == selected ? 1 : 0)}};
+        if (void* image = tab_item != nullptr ? property_get_object(tab_item, "image") : nullptr) add_image_members(image, tab);
+        tabs.push_back(tree_leaf("uitab", std::move(tab)));
     }
     children.push_back(tree_leaf("uitabbar", {{"x", number(0)}, {"y", number(height - kTabBarHeight)}, {"w", number(width)}, {"h", number(kTabBarHeight)}, {"c", array_of(std::move(tabs))}}));
 }

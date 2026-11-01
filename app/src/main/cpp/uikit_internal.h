@@ -33,6 +33,19 @@ void register_nib_classes();
 void nib_set_next_controller_creator(void* creator, void* context);
 void register_view_classes();
 void register_collection_classes();
+void register_image_classes();
+
+struct ImageDescription {
+    std::string symbol;
+    std::string file;
+    double width = 0, height = 0;
+    uint32_t crop_x = 0, crop_y = 0, crop_width = 0, crop_height = 0;
+    bool template_image = false;
+};
+// What the host needs to draw a UIImage, or false if it has no contents.
+bool describe_image(void* image, bool dark, ImageDescription& out);
+void* image_of_view(void* view);
+std::string button_nib_title(void* view);
 void add_collection_symbols(SymbolMap& table);
 void add_view_symbols(SymbolMap& table);
 // A UINib's contents, from the file it names or the archive a storyboard embedded in it.

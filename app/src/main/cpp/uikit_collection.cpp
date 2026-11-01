@@ -413,6 +413,7 @@ SWIFTCC void* button_init(int64_t, void* action) {
 SWIFTCC void style_ignore(uint64_t, uint64_t, uint64_t, uint64_t, SWIFT_CONTEXT void*) {}
 SWIFTCC void style_box(SWIFT_OUT void** out) { *out = object_retain(objc_framework_object("UIStyleBox")); }
 SWIFTCC void* style_nil() { return nullptr; }
+SWIFTCC void button_configuration_set_image(void* image, SWIFT_CONTEXT void** self) { property_set_object(*self, "image", image); }
 void style_modify_end(void*, bool) {}
 struct StyleModify {
     void (*finish)(void*, bool);
@@ -575,7 +576,7 @@ void add_collection_symbols(SymbolMap& table) {
         {"$sSo8UIButtonC5UIKitE13ConfigurationV18titleLineBreakModeSo06NSLinefG0Vvs", reinterpret_cast<void*>(style_ignore)},
         {"$sSo8UIButtonC5UIKitE13ConfigurationV19baseForegroundColorSo7UIColorCSgvs", reinterpret_cast<void*>(style_ignore)},
         {"$sSo8UIButtonC5UIKitE13ConfigurationV30titleTextAttributesTransformerAC015UIConfigurationefG0VSgvs", reinterpret_cast<void*>(style_ignore)},
-        {"$sSo8UIButtonC5UIKitE13ConfigurationV5imageSo7UIImageCSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV5imageSo7UIImageCSgvs", reinterpret_cast<void*>(button_configuration_set_image)},
         {"$sSo8UIButtonC5UIKitE13ConfigurationV5plainAEyFZ", reinterpret_cast<void*>(style_box)},
         {"$sSo8UIButtonC5UIKitE13configurationAbCE13ConfigurationVSgvg", reinterpret_cast<void*>(button_get_configuration)},
         {"$sSo8UIButtonC5UIKitE13configurationAbCE13ConfigurationVSgvs", reinterpret_cast<void*>(button_set_configuration)},

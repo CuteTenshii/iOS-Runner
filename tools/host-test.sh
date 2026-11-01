@@ -13,13 +13,19 @@ SOURCES=()
 for source in "$SRC"/*.cpp; do
     [[ $source == */jni_bridge.cpp ]] || SOURCES+=("$source")
 done
+CODECS=(-DASTCENC_NEON=1 -DASTCENC_SSE=0 -DASTCENC_AVX=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0 -DASTCENC_DECOMPRESS_ONLY=1)
+SOURCES+=("$SRC"/third_party/astcenc/*.cpp)
+for source in "$SRC"/third_party/lzfse/*.c; do
+    "${CXX%++}" -O2 -w -c "$source" -o "$OUT/$(basename "$source").o"
+    SOURCES+=("$OUT/$(basename "$source").o")
+done
 EXTRA=()
 if [[ -n ${IOSRUNNER_EFENCE:-} ]]; then
     EXTRA=("$ROOT/tools/efence.cpp" -Wl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=realloc,--wrap=posix_memalign,--wrap=malloc_usable_size)
 fi
 TRACE=()
 if [[ -n ${IOSRUNNER_TRACE_HEAP:-} ]]; then TRACE=(-DIOSRUNNER_TRACE_HEAP); fi
-"$CXX" -std=c++20 -O1 -g -static -DIOSRUNNER_HOST ${TRACE[@]+"${TRACE[@]}"} -Wall -Wextra -o "$OUT/iosrunner-cli" "${SOURCES[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
+"$CXX" -std=c++20 -O1 -g -static -DIOSRUNNER_HOST ${TRACE[@]+"${TRACE[@]}"} -Wall -Wextra "${CODECS[@]}" -o "$OUT/iosrunner-cli" "${SOURCES[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 BUNDLE=$OUT/bundle
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE"

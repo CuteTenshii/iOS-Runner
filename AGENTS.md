@@ -36,6 +36,8 @@ Two more tools read an app's files. Run them with `python3 -I` on anything untru
 - `tools/macho.py calls|dis|selector|typeref <binary> ...` lists what a range of guest code calls, with selector names filled in. A crash's `app+0xOFFSET` is address `0x100000000 + OFFSET`.
 - `tools/nibdump.py <file.nib>` prints a compiled nib's objects and keys.
 
+`tools/build-icon-font.py` rebuilds the icon font from Material Symbols and checks `SfSymbols.kt` against it. The host logs `UIKIT: no icon for <name>` for an SF Symbol with no entry in that table, and draws nothing.
+
 On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-as moe.tenshii.iosrunner cat cache/engine.log`. Installed apps are under `files/apps/<bundle id>/`. `logcat` can be empty on some phones, so fatal VM errors and uncaught C++ exceptions are also copied into this log.
 
 ## Architecture

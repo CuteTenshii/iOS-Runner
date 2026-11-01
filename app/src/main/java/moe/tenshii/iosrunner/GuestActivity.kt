@@ -7,6 +7,10 @@ import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
 import android.provider.OpenableColumns
 import android.util.Log
+import android.util.LruCache
+import android.graphics.BitmapFactory
+import android.graphics.PorterDuff
+import java.nio.ByteOrder
 import java.util.UUID
 import android.content.res.Configuration
 import android.content.res.ColorStateList
@@ -42,6 +46,7 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -563,6 +568,7 @@ class GuestActivity : Activity() {
                 if (lines > 0) maxLines = lines
             }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
+        addUiImage(node, frame, text.isNotEmpty())
         val children = node.optJSONArray("c") ?: return frame
         val content = if (node.has("scroll")) FrameLayout(this) else frame
         if (content !== frame) {
@@ -584,6 +590,85 @@ class GuestActivity : Activity() {
         return frame
     }
 
+    private val unmappedSymbols = HashSet<String>()
+
+    private val imageCache = object : LruCache<String, Bitmap>(IMAGE_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
+
+    // Raw files are the engine's own decoded pixels; anything else is a format the platform reads.
+    private fun loadUiBitmap(node: JSONObject): Bitmap? {
+        val path = node.optString("img")
+        if (path.isEmpty()) return null
+        val cropWidth = node.optInt("cw")
+        val key = "$path|${node.optInt("cx")}|${node.optInt("cy")}|$cropWidth"
+        imageCache.get(key)?.let { return it }
+        val whole = if (path.endsWith(RAW_IMAGE_SUFFIX)) readRawBitmap(path) else BitmapFactory.decodeFile(path)
+        if (whole == null) {
+            Log.w(TAG, "UIKIT: could not decode $path")
+            return null
+        }
+        val bitmap = if (cropWidth > 0) {
+            Bitmap.createBitmap(whole, node.optInt("cx"), node.optInt("cy"), cropWidth, node.optInt("ch"))
+        } else {
+            whole
+        }
+        imageCache.put(key, bitmap)
+        return bitmap
+    }
+
+    private fun readRawBitmap(path: String): Bitmap? {
+        val bytes = File(path).readBytes()
+        if (bytes.size < RAW_IMAGE_HEADER_BYTES) return null
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val width = buffer.int
+        val height = buffer.int
+        if (width <= 0 || height <= 0) return null
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { copyPixelsFromBuffer(buffer) }
+    }
+
+    private fun uiImageTint(node: JSONObject): Int {
+        val tint = node.optString("tint")
+        return if (tint.isNotEmpty()) Color.parseColor(tint) else accentColor()
+    }
+
+    private fun addUiImage(node: JSONObject, frame: FrameLayout, hasText: Boolean) {
+        val density = resources.displayMetrics.density
+        val width = node.optDouble("w") * density
+        val height = node.optDouble("h") * density
+        val symbol = node.optString("sym")
+        if (symbol.isNotEmpty()) {
+            frame.addView(TextView(this).apply {
+                showIcon(symbol)
+                gravity = if (hasText) Gravity.CENTER_VERTICAL or Gravity.START else Gravity.CENTER
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, (minOf(width, height) * SYMBOL_SCALE).toFloat())
+                setTextColor(uiImageTint(node))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            return
+        }
+        val bitmap = loadUiBitmap(node) ?: return
+        val view = ImageView(this).apply {
+            setImageBitmap(bitmap)
+            scaleType = when (node.optInt("mode")) {
+                UI_CONTENT_SCALE_TO_FILL -> ImageView.ScaleType.FIT_XY
+                UI_CONTENT_ASPECT_FILL -> ImageView.ScaleType.CENTER_CROP
+                else -> ImageView.ScaleType.FIT_CENTER
+            }
+            if (node.optInt("tmpl") != 0) setColorFilter(uiImageTint(node), PorterDuff.Mode.SRC_IN)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        val mode = node.optInt("mode")
+        val fits = mode == UI_CONTENT_SCALE_TO_FILL || mode == UI_CONTENT_ASPECT_FIT || mode == UI_CONTENT_ASPECT_FILL
+        // The other modes place the image at its own size, so it mustn't stretch to the view.
+        val params = if (fits && !hasText) {
+            FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+        } else {
+            FrameLayout.LayoutParams((node.optDouble("iw") * density).roundToInt(), (node.optDouble("ih") * density).roundToInt(), if (hasText) Gravity.START or Gravity.CENTER_VERTICAL else Gravity.CENTER)
+        }
+        frame.addView(view, params)
+    }
+
     private fun buildUiTabBar(node: JSONObject): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -591,19 +676,44 @@ class GuestActivity : Activity() {
             elevation = BAR_ELEVATION_DP * resources.displayMetrics.density
         }
         forEachChild(node.getJSONArray("c")) { tab ->
-            bar.addView(TextView(this).apply {
-                text = tab.optString("t")
+            val selected = tab.optInt("on") != 0
+            val color = themeColor(if (selected) android.R.attr.colorAccent else android.R.attr.textColorSecondary)
+            bar.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                maxLines = 1
-                ellipsize = TextUtils.TruncateAt.END
-                textSize = TAB_TEXT_SP
-                val selected = tab.optInt("on") != 0
-                setTextColor(themeColor(if (selected) android.R.attr.colorAccent else android.R.attr.textColorSecondary))
-                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
                 isSelected = selected
-                contentDescription = text
+                contentDescription = tab.optString("t")
                 background = selectableBackground()
                 setOnClickListener { nativeAction(tab.getInt("a")) }
+                val iconSize = dp(TAB_ICON_DP)
+                val symbol = tab.optString("sym")
+                if (symbol.isNotEmpty()) {
+                    addView(TextView(this@GuestActivity).apply {
+                        showIcon(symbol)
+                        gravity = Gravity.CENTER
+                        setTextSize(TypedValue.COMPLEX_UNIT_PX, iconSize.toFloat())
+                        setTextColor(color)
+                    }, LinearLayout.LayoutParams(iconSize, iconSize))
+                } else {
+                    // A bar draws every tab image as a template, whatever its format.
+                    loadUiBitmap(tab)?.let { bitmap ->
+                        addView(ImageView(this@GuestActivity).apply {
+                            setImageBitmap(bitmap)
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            setColorFilter(color, PorterDuff.Mode.SRC_IN)
+                        }, LinearLayout.LayoutParams(iconSize, iconSize))
+                    }
+                }
+                addView(TextView(this@GuestActivity).apply {
+                    text = tab.optString("t")
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                    ellipsize = TextUtils.TruncateAt.END
+                    textSize = TAB_LABEL_SP
+                    setTextColor(color)
+                    setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                })
             }, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
         }
         return bar
@@ -1089,79 +1199,21 @@ class GuestActivity : Activity() {
     }
 
     // SF Symbols are Apple's own artwork, so these are the nearest plain Unicode glyphs.
-    private val iconFont: Typeface by lazy { Typeface.createFromAsset(assets, "fonts/MaterialIcons-Regular.ttf") }
+    private val iconFont: Typeface by lazy { Typeface.createFromAsset(assets, "fonts/MaterialSymbolsOutlined.ttf") }
 
+    // The font draws an icon from its name through a ligature, and its FILL axis gives both of a symbol's styles.
     private fun TextView.showIcon(name: String) {
+        val icon = SfSymbols.icon(name)
+        if (icon == null) {
+            if (name.isNotEmpty() && unmappedSymbols.add(name)) Log.w(TAG, "UIKIT: no icon for $name")
+            text = ""
+            return
+        }
         typeface = iconFont
-        text = materialIcon(name)
+        fontVariationSettings = if (icon.filled) "'FILL' 1" else "'FILL' 0"
+        text = icon.ligature
     }
 
-    // The font draws an icon from its name through a ligature. Prefixes cover an SF Symbol's .fill and .circle variants.
-    private fun materialIcon(name: String): String = when {
-        name.isEmpty() -> ""
-        name.startsWith("hand.raised") -> "front_hand"
-        name.startsWith("person.3") -> "groups"
-        name.startsWith("person.text.rectangle") -> "badge"
-        name.startsWith("person.crop.circle") -> "account_circle"
-        name.startsWith("person") -> "person"
-        name.startsWith("gearshape") -> "settings"
-        name.startsWith("gear") -> "settings"
-        name.startsWith("chevron.down") -> "expand_more"
-        name.startsWith("chevron.up") -> "expand_less"
-        name.startsWith("chevron.right") -> "chevron_right"
-        name.startsWith("chevron.left") -> "chevron_left"
-        name.startsWith("arrow.clockwise") -> "refresh"
-        name.startsWith("arrow.counterclockwise") -> "restart_alt"
-        name.startsWith("arrow.down.circle") -> "download"
-        name.startsWith("line.3.horizontal.decrease") -> "filter_list"
-        name.startsWith("checkmark.shield") -> "verified_user"
-        name.startsWith("checkmark.circle") -> "check_circle"
-        name.startsWith("checkmark") -> "check"
-        name.startsWith("xmark") -> "close"
-        name.startsWith("exclamationmark") -> "warning"
-        name.startsWith("magnifyingglass") -> "search"
-        name.startsWith("plus") -> "add"
-        name.startsWith("minus") -> "remove"
-        name.startsWith("globe") -> "public"
-        name.startsWith("square.grid") -> "apps"
-        name.startsWith("square.and.arrow.up") -> "ios_share"
-        name.startsWith("square.and.arrow.down") -> "save_alt"
-        name.startsWith("folder.badge.gearshape") -> "folder_special"
-        name.startsWith("folder") -> "folder"
-        name.startsWith("safari") -> "explore"
-        name.startsWith("heart.text") -> "favorite_border"
-        name.startsWith("heart") -> "favorite"
-        name.startsWith("trash") -> "delete"
-        name.startsWith("doc.on.clipboard") -> "content_paste"
-        name.startsWith("doc.badge.gearshape") -> "description"
-        name.startsWith("doc") -> "description"
-        name.startsWith("paintbrush") -> "brush"
-        name.startsWith("app.badge") -> "apps"
-        name.startsWith("app") -> "apps"
-        name.startsWith("timer") -> "timer"
-        name.startsWith("clock") -> "schedule"
-        name.startsWith("ellipsis.curlybraces") -> "code"
-        name.startsWith("ellipsis") -> "more_horiz"
-        name.startsWith("questionmark") -> "help_outline"
-        name.startsWith("info") -> "info"
-        name.startsWith("lock") -> "lock"
-        name.startsWith("key") -> "key"
-        name.startsWith("link") -> "link"
-        name.startsWith("star") -> "star"
-        name.startsWith("bell") -> "notifications"
-        name.startsWith("wifi") -> "wifi"
-        name.startsWith("network") -> "lan"
-        name.startsWith("signature") -> "draw"
-        name.startsWith("wrench") -> "build"
-        name.startsWith("hammer") -> "construction"
-        name.startsWith("pencil") -> "edit"
-        name.startsWith("photo") -> "image"
-        name.startsWith("tray") -> "inbox"
-        name.startsWith("bolt") -> "bolt"
-        name.startsWith("moon") -> "dark_mode"
-        name.startsWith("sun") -> "light_mode"
-        else -> "circle"
-    }
 
     companion object {
         private const val EXTRA_APP = "app"
@@ -1246,6 +1298,15 @@ class GuestActivity : Activity() {
 
         private const val TAG = "iOSRunner"
         private const val BAR_ELEVATION_DP = 4f
+        private const val TAB_ICON_DP = 26
+        private const val TAB_LABEL_SP = 11f
+        private const val IMAGE_CACHE_BYTES = 64 * 1024 * 1024
+        private const val RAW_IMAGE_SUFFIX = ".rgba"
+        private const val RAW_IMAGE_HEADER_BYTES = 8
+        private const val SYMBOL_SCALE = 0.8
+        private const val UI_CONTENT_SCALE_TO_FILL = 0
+        private const val UI_CONTENT_ASPECT_FIT = 1
+        private const val UI_CONTENT_ASPECT_FILL = 2
         private const val BAR_ICON_TARGET_DP = 56f
         private const val BAR_TITLE_INSET_DP = 16f
         private const val TAB_TEXT_SP = 13f
