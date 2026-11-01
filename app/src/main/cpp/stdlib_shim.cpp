@@ -14,6 +14,16 @@ SWIFTCC SwiftString integer_description(SWIFT_CONTEXT const Integer* self) {
 
 SWIFTCC bool native_dictionary_ensure_unique(bool is_unique, int64_t capacity, void* type, SWIFT_CONTEXT char** self);
 
+// As Date prints: UTC, whatever the device's time zone.
+SWIFTCC SwiftString date_description(SWIFT_CONTEXT const double* self) {
+    const auto seconds = static_cast<time_t>(*self + kSecondsFrom1970To2001);
+    tm parts{};
+    gmtime_r(&seconds, &parts);
+    char text[40];
+    strftime(text, sizeof text, "%Y-%m-%d %H:%M:%S +0000", &parts);
+    return swift_string_from_utf8(text);
+}
+
 static SymbolTable all_stdlib_symbols() {
     SymbolTable all = {
         {"$ss17_NativeDictionaryV12ensureUnique02isD08capacityS2b_SitF", reinterpret_cast<void*>(native_dictionary_ensure_unique)},
@@ -48,6 +58,7 @@ void* stdlib_symbol(std::string_view name) {
         register_foreign_witness("_$ss6UInt16Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint16_t>));
         register_foreign_witness("_$ss6UInt32Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint32_t>));
         register_foreign_witness("_$ss6UInt64Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint64_t>));
+        register_foreign_witness("_$s10Foundation4DateVs23CustomStringConvertibleAAMc", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(date_description));
         register_foreign_witness("_$sSis23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(int_description));
         return true;
     }();
