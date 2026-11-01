@@ -470,6 +470,18 @@ extern "C" void rt_clock_sleep_begin(const ClockValue* until, void* context) {
     sleepers().insert({static_cast<int64_t>(attoseconds(*until) / kAttosecondsPerNanosecond), {context, g_current_task}});
 }
 
+extern "C" void rt_task_sleep_begin(uint64_t nanoseconds, void* context) {
+    timespec now{};
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    constexpr int64_t kNanosecondsPerSecond = 1000000000;
+    const int64_t current = static_cast<int64_t>(now.tv_sec) * kNanosecondsPerSecond + now.tv_nsec;
+    if (g_cancelled_tasks.count(g_current_task) != 0) {
+        ready_tasks().push_back({static_cast<AsyncContextHeader*>(context)->resume_parent, cancellation_error(), nullptr, context, true, g_current_task});
+        return;
+    }
+    sleepers().insert({current + static_cast<int64_t>(nanoseconds), {context, g_current_task}});
+}
+
 SWIFTCC void task_cancel(SWIFT_CONTEXT const void* task) {
     g_cancelled_tasks.insert(task);
     auto& timers = sleepers();
@@ -490,6 +502,7 @@ bool task_equal(const void* left, const void* right) { return left == right; }
 SWIFTCC void task_deinit_on_executor(void* object, SWIFTCC void (*work)(void*), void*, void*, size_t) { work(object); }
 
 AsyncFunctionPointer g_clock_sleep_record;
+AsyncFunctionPointer g_task_sleep_record;
 AsyncFunctionPointer g_task_value_record;
 
 struct ExecutorReference {
@@ -610,6 +623,14 @@ __asm__(
     "  mov x20, x0\n"
     "  ldr x16, [sp, #24]\n" ASYNC_FINISH
     // Clock.sleep(until:tolerance:), with `until` in x0: it never finishes on the caller's stack.
+    ".globl rt_task_sleep\n"
+    "rt_task_sleep:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  mov x1, x22\n"
+    "  bl rt_task_sleep_begin\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ret\n"
     ".globl rt_clock_sleep\n"
     "rt_clock_sleep:\n"
     "  stp x29, x30, [sp, #-16]!\n"
@@ -693,6 +714,7 @@ extern "C" void rt_group_iterator_next();
 extern "C" void rt_continuation_await();
 extern "C" void rt_async_let_wait();
 extern "C" void rt_clock_sleep();
+extern "C" void rt_task_sleep();
 
 int64_t concurrency_next_deadline() {
     const int64_t sleeper = sleepers().empty() ? 0 : sleepers().begin()->first;
@@ -744,6 +766,8 @@ void* concurrency_symbol(std::string_view name) {
         register_foreign_witness("_$sScMScAsMc", "_$sScA15unownedExecutorScevgTq", reinterpret_cast<const void*>(main_actor_executor));
         g_clock_sleep_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_clock_sleep) - reinterpret_cast<const char*>(&g_clock_sleep_record.function));
         g_clock_sleep_record.context_size = sizeof(AsyncContextHeader);
+        g_task_sleep_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_task_sleep) - reinterpret_cast<const char*>(&g_task_sleep_record.function));
+        g_task_sleep_record.context_size = sizeof(AsyncContextHeader);
         g_task_value_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_task_value) - reinterpret_cast<const char*>(&g_task_value_record.function));
         // Room past the header for the awaited type, kept for when the task finishes.
         g_task_value_record.context_size = sizeof(AsyncContextHeader) + sizeof(void*);
@@ -770,6 +794,8 @@ void* concurrency_symbol(std::string_view name) {
         {"$ss15ContinuousClockV7InstantV8duration2tos8DurationVAD_tF", reinterpret_cast<void*>(instant_duration_to)},
         {"$ss8DurationV1loiySbAB_ABtFZ", reinterpret_cast<void*>(duration_less)},
         {"$sSL1goiySbx_xtFZTj", reinterpret_cast<void*>(instant_greater)},
+        {"$sScTss5NeverORszABRs_rlE5sleep11nanosecondsys6UInt64V_tYaKFZ", reinterpret_cast<void*>(rt_task_sleep)},
+        {"$sScTss5NeverORszABRs_rlE5sleep11nanosecondsys6UInt64V_tYaKFZTu", &g_task_sleep_record},
         {"$ss5ClockP5sleep5until9tolerancey7InstantQz_8DurationQzSgtYaKFTj", reinterpret_cast<void*>(rt_clock_sleep)},
         {"$ss5ClockP5sleep5until9tolerancey7InstantQz_8DurationQzSgtYaKFTjTu", &g_clock_sleep_record},
         {"$sScP10backgroundScPvgZ", reinterpret_cast<void*>(+[]() -> uint8_t { return 9; })},

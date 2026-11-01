@@ -497,6 +497,27 @@ private:
             substitute(Node{});
             return;
         }
+        // The same, spelled with words from earlier identifiers: letters for words, literals between them, 0 to end.
+        if (code == '0') {
+            for (;;) {
+                while (cursor_ < end_ && isalpha(static_cast<unsigned char>(*cursor_))) {
+                    const bool last_word = isupper(static_cast<unsigned char>(*cursor_)) != 0;
+                    ++cursor_;
+                    if (last_word) break;
+                }
+                if (cursor_ < end_ && *cursor_ == '0') {
+                    ++cursor_;
+                    break;
+                }
+                if (cursor_ >= end_ || isdigit(static_cast<unsigned char>(*cursor_)) == 0) {
+                    fail("malformed word-substituted identifier");
+                    return;
+                }
+                cursor_ += read_natural();
+            }
+            substitute(Node{});
+            return;
+        }
         switch (code) {
             case 'S':
                 if (cursor_ >= end_) {
