@@ -590,6 +590,11 @@ void register_foundation_objects_classes() {
     objc_register_method("-[NSURLSessionConfiguration setTimeoutIntervalForRequest:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
     objc_register_method("-[NSProcessInfo globallyUniqueString]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(uuid4()); }));
+    // One shared object: main-thread work runs from the guest's run loop, not from this one.
+    objc_register_method("+[NSRunLoop mainRunLoop]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* {
+        static void* const loop = objc_framework_object("NSRunLoop");
+        return loop;
+    }));
     objc_register_method("-[NSProcessInfo processName]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(bundle_info_string("CFBundleExecutable")); }));
     objc_register_method("-[NSProcessInfo processIdentifier]", reinterpret_cast<const void*>(+[](void*, const char*) -> int32_t { return getpid(); }));
     objc_register_method("-[NSProcessInfo activeProcessorCount]", reinterpret_cast<const void*>(+[](void*, const char*) -> int64_t { return sysconf(_SC_NPROCESSORS_ONLN); }));
