@@ -328,6 +328,8 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
     memcpy(storage + kArrayCountOffset, words, sizeof words);
     static_assert(kArrayCapacityOffset == kArrayCountOffset + sizeof(uint64_t));
     memcpy(storage + kArrayHeaderBytes, array->items->data(), count * sizeof(void*));
+    // The new array owns its elements, and releases them when it goes away.
+    for (void* item : *array->items) rt_swift_retain(item);
     return storage;
 }
 
