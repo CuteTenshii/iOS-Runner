@@ -106,6 +106,32 @@ void destroy_array_storage(void* raw) {
     free(raw);
 }
 
+SWIFTCC void nsobject_hash_into(HasherState* hasher, SWIFT_CONTEXT void* self);
+
+// A Set of object references, as bridging an NSSet makes. They hash as NSObjects do: by address.
+void* build_object_set(const std::vector<void*>& objects, void* type, void* hashable) {
+    if (objects.empty()) return resolve_symbol("_swiftEmptySetSingleton");
+    void* arguments[] = {type, hashable};
+    void* metadata = storage_class_metadata("_$ss11_SetStorageCMn", arguments, 2);
+    auto* raw = static_cast<char*>(allocate_set(metadata, scale_for_capacity(static_cast<int64_t>(objects.size())), 0, 0, false));
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    void** elements;
+    memcpy(&elements, raw + kSetElementsOffset, sizeof elements);
+    auto* bitmap = reinterpret_cast<uint64_t*>(raw + kSetBitmapOffset);
+    const uint64_t mask = (1ULL << header->scale) - 1;
+    for (void* object : objects) {
+        HasherState hasher;
+        hasher_seed(&hasher, header->seed);
+        nsobject_hash_into(&hasher, object);
+        uint64_t bucket = static_cast<uint64_t>(hasher_finalize(&hasher)) & mask;
+        while ((bitmap[bucket / 64] >> (bucket % 64)) & 1) bucket = (bucket + 1) & mask;
+        bitmap[bucket / 64] |= 1ULL << (bucket % 64);
+        elements[bucket] = rt_swift_retain(object);
+    }
+    header->count = static_cast<int64_t>(objects.size());
+    return raw;
+}
+
 SWIFTCC void* set_storage_allocate(int64_t capacity, SWIFT_CONTEXT void* metadata) {
     return allocate_set(metadata, scale_for_capacity(capacity), 0, 0, false);
 }
@@ -244,3 +270,5 @@ void add_stdlib_collections_symbols(SymbolTable& table) {
 }
 
 }  // namespace stdlib
+
+void* set_from_objects(const std::vector<void*>& objects, void* type, void* hashable) { return stdlib::build_object_set(objects, type, hashable); }

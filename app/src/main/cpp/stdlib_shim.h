@@ -13,6 +13,9 @@ void* stdlib_symbol(std::string_view name);
 void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>>& entries);
 
 // Builds a native [String: V], taking ownership of each value's bytes.
+// A Set of these object references; `hashable` is the element type's conformance.
+void* set_from_objects(const std::vector<void*>& objects, void* type, void* hashable);
+
 void* make_string_dictionary(void* value_type, const std::vector<std::pair<std::string, const void*>>& entries);
 
 // Calls `visit` with each key and a pointer to its value.

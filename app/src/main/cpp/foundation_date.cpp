@@ -1,4 +1,5 @@
 #include "foundation_internal.h"
+#include "uikit_internal.h"
 #include "symbols.h"
 
 #include <cmath>
@@ -243,8 +244,85 @@ void* value_transformer_named(void*, const char*, void* name) {
     return found == value_transformers().end() ? nullptr : found->second;
 }
 
-// Sets only reach this bridge from framework objects that hold none: a scene's connection options, so far.
-SWIFTCC void* set_bridge_from_objc(void*, void*, void*) { return resolve_symbol("_swiftEmptySetSingleton"); }
+// Ordered sets and sets are NSArrays underneath, without their duplicates.
+void* unique_collection_from_array(void*, const char*, void* source) {
+    std::vector<void*> unique;
+    for (void* item : uikit::object_array_items(source)) {
+        if (std::find(unique.begin(), unique.end(), item) == unique.end()) unique.push_back(item);
+    }
+    return foundation_new_array(unique);
+}
+
+void* collection_as_array(void* self, const char*) { return self; }
+
+std::vector<void*>& array_items_of(void* self) { return *static_cast<NSArrayObject*>(self)->items; }
+
+int64_t array_count(void* self, const char*) { return static_cast<int64_t>(array_items_of(self).size()); }
+void* array_object_at(void* self, const char*, int64_t index) { return array_items_of(self).at(static_cast<size_t>(index)); }
+void* array_first(void* self, const char*) { return array_items_of(self).empty() ? nullptr : array_items_of(self).front(); }
+void* array_last(void* self, const char*) { return array_items_of(self).empty() ? nullptr : array_items_of(self).back(); }
+
+bool array_contains(void* self, const char*, void* object) {
+    const auto& items = array_items_of(self);
+    return std::find(items.begin(), items.end(), object) != items.end();
+}
+
+int64_t array_index_of(void* self, const char*, void* object) {
+    constexpr int64_t kNotFound = INT64_MAX;
+    const auto& items = array_items_of(self);
+    const auto found = std::find(items.begin(), items.end(), object);
+    return found == items.end() ? kNotFound : static_cast<int64_t>(found - items.begin());
+}
+
+// NSFastEnumerationState: hands out the whole array at once from its own storage.
+struct FastEnumerationState {
+    uint64_t state;
+    void** items;
+    uint64_t* mutations;
+    uint64_t extra[5];
+};
+
+uint64_t array_fast_enumerate(void* self, const char*, FastEnumerationState* state, void**, uint64_t) {
+    if (state->state != 0) return 0;
+    auto& items = array_items_of(self);
+    state->state = 1;
+    state->items = items.data();
+    state->mutations = state->extra;
+    return items.size();
+}
+
+// A fast enumeration iterator is a box holding the collection and how far it has got.
+struct FastIterator {
+    HeapObject header;
+    void* collection;
+    size_t position;
+};
+
+SWIFTCC void fast_iterator_make(SWIFT_OUT FastIterator** out, SWIFT_CONTEXT void* self) {
+    auto* iterator = static_cast<FastIterator*>(objc_framework_object("__FastEnumerationIterator"));
+    iterator->collection = rt_swift_retain(self);
+    *out = iterator;
+}
+
+SWIFTCC void fast_iterator_next(SWIFT_OUT AnyValue* out, SWIFT_CONTEXT FastIterator** self) {
+    memset(out, 0, sizeof *out);
+    FastIterator* iterator = *self;
+    const auto& items = array_items_of(iterator->collection);
+    if (iterator->position >= items.size()) return;
+    void* object = items[iterator->position++];
+    out->buffer[0] = reinterpret_cast<uint64_t>(rt_swift_retain(object));
+    out->type = *static_cast<void**>(object);
+}
+
+std::vector<void*> objects_in_set(void* object) {
+    if (object == nullptr || static_cast<HeapObject*>(object)->metadata != g_nsarray_class) return {};
+    return *static_cast<NSArrayObject*>(object)->items;
+}
+
+// NSSets here are NSArrays underneath, and anything else, such as a scene's connection options, holds nothing.
+SWIFTCC void* set_bridge_from_objc(void* object, void* type, void* hashable) { return set_from_objects(objects_in_set(object), type, hashable); }
+
+SWIFTCC void set_force_bridge(void* object, void** result, void* type, void* hashable) { *result = set_from_objects(objects_in_set(object), type, hashable); }
 
 // NSDictionary's literal, of (Any, Any) pairs. Keys here are always strings, in Swift or Objective-C form.
 SWIFTCC void* nsdictionary_literal(void* pairs) {
@@ -699,6 +777,11 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$s10Foundation20ByteCountFormatStyleV5UnitsV3allAEvgZ", reinterpret_cast<void*>(byte_count_units_all)},
         {"$s10Foundation11FormatStylePA2A09ByteCountbC0VRszrlE04byteE05style12allowedUnits13spellsOutZero014includesActualdE0A2E0C0O_AE0I0VS2btFZ", reinterpret_cast<void*>(byte_count_style)},
         {"$sSz10FoundationE9formattedy12FormatOutputQyd__qd__AA0C5StyleRd__Sz0C5InputRpd__lF", reinterpret_cast<void*>(integer_formatted_byte_count)},
+        {"$sSo12NSOrderedSetC10FoundationE12makeIteratorAC017NSFastEnumerationE0VyF", reinterpret_cast<void*>(fast_iterator_make)},
+        {"$sSo5NSSetC10FoundationE12makeIteratorAC017NSFastEnumerationD0VyF", reinterpret_cast<void*>(fast_iterator_make)},
+        {"$sSo7NSArrayC10FoundationE12makeIteratorAC017NSFastEnumerationD0VyF", reinterpret_cast<void*>(fast_iterator_make)},
+        {"$s10Foundation25NSFastEnumerationIteratorV4nextypSgyF", reinterpret_cast<void*>(fast_iterator_next)},
+        {"$sSh10FoundationE26_forceBridgeFromObjectiveC_6resultySo5NSSetC_ShyxGSgztFZ", reinterpret_cast<void*>(set_force_bridge)},
         {"$sSh10FoundationE36_unconditionallyBridgeFromObjectiveCyShyxGSo5NSSetCSgFZ", reinterpret_cast<void*>(set_bridge_from_objc)},
         {"$sSo12NSDictionaryC10FoundationE17dictionaryLiteralAByp_yptd_tcfC", reinterpret_cast<void*>(nsdictionary_literal)},
         {"$s10Foundation8CalendarV7currentACvgZ", reinterpret_cast<void*>(calendar_current)},
@@ -728,6 +811,20 @@ void add_foundation_date_symbols(SymbolTable& table) {
 }
 
 void register_foundation_date_classes() {
+    objc_register_method("-[NSOrderedSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("+[NSOrderedSet orderedSetWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("-[NSSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("+[NSSet setWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("-[NSArray count]", reinterpret_cast<const void*>(array_count));
+    objc_register_method("-[NSArray objectAtIndex:]", reinterpret_cast<const void*>(array_object_at));
+    objc_register_method("-[NSArray objectAtIndexedSubscript:]", reinterpret_cast<const void*>(array_object_at));
+    objc_register_method("-[NSArray firstObject]", reinterpret_cast<const void*>(array_first));
+    objc_register_method("-[NSArray lastObject]", reinterpret_cast<const void*>(array_last));
+    objc_register_method("-[NSArray containsObject:]", reinterpret_cast<const void*>(array_contains));
+    objc_register_method("-[NSArray indexOfObject:]", reinterpret_cast<const void*>(array_index_of));
+    objc_register_method("-[NSArray countByEnumeratingWithState:objects:count:]", reinterpret_cast<const void*>(array_fast_enumerate));
+    objc_register_method("-[NSArray array]", reinterpret_cast<const void*>(collection_as_array));
+    objc_register_method("-[NSArray allObjects]", reinterpret_cast<const void*>(collection_as_array));
     objc_register_method("+[NSValueTransformer setValueTransformer:forName:]", reinterpret_cast<const void*>(value_transformer_register));
     objc_register_method("+[NSValueTransformer valueTransformerForName:]", reinterpret_cast<const void*>(value_transformer_named));
     objc_register_method("-[NSUserDefaults dictionaryRepresentation]", reinterpret_cast<const void*>(defaults_dictionary_representation));

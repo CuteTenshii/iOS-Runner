@@ -282,6 +282,18 @@ SWIFTCC void* array_bridge_from_objc(void* object, void* element_type) {
     auto* array = static_cast<NSArrayObject*>(object);
     if (array == nullptr || array->items->empty()) return empty_array_singleton();
     const size_t count = array->items->size();
+    if (element_type == any_type()) {
+        char* elements;
+        void* converted = make_array_storage(element_type, count, &elements);
+        auto* values = reinterpret_cast<AnyValue*>(elements);
+        for (size_t i = 0; i < count; ++i) {
+            void* item = (*array->items)[i];
+            memset(&values[i], 0, sizeof values[i]);
+            values[i].buffer[0] = reinterpret_cast<uint64_t>(rt_swift_retain(item));
+            values[i].type = *static_cast<void**>(item);
+        }
+        return converted;
+    }
     // Strings and URLs change representation across the bridge; everything else is one object reference.
     if (element_type == type_system_symbol("$sSSN") || is_url_type(element_type)) {
         char* elements;
