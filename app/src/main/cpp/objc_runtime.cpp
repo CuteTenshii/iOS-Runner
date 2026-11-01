@@ -86,6 +86,11 @@ const void* find_guest_method(const char* cls, const char* selector, std::string
         uintptr_t data;
         memcpy(&data, cls + kClassDataOffset, sizeof data);
         const auto* read_only = reinterpret_cast<const char*>(data & kClassDataMask);
+        // Runtime-made metadata such as a coder's has no ObjC side, so a message to it can't be answered.
+        if (read_only == nullptr) {
+            engine_log("STOP: message %s to an object of class %p, which has no ObjC class data", selector, static_cast<const void*>(cls));
+            abort();
+        }
         const char* methods;
         memcpy(&methods, read_only + kRoBaseMethodsOffset, sizeof methods);
         if (const void* found = find_in_method_list(methods, selector)) return found;
