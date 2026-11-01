@@ -1,10 +1,16 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
+#include <vector>
 
 // Runs the app bundle's main executable. Never returns control to a crashed guest: faults end the process.
 int run_app_bundle(const std::string& bundle_dir, const std::string& executable, const std::string& log_path);
+
+struct MachImage;
+// Every loaded image in initialization order; the app is last.
+const std::vector<std::unique_ptr<MachImage>>& engine_images();
 
 void engine_log(const char* format, ...) __attribute__((format(printf, 1, 2)));
 
@@ -33,6 +39,15 @@ void engine_set_http_handler(HttpResult (*handler)(const std::string&, const std
 // Runs `event` on the guest thread, waking it if it is idle. engine_wait_for_action then returns kEngineEventRan.
 constexpr int kEngineEventRan = -2;
 void engine_post_event(std::function<void()> event);
+
+// Registers a reply handler for a request to the host, which runs on the guest thread. Returns the id the host replies to.
+int engine_host_register(std::function<void(const std::string&)> handler, bool repeating);
+void engine_host_unregister(int id);
+void engine_host_reply(int id, const std::string& payload);
+
+// Asks the host a question it can answer immediately, blocking the guest thread.
+std::string engine_host_query(const std::string& kind, const std::string& argument);
+void engine_set_host_query_handler(std::string (*handler)(const std::string&, const std::string&));
 
 // Reads all cookies from the host as "domain\tname\tvalue" lines.
 std::string engine_cookies();

@@ -1,5 +1,8 @@
 #include "engine.h"
 
+#include "darwin_shim.h"
+#include "objc_runtime.h"
+
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -36,7 +39,7 @@ constexpr int kStackScanReports = 6;
 
 int g_log_fd = -1;
 std::string g_bundle_dir;
-MachImage g_image;
+std::vector<std::unique_ptr<MachImage>> g_images;
 
 void write_log_line(const char* text, size_t length) {
     if (g_log_fd >= 0) {
@@ -71,9 +74,12 @@ const char* signal_name(int number) {
 }
 
 void describe_address(char* out, size_t size, uintptr_t address) {
-    if (address >= g_image.base && address < g_image.base + g_image.size) {
-        snprintf(out, size, "app+0x%zx", static_cast<size_t>(address - g_image.base));
-    } else {
+    for (const auto& image : g_images) {
+        if (address < image->base || address >= image->base + image->size) continue;
+        snprintf(out, size, "%s+0x%zx", image.get() == g_images.back().get() ? "app" : image->name.c_str(), static_cast<size_t>(address - image->base));
+        return;
+    }
+    {
 #ifdef IOSRUNNER_HOST
         snprintf(out, size, "0x%zx", static_cast<size_t>(address));
 #else
@@ -118,12 +124,16 @@ void fault_handler(int number, siginfo_t* info, void* raw_context) {
                static_cast<unsigned long long>(machine.sp));
     // Leaf thunks keep no frame, so return addresses on the stack are the only trace of their callers.
     const auto* stack = reinterpret_cast<const uintptr_t*>(machine.sp);
-    const MachSection* code = g_image.section("__TEXT", "__text");
-    for (int slot = 0, reported = 0; code != nullptr && slot < kStackScanWords && reported < kStackScanReports; ++slot) {
+    for (int slot = 0, reported = 0; slot < kStackScanWords && reported < kStackScanReports; ++slot) {
         const uintptr_t word = stack[slot];
-        if (word >= code->address && word < code->address + code->size) {
-            engine_log("  stack[%d] app+0x%zx", slot, static_cast<size_t>(word - g_image.base));
+        for (const auto& image : g_images) {
+            const MachSection* code = image->section("__TEXT", "__text");
+            if (code == nullptr || word < code->address || word >= code->address + code->size) continue;
+            char where[96];
+            describe_address(where, sizeof where, word);
+            engine_log("  stack[%d] %s", slot, where);
             ++reported;
+            break;
         }
     }
     uintptr_t frame = machine.regs[29];
@@ -179,32 +189,39 @@ void* guest_thread(void* raw) {
 
     const std::string binary = arguments->bundle_dir + "/" + arguments->executable;
     std::string error;
-    if (!load_macho(binary, resolve_symbol, g_image, error)) {
+    if (!load_macho_graph(binary, resolve_symbol, g_images, error)) {
         engine_log("LOAD FAILED: %s", error.c_str());
         return nullptr;
     }
+    const MachImage& app = *g_images.back();
 
     std::map<std::string, std::pair<int, int>> per_library;
     int missing = 0;
-    for (const auto& import : g_image.imports) {
-        auto& counts = per_library[import.library.empty() ? "(flat)" : import.library];
-        counts.second++;
-        if (import.resolved)
-            counts.first++;
-        else
-            missing++;
+    size_t total_imports = 0;
+    for (const auto& image : g_images) {
+        for (const auto& import : image->imports) {
+            auto& counts = per_library[import.library.empty() ? "(flat)" : import.library];
+            counts.second++;
+            total_imports++;
+            if (import.resolved)
+                counts.first++;
+            else
+                missing++;
 #ifdef IOSRUNNER_HOST
-        if (!import.resolved && !import.weak) engine_log("UNRESOLVED: %s", import.name.c_str());
+            if (!import.resolved && !import.weak) engine_log("UNRESOLVED: %s", import.name.c_str());
 #endif
+        }
     }
-    engine_log("LOADED: %s at 0x%zx, entry app+0x%zx", arguments->executable.c_str(), static_cast<size_t>(g_image.base),
-               static_cast<size_t>(g_image.entry - g_image.base));
-    engine_log("IMPORTS: %zu total, %d not implemented yet", g_image.imports.size(), missing);
+    for (const auto& image : g_images) {
+        if (image.get() != &app) engine_log("LOADED: %s at 0x%zx", image->name.c_str(), static_cast<size_t>(image->base));
+    }
+    engine_log("LOADED: %s at 0x%zx, entry app+0x%zx", arguments->executable.c_str(), static_cast<size_t>(app.base), static_cast<size_t>(app.entry - app.base));
+    engine_log("IMPORTS: %zu total, %d not implemented yet", total_imports, missing);
     for (const auto& [library, counts] : per_library) {
         engine_log("  %s: %d/%d", library.c_str(), counts.first, counts.second);
     }
 
-    runtime_attach_image(g_image);
+    runtime_attach_images(g_images);
 
     using GuestMain = int (*)(int, const char**, const char**, const char**);
     const char* guest_argv[] = {binary.c_str(), nullptr};
@@ -219,8 +236,13 @@ void* guest_thread(void* raw) {
         for (size_t i = 0; i < kPoisonBytes; ++i) below[-static_cast<ptrdiff_t>(i)] = static_cast<char>(0x5b);
     }
 #endif
+    darwin_mark_main_thread();
+    for (const auto& image : g_images) {
+        objc_run_load_methods(*image);
+        run_image_initializers(*image, 1, guest_argv, guest_envp, guest_apple);
+    }
     engine_log("ENTER: calling guest main");
-    arguments->status = reinterpret_cast<GuestMain>(g_image.entry)(1, guest_argv, guest_envp, guest_apple);
+    arguments->status = reinterpret_cast<GuestMain>(app.entry)(1, guest_argv, guest_envp, guest_apple);
     engine_log("EXIT: guest main returned %d", arguments->status);
     return nullptr;
 }
@@ -237,6 +259,8 @@ void engine_log(const char* format, ...) {
 }
 
 const std::string& engine_bundle_dir() { return g_bundle_dir; }
+
+const std::vector<std::unique_ptr<MachImage>>& engine_images() { return g_images; }
 
 namespace {
 
@@ -296,6 +320,50 @@ void engine_post_event(std::function<void()> event) {
 
 void engine_set_cookie_handler(std::string (*handler)()) { g_cookie_handler = handler; }
 std::string engine_cookies() { return g_cookie_handler != nullptr ? g_cookie_handler() : std::string(); }
+
+namespace {
+
+struct HostRequest {
+    std::function<void(const std::string&)> handler;
+    bool repeating;
+};
+
+std::mutex g_host_lock;
+std::map<int, HostRequest> g_host_requests;
+int g_next_host_request = 1;
+std::string (*g_host_query)(const std::string&, const std::string&) = nullptr;
+
+}  // namespace
+
+int engine_host_register(std::function<void(const std::string&)> handler, bool repeating) {
+    const std::lock_guard guard(g_host_lock);
+    const int id = g_next_host_request++;
+    g_host_requests[id] = {std::move(handler), repeating};
+    return id;
+}
+
+void engine_host_unregister(int id) {
+    const std::lock_guard guard(g_host_lock);
+    g_host_requests.erase(id);
+}
+
+void engine_host_reply(int id, const std::string& payload) {
+    engine_post_event([id, payload] {
+        std::function<void(const std::string&)> handler;
+        {
+            const std::lock_guard guard(g_host_lock);
+            const auto found = g_host_requests.find(id);
+            if (found == g_host_requests.end()) return;
+            handler = found->second.handler;
+            if (!found->second.repeating) g_host_requests.erase(found);
+        }
+        handler(payload);
+    });
+}
+
+void engine_set_host_query_handler(std::string (*handler)(const std::string&, const std::string&)) { g_host_query = handler; }
+
+std::string engine_host_query(const std::string& kind, const std::string& argument) { return g_host_query != nullptr ? g_host_query(kind, argument) : std::string(); }
 
 void engine_post_action(int action) {
     const std::lock_guard lock(g_action_lock);

@@ -18,6 +18,7 @@
 #include "combine_shim.h"
 #include "concurrency_shim.h"
 #include "coredata_shim.h"
+#include "darwin_shim.h"
 #include "dispatch_shim.h"
 #include "engine.h"
 #include "foundation_shim.h"
@@ -28,6 +29,7 @@
 #include "swift_runtime.h"
 #include "swiftui_shim.h"
 #include "type_system.h"
+#include "uikit_shim.h"
 
 extern "C" {
 void darwin_chkstk();
@@ -91,10 +93,9 @@ void darwin_log_impl(...) {}
 // The app is built for iOS 27 and this runtime answers as iOS 27, so every availability check passes.
 bool darwin_availability_version_check(uint32_t, const void*) { return true; }
 
-// The guest runs on one thread, so a lock is never contended and a trylock always succeeds.
+// Unfair locks only guard guest-thread state; pthread mutexes are real, for apps that start their own threads.
 void darwin_lock_noop(void*) {}
 bool darwin_trylock_succeeds(void*) { return true; }
-int darwin_mutex_ok(void*, ...) { return 0; }
 
 double darwin_absolute_time() {
     timespec now{};
@@ -102,7 +103,10 @@ double darwin_absolute_time() {
     return static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_nsec) / 1e9 - kSecondsFrom1970To2001;
 }
 
-void* darwin_dlsym(void*, const char* name) { return resolve_symbol(name); }
+void* darwin_dlsym(void*, const char* name) {
+    if (void* symbol = resolve_symbol(name)) return symbol;
+    return macho_find_export(engine_images(), name);
+}
 
 // The runner presents itself as the app's deployment target: every app must work there, without weak imports.
 uint32_t g_reported_os = 0;
@@ -127,6 +131,8 @@ namespace {
 const std::unordered_map<std::string_view, void*>& symbol_table() {
     static const std::unordered_map<std::string_view, void*> table = {
         {"__chkstk_darwin", reinterpret_cast<void*>(darwin_chkstk)},
+        // Leaving the app kills the process, so exit handlers never get to run.
+        {"__cxa_atexit", reinterpret_cast<void*>(+[](void (*)(void*), void*, void*) -> int { return 0; })},
         {"__stack_chk_guard", &darwin_stack_guard},
         {"__stack_chk_fail", reinterpret_cast<void*>(darwin_stack_chk_fail)},
         {"_Block_copy", reinterpret_cast<void*>(darwin_block_copy)},
@@ -229,14 +235,6 @@ const std::unordered_map<std::string_view, void*>& symbol_table() {
         {"os_unfair_lock_trylock", reinterpret_cast<void*>(darwin_trylock_succeeds)},
         {"os_unfair_lock_assert_owner", reinterpret_cast<void*>(darwin_lock_noop)},
         {"os_unfair_lock_assert_not_owner", reinterpret_cast<void*>(darwin_lock_noop)},
-        {"pthread_mutex_init", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutex_destroy", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutex_lock", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutex_unlock", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutex_trylock", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutexattr_init", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutexattr_settype", reinterpret_cast<void*>(darwin_mutex_ok)},
-        {"pthread_mutexattr_destroy", reinterpret_cast<void*>(darwin_mutex_ok)},
         {"dlsym", reinterpret_cast<void*>(darwin_dlsym)},
         {"__isPlatformVersionAtLeast", reinterpret_cast<void*>(platform_version_at_least)},
         {"fopen", reinterpret_cast<void*>(fopen)},
@@ -272,6 +270,8 @@ void* resolve_symbol(const char* name) {
     const auto found = table.find(name);
     if (found != table.end()) return found->second;
     if (void* symbol = swift_runtime_symbol(name)) return symbol;
+    if (void* symbol = darwin_symbol(name)) return symbol;
+    if (void* symbol = uikit_symbol(name)) return symbol;
     if (void* symbol = swiftui_symbol(name)) return symbol;
     if (void* symbol = objc_runtime_symbol(name)) return symbol;
     if (void* symbol = foundation_symbol(name)) return symbol;
@@ -286,11 +286,14 @@ void* resolve_symbol(const char* name) {
     return framework_enum_case_tag(name);
 }
 
-void runtime_attach_image(const MachImage& image) {
-    g_reported_os = image.minimum_os;
+void runtime_attach_images(const std::vector<std::unique_ptr<MachImage>>& images) {
+    g_reported_os = images.back()->minimum_os;
     foundation_register_classes();
     coredata_register_classes();
-    objc_attach_image(image);
-    coredata_attach_image(image);
-    swiftui_attach_image(image);
+    uikit_register_classes();
+    for (const auto& image : images) {
+        objc_attach_image(*image);
+        coredata_attach_image(*image);
+        swiftui_attach_image(*image);
+    }
 }

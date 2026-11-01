@@ -60,6 +60,7 @@ class GuestActivity : Activity() {
     private val webViews = HashMap<Int, WebView>()
     private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
+    private val devices by lazy { DeviceServices(this, mainThread, ::nativeHostReply) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,6 +91,11 @@ class GuestActivity : Activity() {
         }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        devices.onPermissionResult(requestCode, grantResults)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         // The guest cannot be unloaded, so leaving the app ends its process.
@@ -111,6 +117,7 @@ class GuestActivity : Activity() {
             "webnew" -> createWebView(JSONObject(payload))
             "webload" -> JSONObject(payload).let { webViews[it.getInt("id")]?.loadUrl(it.getString("url")) }
             "webjs" -> runScript(JSONObject(payload))
+            "permission", "notify", "notify-cancel", "location-start", "location-stop", "network-start", "network-stop" -> devices.receive(kind, JSONObject(payload))
         }
     }
 
@@ -347,6 +354,7 @@ class GuestActivity : Activity() {
         val kind = node.optString("k")
         val key = "$path/$kind"
         when (kind) {
+            "uiview" -> parent.addView(buildUiView(node), uiViewParams(node))
             "tabs" -> buildTabs(node, parent, key)
             "nav" -> buildNavigation(node, parent, key)
             "titled", "toolbar", "tab", "toolbaritem" -> buildChildren(node, parent, key)
@@ -373,6 +381,44 @@ class GuestActivity : Activity() {
             "native" -> detachedWebView(node.optInt("w", -1))?.let { parent.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f)) }
             else -> buildChildren(node, parent, key)
         }
+    }
+
+    private fun screenSizeInPoints(): String {
+        val density = resources.displayMetrics.density
+        return JSONObject().put("w", (root.width / density).toDouble()).put("h", (root.height / density).toDouble()).toString()
+    }
+
+    /** A UIKit view: placed where the engine's layout says, in points, so it never reflows on this side. */
+    private fun buildUiView(node: JSONObject): View {
+        val frame = FrameLayout(this)
+        val bg = node.optString("bg")
+        if (bg.isNotEmpty()) frame.setBackgroundColor(Color.parseColor(bg))
+        if (node.optInt("hidden") != 0) frame.visibility = View.GONE
+        val text = node.optString("text")
+        if (text.isNotEmpty()) {
+            frame.addView(TextView(this).apply {
+                this.text = text
+                val color = node.optString("color")
+                if (color.isNotEmpty()) setTextColor(Color.parseColor(color))
+                val size = node.optDouble("size", 0.0)
+                if (size > 0) textSize = size.toFloat()
+                gravity = when (node.optInt("align")) {
+                    UI_TEXT_ALIGN_CENTER -> Gravity.CENTER_HORIZONTAL
+                    UI_TEXT_ALIGN_RIGHT -> Gravity.END
+                    else -> Gravity.START
+                }
+                val lines = node.optInt("lines", 1)
+                if (lines > 0) maxLines = lines
+            }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+        val children = node.optJSONArray("c") ?: return frame
+        forEachChild(children) { child -> frame.addView(buildUiView(child), uiViewParams(child)) }
+        return frame
+    }
+
+    private fun uiViewParams(node: JSONObject) = FrameLayout.LayoutParams(dp(node.optDouble("w").toInt()), dp(node.optDouble("h").toInt())).apply {
+        leftMargin = dp(node.optDouble("x").toInt())
+        topMargin = dp(node.optDouble("y").toInt())
     }
 
     private fun buildChildren(node: JSONObject, parent: ViewGroup, path: String) {
@@ -894,6 +940,8 @@ class GuestActivity : Activity() {
         private const val COOKIE_PREFERENCES = "guest_cookies"
         private const val COOKIE_HOSTS = "hosts"
         private const val HIDDEN_WEB_WIDTH_DP = 360
+        private const val UI_TEXT_ALIGN_CENTER = 1
+        private const val UI_TEXT_ALIGN_RIGHT = 2
         private const val HIDDEN_WEB_HEIGHT_DP = 640
         private const val IOS_WEBKIT_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)"
         private const val HTTP_FIRST_ERROR = 400
@@ -950,6 +998,18 @@ class GuestActivity : Activity() {
                 }
             }.joinToString("\n")
         }
+
+        /** Called on the guest thread for questions the host answers immediately. */
+        @JvmStatic
+        fun hostQuery(kind: String, argument: String): String = when (kind) {
+            "permission-status" -> current?.devices?.permissionStatus(argument).orEmpty()
+            "network-status" -> current?.devices?.networkStatus().orEmpty()
+            "screen-size" -> current?.screenSizeInPoints().orEmpty()
+            else -> ""
+        }
+
+        @JvmStatic
+        private external fun nativeHostReply(id: Int, payload: String)
 
         @JvmStatic
         private external fun nativeScriptFinished(call: Int, json: String, failed: Boolean)
