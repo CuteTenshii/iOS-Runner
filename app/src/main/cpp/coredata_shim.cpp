@@ -1,5 +1,6 @@
 #include "coredata_shim.h"
 
+#include <dirent.h>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -7,6 +8,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -16,6 +18,7 @@
 #include "key_path.h"
 #include "macho.h"
 #include "objc_runtime.h"
+#include "plist.h"
 #include "predicate.h"
 #include "stdlib_shim.h"
 #include "swift_abi.h"
@@ -405,10 +408,119 @@ void* context_execute(void*, const char*, FetchRequest* request, void**) {
     return objc_framework_object("NSBatchDeleteResult");
 }
 
+using UniqueTuples = std::vector<std::vector<std::string>>;
+
+const PlistValue* archived_object(const PlistValue& objects, const PlistValue* reference) {
+    if (reference == nullptr || reference->kind != PlistValue::Kind::Uid) return reference;
+    const auto index = static_cast<size_t>(reference->integer);
+    return index < objects.items.size() ? &objects.items[index] : nullptr;
+}
+
+// Each entity's uniqueness constraints, from the NSKeyedArchiver plist that a compiled .mom is.
+void read_model_constraints(const std::string& path, std::map<std::string, UniqueTuples>& out) {
+    PlistValue archive;
+    if (!plist_read_file(path, archive)) return;
+    const PlistValue* objects = archive.get("$objects");
+    if (objects == nullptr) return;
+    const auto elements_of = [&](const PlistValue* collection) {
+        std::vector<const PlistValue*> elements;
+        const PlistValue* list = collection != nullptr ? collection->get("NS.objects") : nullptr;
+        if (list == nullptr) return elements;
+        for (const PlistValue& item : list->items) elements.push_back(archived_object(*objects, &item));
+        return elements;
+    };
+    for (const PlistValue& object : objects->items) {
+        const PlistValue* name = archived_object(*objects, object.get("NSEntityName"));
+        const PlistValue* tuples = archived_object(*objects, object.get("NSUniqueTuples"));
+        if (name == nullptr || name->kind != PlistValue::Kind::String || tuples == nullptr) continue;
+        for (const PlistValue* tuple : elements_of(tuples)) {
+            std::vector<std::string> attributes;
+            for (const PlistValue* attribute : elements_of(tuple)) {
+                if (attribute != nullptr && attribute->kind == PlistValue::Kind::String) attributes.push_back(attribute->text);
+            }
+            if (!attributes.empty()) out[name->text].push_back(std::move(attributes));
+        }
+    }
+}
+
+const std::map<std::string, UniqueTuples>& model_constraints() {
+    static const std::map<std::string, UniqueTuples> constraints = [] {
+        std::map<std::string, UniqueTuples> found;
+        DIR* bundle = opendir(engine_bundle_dir().c_str());
+        if (bundle == nullptr) return found;
+        while (const dirent* entry = readdir(bundle)) {
+            const std::string name = entry->d_name;
+            constexpr std::string_view kExtension = ".momd";
+            if (name.size() <= kExtension.size() || name.compare(name.size() - kExtension.size(), kExtension.size(), kExtension) != 0) continue;
+            const std::string model = engine_bundle_dir() + "/" + name;
+            PlistValue versions;
+            if (!plist_read_file(model + "/VersionInfo.plist", versions)) continue;
+            read_model_constraints(model + "/" + versions.string_at("NSManagedObjectModel_CurrentVersionName") + ".mom", found);
+        }
+        closedir(bundle);
+        return found;
+    }();
+    return constraints;
+}
+
+// An attribute's identity for a constraint, or false if it's unset, which constraints don't apply to.
+bool attribute_identity(const ManagedRecord& record, const std::string& name, std::string& out) {
+    const auto found = record.attributes.find(name);
+    if (found == record.attributes.end()) return false;
+    if (!found->second.is_object) {
+        out += std::to_string(reinterpret_cast<int64_t>(found->second.value));
+    } else {
+        if (found->second.value == nullptr) return false;
+        Json json;
+        if (!json_from_object(found->second.value, json)) return false;
+        out += json_write(json);
+    }
+    out += '\0';
+    return true;
+}
+
+// What the model's constraints and the app's merge policies come to: of records with the same identity, the newest stays.
+void merge_constraint_duplicates() {
+    std::map<void*, void*> replaced;
+    for (const auto& [entity, tuples] : model_constraints()) {
+        for (const auto& tuple : tuples) {
+            std::map<std::string, void*> newest;
+            const std::vector<void*> order = store().insertion_order;
+            for (void* object : order) {
+                const auto record = store().records.find(object);
+                if (record == store().records.end() || record->second.entity != entity) continue;
+                std::string identity;
+                const bool complete = std::all_of(tuple.begin(), tuple.end(), [&](const std::string& name) { return attribute_identity(record->second, name, identity); });
+                if (!complete) continue;
+                void*& slot = newest[identity];
+                if (slot != nullptr) replaced[slot] = object;
+                slot = object;
+            }
+        }
+    }
+    if (replaced.empty()) return;
+    const auto final_object = [&](void* object) {
+        for (auto next = replaced.find(object); next != replaced.end(); next = replaced.find(object)) object = next->second;
+        return object;
+    };
+    for (auto& [object, record] : store().records) {
+        for (auto& [name, attribute] : record.attributes) {
+            if (!attribute.is_object || replaced.count(attribute.value) == 0) continue;
+            void* kept = final_object(attribute.value);
+            rt_swift_retain(kept);
+            rt_swift_release(attribute.value);
+            attribute.value = kept;
+        }
+    }
+    engine_log("COREDATA: merged %zu records under the model's uniqueness constraints", replaced.size());
+    for (const auto& [object, kept] : replaced) remove_object(object);
+}
+
 // Saved as JSON beside the app's other support files; relationships are indexes into the saved list.
 std::string store_path() { return engine_bundle_dir() + "/.Library/Application Support/coredata.json"; }
 
 void save_store() {
+    merge_constraint_duplicates();
     const auto& order = store().insertion_order;
     std::unordered_map<void*, size_t> indexes;
     for (size_t i = 0; i < order.size(); ++i) indexes[order[i]] = i;
@@ -490,6 +602,7 @@ void load_store() {
         }
     }
     store().has_changes = false;
+    merge_constraint_duplicates();
 }
 
 void* view_context() {
