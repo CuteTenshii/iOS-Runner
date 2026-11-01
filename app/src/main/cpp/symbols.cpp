@@ -265,6 +265,8 @@ void* framework_enum_case_tag(std::string_view name) {
 
 }  // namespace
 
+void* security_symbol(std::string_view name);
+
 void* resolve_symbol(const char* name) {
     const auto& table = symbol_table();
     const auto found = table.find(name);
@@ -272,6 +274,7 @@ void* resolve_symbol(const char* name) {
     if (void* symbol = swift_runtime_symbol(name)) return symbol;
     if (void* symbol = darwin_symbol(name)) return symbol;
     if (void* symbol = uikit_symbol(name)) return symbol;
+    if (void* symbol = security_symbol(name)) return symbol;
     if (void* symbol = swiftui_symbol(name)) return symbol;
     if (void* symbol = objc_runtime_symbol(name)) return symbol;
     if (void* symbol = foundation_symbol(name)) return symbol;

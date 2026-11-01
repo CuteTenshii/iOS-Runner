@@ -143,10 +143,14 @@ struct XmlReader {
         for (;;) {
             at = text.find('<', at);
             if (at == std::string::npos) return;
-            if (text.compare(at, 2, "<?") == 0) at = text.find("?>", at);
-            else if (text.compare(at, 4, "<!--") == 0) at = text.find("-->", at);
-            else if (text.compare(at, 2, "<!") == 0) at = text.find('>', at);
-            else return;
+            if (text.compare(at, 2, "<?") == 0)
+                at = text.find("?>", at);
+            else if (text.compare(at, 4, "<!--") == 0)
+                at = text.find("-->", at);
+            else if (text.compare(at, 2, "<!") == 0)
+                at = text.find('>', at);
+            else
+                return;
             if (at == std::string::npos) return;
             ++at;
         }
@@ -194,11 +198,16 @@ struct XmlReader {
         int count = 0;
         for (const char c : value) {
             int digit = -1;
-            if (c >= 'A' && c <= 'Z') digit = c - 'A';
-            else if (c >= 'a' && c <= 'z') digit = c - 'a' + 26;
-            else if (c >= '0' && c <= '9') digit = c - '0' + 52;
-            else if (c == '+') digit = 62;
-            else if (c == '/') digit = 63;
+            if (c >= 'A' && c <= 'Z')
+                digit = c - 'A';
+            else if (c >= 'a' && c <= 'z')
+                digit = c - 'a' + 26;
+            else if (c >= '0' && c <= '9')
+                digit = c - '0' + 52;
+            else if (c == '+')
+                digit = 62;
+            else if (c == '/')
+                digit = 63;
             if (digit < 0) continue;
             bits = (bits << 6) | static_cast<uint32_t>(digit);
             count += 6;
@@ -233,8 +242,10 @@ struct XmlReader {
                 }
                 PlistValue child;
                 if (!read_value(tag, child_self_closing, child, depth + 1)) return false;
-                if (out.kind == PlistValue::Kind::Array) out.items.push_back(std::move(child));
-                else out.entries[key] = std::move(child);
+                if (out.kind == PlistValue::Kind::Array)
+                    out.items.push_back(std::move(child));
+                else
+                    out.entries[key] = std::move(child);
             }
         }
         const std::string content = self_closing ? std::string() : read_content(name);

@@ -92,7 +92,8 @@ void write_placeholder_profile() {
 <key>CreationDate</key><date>2020-01-01T00:00:00Z</date>
 <key>DeveloperCertificates</key><array></array>
 <key>Entitlements</key><dict>
-<key>application-identifier</key><string>RUNNER0000.)" << identifier << R"(</string>
+<key>application-identifier</key><string>RUNNER0000.)"
+         << identifier << R"(</string>
 <key>com.apple.developer.team-identifier</key><string>RUNNER0000</string>
 <key>get-task-allow</key><true/>
 </dict>

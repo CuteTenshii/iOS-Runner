@@ -1,8 +1,10 @@
 #pragma once
 #include <cstdint>
 #include <string>
-#include <vector>
+
 #include <string_view>
+#include <vector>
+#include "json.h"
 
 void* foundation_symbol(std::string_view name);
 void foundation_register_classes();
@@ -71,3 +73,6 @@ SwiftString foundation_error_message(void* error);
 
 // A new NSArray holding these objects.
 void* foundation_new_array(const std::vector<void*>& items);
+
+// A new NSDictionary-like object holding this parsed value, as bridged property lists are.
+void* foundation_new_json_object(Json value);

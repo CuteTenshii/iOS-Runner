@@ -1,6 +1,6 @@
 #include "foundation_internal.h"
-#include "uikit_internal.h"
 #include "symbols.h"
+#include "uikit_internal.h"
 
 #include <cmath>
 

@@ -174,13 +174,7 @@ void* g_cookie_observer = nullptr;
 
 void cookie_store_add_observer(void*, const char*, void* observer) { g_cookie_observer = observer; }
 
-void* new_json_object(Json value) {
-    auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
-    object->header.metadata = g_json_value_class;
-    object->header.references = 1;
-    object->value = new Json(std::move(value));
-    return object;
-}
+void* new_json_object(Json value) { return foundation_new_json_object(std::move(value)); }
 
 Json json_from_plist(const PlistValue& value) {
     Json out;
@@ -427,3 +421,11 @@ void register_foundation_web_classes() {
 }
 
 }  // namespace foundation
+
+void* foundation_new_json_object(Json value) {
+    auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
+    object->header.metadata = g_json_value_class;
+    object->header.references = 1;
+    object->value = new Json(std::move(value));
+    return object;
+}

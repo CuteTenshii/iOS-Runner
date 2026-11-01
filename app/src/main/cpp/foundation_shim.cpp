@@ -2,6 +2,13 @@
 
 using namespace foundation;
 
+static constexpr uint64_t kImmortalReferences = 1ULL << 63;
+
+// CFBoolean constants resolve before classes register, so they get their class here.
+static NSNumberObject g_true_number{}, g_false_number{};
+static void* g_true_constant = &g_true_number;
+static void* g_false_constant = &g_false_number;
+
 void foundation_register_classes() {
     if (g_nsstring_class == nullptr) g_nsstring_class = objc_native_class("NSString", destroy_nsstring);
     for (void* constant : string_constants()) static_cast<HeapObject*>(constant)->metadata = g_nsstring_class;
@@ -24,6 +31,12 @@ void foundation_register_classes() {
     objc_register_method("-[NSProcessInfo physicalMemory]", reinterpret_cast<const void*>(+[](void*, const char*) -> uint64_t { return static_cast<uint64_t>(sysconf(_SC_PHYS_PAGES)) * static_cast<uint64_t>(sysconf(_SC_PAGESIZE)); }));
     g_nsurl_class = objc_native_class("NSURL", destroy_nsstring);
     g_nsnumber_class = objc_native_class("NSNumber", free);
+    for (auto* number : {&g_true_number, &g_false_number}) {
+        number->header.metadata = g_nsnumber_class;
+        number->header.references = kImmortalReferences;
+        number->is_bool = true;
+    }
+    g_true_number.value = 1;
     register_foundation_request_classes();
     register_foundation_web_classes();
     register_foundation_objects_classes();
@@ -96,6 +109,8 @@ static SymbolTable all_foundation_symbols() {
         {"CFNotificationCenterAddObserver", reinterpret_cast<void*>(darwin_add_observer)},
         {"CFNotificationCenterRemoveObserver", reinterpret_cast<void*>(darwin_remove_observer)},
         {"CFNotificationCenterPostNotification", reinterpret_cast<void*>(darwin_post)},
+        {"kCFBooleanTrue", &g_true_constant},
+        {"kCFBooleanFalse", &g_false_constant},
         {"NSHomeDirectory", reinterpret_cast<void*>(home_directory)},
         {"NSTemporaryDirectory", reinterpret_cast<void*>(temporary_directory)},
         // Nothing raises Objective-C exceptions through the runtime, and a crash report is already logged.

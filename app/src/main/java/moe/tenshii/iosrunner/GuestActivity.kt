@@ -63,6 +63,7 @@ class GuestActivity : Activity() {
     private val webViews = HashMap<Int, WebView>()
     private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
+    private var keychain: Keychain? = null
     private val devices by lazy { DeviceServices(this, mainThread, ::nativeHostReply) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,6 +80,7 @@ class GuestActivity : Activity() {
             finish()
             return
         }
+        keychain = Keychain(this, found.directory.name)
         val logPath = logFile(this).path
         val language = preferredLanguage(found.directory)
         Thread({ nativeRun(found.directory.path, found.executable, logPath, language) }, "guest-launcher").start()
@@ -1035,6 +1037,7 @@ class GuestActivity : Activity() {
         fun hostQuery(kind: String, argument: String): String = when (kind) {
             "permission-status" -> current?.devices?.permissionStatus(argument).orEmpty()
             "network-status" -> current?.devices?.networkStatus().orEmpty()
+            "keychain" -> current?.keychain?.call(JSONObject(argument))?.toString().orEmpty()
             "screen-size" -> current?.screenSizeInPoints().orEmpty()
             else -> ""
         }

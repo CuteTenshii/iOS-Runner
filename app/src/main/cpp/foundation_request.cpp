@@ -342,6 +342,28 @@ SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CONTEXT const
     return swift_string_from_utf8(text);
 }
 
+SWIFTCC SwiftString string_from_nsstring(void* object) { return swift_string_from_utf8(nsstring_text(object)); }
+
+SWIFTCC SwiftString string_from_utf8_pointer(const char* text) { return text != nullptr ? swift_string_from_utf8(text) : SwiftString{0, 0}; }
+
+SWIFTCC void* nsstring_from_static(const char* text, int64_t length, uint8_t) { return new_nsstring(std::string(text, static_cast<size_t>(length))); }
+
+// Literals of Any, whose objects are held directly and whose Strings become NSStrings, as bridging would make them.
+SWIFTCC void* collection_from_any_literal(void* elements) {
+    constexpr size_t kCountOffset = 16;
+    int64_t count;
+    memcpy(&count, static_cast<char*>(elements) + kCountOffset, sizeof count);
+    const auto* values = reinterpret_cast<const AnyValue*>(static_cast<char*>(elements) + kArrayElementsOffset);
+    std::vector<void*> items;
+    for (int64_t i = 0; i < count; ++i) {
+        if (values[i].type == type_system_symbol("$sSSN"))
+            items.push_back(new_nsstring(swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(values[i].buffer))));
+        else
+            items.push_back(reinterpret_cast<void*>(values[i].buffer[0]));
+    }
+    return foundation_new_array(items);
+}
+
 SWIFTCC void* string_bridge_to_objc(SwiftString value) { return new_nsstring(swift_string_to_utf8(value)); }
 
 SWIFTCC SwiftString string_bridge_from_objc(void* object) {
@@ -502,6 +524,11 @@ void add_foundation_request_symbols(SymbolTable& table) {
         {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
+        {"$sSS10FoundationEySSSo8NSStringCcfC", reinterpret_cast<void*>(string_from_nsstring)},
+        {"$sSS10FoundationE10utf8StringSSSgSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_utf8_pointer)},
+        {"$sSo8NSStringC10FoundationE13stringLiteralABs12StaticStringV_tcfC", reinterpret_cast<void*>(nsstring_from_static)},
+        {"$sSo7NSArrayC10FoundationE12arrayLiteralABypd_tcfC", reinterpret_cast<void*>(collection_from_any_literal)},
+        {"$sSo5NSSetC10FoundationE12arrayLiteralABypd_tcfC", reinterpret_cast<void*>(collection_from_any_literal)},
         {"swift_getErrorValue", reinterpret_cast<void*>(swift_get_error_value)},
         {"$s10Foundation18IntegerFormatStyleV6localeACyxGAA6LocaleV_tcfC", reinterpret_cast<void*>(integer_style_init)},
         {"$s10Foundation30NumberFormatStyleConfigurationO8NotationV11compactNameAEvgZ", reinterpret_cast<void*>(notation_compact_name)},
