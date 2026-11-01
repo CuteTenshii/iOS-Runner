@@ -380,6 +380,24 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
         return conditional_of(key, static_cast<Metadata*>(arguments[0]), static_cast<Metadata*>(arguments[1]), arguments);
     }
     if (symbol == "_$s10Foundation4DateVMn") return pod_type("Date", 8);
+    if (symbol == "_$s8Dispatch0A12TimeIntervalOMn") {
+        // Generic code stores the count, then injects the case into the word after it.
+        Metadata* interval = named_type(symbol, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 2 * kPointerSize, kPointerSize, 0);
+        auto* witnesses = witnesses_of(interval);
+        witnesses->get_enum_tag = +[](const void* value, void*) { return static_cast<const uint32_t*>(value)[2]; };
+        witnesses->destructive_project_enum_data = +[](void*, void*) {};
+        witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void*) { static_cast<uint64_t*>(value)[1] = tag; };
+        return interval;
+    }
+    if (symbol == "_$s10Foundation8CalendarV9ComponentOMn" || symbol == "_$s7Network6NWPathV6StatusOMn" || symbol == "_$s7Network11NWInterfaceV13InterfaceTypeOMn" || symbol == "_$s10Foundation20ByteCountFormatStyleV0E0OMn") {
+        // A plain tag word that generic code fills through the enum witnesses.
+        Metadata* component = pod_type(symbol, kPointerSize);
+        auto* witnesses = witnesses_of(component);
+        witnesses->get_enum_tag = +[](const void* value, void*) { return *static_cast<const uint32_t*>(value); };
+        witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void*) { *static_cast<uint64_t*>(value) = tag; };
+        return component;
+    }
+    if (symbol == "_$s10Foundation4DataVMn") return two_word_type("Data", word_type(), bridge_word_type());
     if (symbol == "_$s8Dispatch0A4TimeVMn") return pod_type("DispatchTime", 8);
     if (symbol == "_$sSS10FoundationE8EncodingVMn") return pod_type("String.Encoding", 8);
     // Holds a continuation, which isn't reference counted; the arguments stay for resume to find its value type.
@@ -390,6 +408,7 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
     if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
     if (symbol == "_$ss15ContinuousClockV7InstantVMn") return named_type("ContinuousClock.Instant", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 16, 8, 0);
+    if (symbol == "_$sScPMn") return pod_type("TaskPriority", 1);
     if (symbol == "_$ss5Int32VMn") return pod_type("Int32", 4);
     if (symbol == "_$ss5UInt8VMn") return pod_type("UInt8", 1);
     if (symbol == "_$ss5NeverOMn") return pod_type("Never", 0);

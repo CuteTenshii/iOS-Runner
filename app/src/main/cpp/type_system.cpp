@@ -97,6 +97,8 @@ void* type_system_symbol(std::string_view name) {
     if (name == "swift_getTupleTypeMetadata") return reinterpret_cast<void*>(rt_getTupleTypeMetadata);
     if (name == "swift_getTupleTypeMetadata2") return reinterpret_cast<void*>(rt_getTupleTypeMetadata2);
     if (name == "swift_getTupleTypeMetadata3") return reinterpret_cast<void*>(rt_getTupleTypeMetadata3);
+    // Imported C types carry complete metadata in the image, and uniqueness only matters across images.
+    if (name == "swift_getForeignTypeMetadata") return reinterpret_cast<void*>(+[](size_t, void* metadata) -> MetadataResponse { return {metadata, 0}; });
     if (name == "swift_getTupleTypeLayout") return reinterpret_cast<void*>(rt_getTupleTypeLayout);
     if (name == "swift_getTupleTypeLayout2") return reinterpret_cast<void*>(rt_getTupleTypeLayout2);
     if (name == "swift_getTupleTypeLayout3") return reinterpret_cast<void*>(rt_getTupleTypeLayout3);

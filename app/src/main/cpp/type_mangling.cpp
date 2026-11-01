@@ -226,17 +226,7 @@ private:
                 return;
             }
             case 'o': {
-                // An imported Objective-C class named inline: only its reference layout matters here.
-                const uint64_t length = read_natural();
-                if (static_cast<uint64_t>(end_ - cursor_) < length + 1 || cursor_[length] != 'C') {
-                    fail("unsupported imported type");
-                    return;
-                }
-                cursor_ += length + 1;
-                Node node;
-                node.type = native_type();
-                stack_.push_back(node);
-                substitute(node);
+                imported_type();
                 return;
             }
             case 'p':
@@ -576,6 +566,13 @@ private:
                     push_type(native_type());
                     return;
                 }
+                if (cursor_ < end_ && *cursor_ == 'p') {
+                    // An existential metatype: for these class-bound protocols, one class pointer.
+                    ++cursor_;
+                    pop();
+                    push_type(named_type("metatype", kKindMetatype, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0));
+                    return;
+                }
                 fail("unsupported X type");
                 return;
             case 'm':
@@ -598,6 +595,52 @@ private:
                 fail(std::string("unsupported operator '") + code + "'");
                 return;
         }
+    }
+
+    // An imported C or Objective-C type named inline: classes and protocols are references, enums are tag words.
+    void imported_type() {
+        const uint64_t length = read_natural();
+        if (static_cast<uint64_t>(end_ - cursor_) < length + 1) {
+            fail("truncated imported type");
+            return;
+        }
+        const std::string name(cursor_, length);
+        cursor_ += length;
+        const char kind = *cursor_++;
+        Node node;
+        if (kind == 'C' || kind == 'a') {
+            node.type = native_type();
+        } else if (kind == 'O') {
+            node.type = pod_type("So" + name, kPointerSize);
+        } else if (kind == 'V') {
+            static const std::unordered_map<std::string_view, size_t> kPlainStructs = {
+                {"CGRect", 32},
+                {"CGPoint", 16},
+                {"CGSize", 16},
+                {"CGVector", 16},
+                {"CGAffineTransform", 48},
+                {"UIEdgeInsets", 32},
+                {"NSDirectionalEdgeInsets", 32},
+                {"UIOffset", 16},
+                {"_NSRange", 16},
+            };
+            const auto found = kPlainStructs.find(name);
+            if (found == kPlainStructs.end()) {
+                fail("unsupported imported struct " + name);
+                return;
+            }
+            node.type = named_type("So" + name, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, found->second, kPointerSize, 0);
+        } else if (kind == '_' && cursor_ < end_ && *cursor_ == 'p') {
+            // Its existential is one reference. The protocol and the existential each take a substitution slot.
+            ++cursor_;
+            node.type = native_type();
+            substitute(node);
+        } else {
+            fail("unsupported imported type " + name);
+            return;
+        }
+        stack_.push_back(node);
+        substitute(node);
     }
 
     void builtin() {
