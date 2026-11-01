@@ -771,8 +771,14 @@ bool copy_recursively(const std::string& from, const std::string& to) {
     return fclose(output) == 0;
 }
 
+// A directory URL ends in a slash, which would hide a child path from copy_recursively's prefix checks.
+std::string without_trailing_slashes(std::string path) {
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    return path;
+}
+
 bool file_manager_copy(void*, const char*, void* from, void* to, void** error) {
-    if (copy_recursively(nsobject_path(from), nsobject_path(to))) return true;
+    if (copy_recursively(without_trailing_slashes(nsobject_path(from)), without_trailing_slashes(nsobject_path(to)))) return true;
     set_cocoa_error(error, "Could not copy " + nsobject_path(from));
     return false;
 }
