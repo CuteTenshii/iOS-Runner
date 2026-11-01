@@ -201,6 +201,13 @@ Json json_from_plist(const PlistValue& value) {
             out.kind = Json::Kind::Date;
             out.number = value.real;
             break;
+        case PlistValue::Kind::Uid:
+            // XML plists spell a UID this way, and NSPropertyListSerialization's callers read it from either format.
+            out.kind = Json::Kind::Object;
+            out.members.emplace_back("CF$UID", Json{});
+            out.members.back().second.kind = Json::Kind::Integer;
+            out.members.back().second.integer = value.integer;
+            break;
         case PlistValue::Kind::Array:
             out.kind = Json::Kind::Array;
             for (const auto& item : value.items) out.items.push_back(json_from_plist(item));
@@ -215,6 +222,80 @@ Json json_from_plist(const PlistValue& value) {
     return out;
 }
 
+PlistValue plist_from_json(const Json& value) {
+    PlistValue out;
+    switch (value.kind) {
+        case Json::Kind::Null:
+            break;
+        case Json::Kind::Bool:
+            out.kind = PlistValue::Kind::Boolean;
+            out.boolean = value.flag;
+            break;
+        case Json::Kind::Integer:
+            out.kind = PlistValue::Kind::Integer;
+            out.integer = value.integer;
+            break;
+        case Json::Kind::Number:
+            out.kind = PlistValue::Kind::Real;
+            out.real = value.number;
+            break;
+        case Json::Kind::String:
+            out.kind = PlistValue::Kind::String;
+            out.text = value.text;
+            break;
+        case Json::Kind::Date:
+            out.kind = PlistValue::Kind::Date;
+            out.real = value.number;
+            break;
+        case Json::Kind::Data:
+            out.kind = PlistValue::Kind::Data;
+            out.text = value.text;
+            break;
+        case Json::Kind::Array:
+            out.kind = PlistValue::Kind::Array;
+            for (const auto& item : value.items) out.items.push_back(plist_from_json(item));
+            break;
+        case Json::Kind::Object:
+            out.kind = PlistValue::Kind::Dictionary;
+            for (const auto& [key, item] : value.members) out.entries[key] = plist_from_json(item);
+            break;
+    }
+    return out;
+}
+
+bool json_from_object(void* object, Json& out) {
+    if (object == nullptr) return false;
+    const void* cls = static_cast<HeapObject*>(object)->metadata;
+    if (cls == g_nsstring_class) {
+        out = json_text(nsstring_text(object));
+    } else if (cls == g_nsnumber_class) {
+        const auto* number = static_cast<NSNumberObject*>(object);
+        out.kind = number->is_bool ? Json::Kind::Bool : Json::Kind::Integer;
+        out.flag = number->value != 0;
+        out.integer = number->value;
+    } else if (cls == g_nsdata_class) {
+        out.kind = Json::Kind::Data;
+        out.text = *static_cast<NSDataObject*>(object)->bytes;
+    } else if (cls == g_nsdate_class) {
+        out.kind = Json::Kind::Date;
+        out.number = static_cast<NSDateObject*>(object)->seconds;
+    } else if (cls == g_nsarray_class) {
+        out.kind = Json::Kind::Array;
+        for (void* item : *static_cast<NSArrayObject*>(object)->items) {
+            out.items.emplace_back();
+            if (!json_from_object(item, out.items.back())) return false;
+        }
+    } else if (cls == g_json_value_class) {
+        out = *static_cast<JSONValueObject*>(object)->value;
+    } else if (cls == g_bridged_collection_class) {
+        const auto* bridged = static_cast<BridgedCollection*>(object);
+        return json_from_bridged_collection(bridged->value, bridged->key_type, bridged->element_type, out);
+    } else {
+        return false;
+    }
+    return true;
+}
+
 const PlistValue& bundle_info() {
     static const PlistValue info = [] {
         PlistValue loaded;
@@ -224,15 +305,48 @@ const PlistValue& bundle_info() {
     return info;
 }
 
+constexpr uint64_t kPlistFormatXml = 100, kPlistFormatBinary = 200;
+
 void* property_list_from_data(void*, const char*, void* data, uint64_t, uint64_t* format, void** error) {
-    constexpr uint64_t kBinaryFormat = 200;
     PlistValue value;
     if (data == nullptr || !plist_parse(*static_cast<NSDataObject*>(data)->bytes, value)) {
         if (error != nullptr) *error = foundation_make_error("The data isn't a property list", 0);
         return nullptr;
     }
-    if (format != nullptr) *format = kBinaryFormat;
+    if (format != nullptr) *format = static_cast<NSDataObject*>(data)->bytes->compare(0, 6, "bplist") == 0 ? kPlistFormatBinary : kPlistFormatXml;
     return new_json_object(json_from_plist(value));
+}
+
+void* data_from_property_list(void*, const char*, void* object, uint64_t format, uint64_t, void** error) {
+    Json json;
+    if (!json_from_object(object, json)) {
+        engine_log("PLIST: an object of a type this runtime cannot serialize");
+        if (error != nullptr) *error = foundation_make_error("The object isn't a property list", 0);
+        return nullptr;
+    }
+    const PlistValue value = plist_from_json(json);
+    return make_nsdata(format == kPlistFormatXml ? plist_write_xml(value) : plist_write_binary(value));
+}
+
+void* property_list_object_from_file(const std::string& path, bool dictionary) {
+    PlistValue value;
+    if (!plist_read_file(path, value) || value.kind != (dictionary ? PlistValue::Kind::Dictionary : PlistValue::Kind::Array)) return nullptr;
+    return new_json_object(json_from_plist(value));
+}
+
+// Written beside the target and renamed, so a failure leaves the old file whole.
+bool write_property_list_object(void* object, const std::string& path, bool xml) {
+    Json json;
+    if (!json_from_object(object, json)) return false;
+    const PlistValue value = plist_from_json(json);
+    const std::string bytes = xml ? plist_write_xml(value) : plist_write_binary(value);
+    const std::string partial = path + ".partial";
+    FILE* file = fopen(partial.c_str(), "wb");
+    if (file == nullptr) return false;
+    const bool written = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+    if (fclose(file) == 0 && written && rename(partial.c_str(), path.c_str()) == 0) return true;
+    remove(partial.c_str());
+    return false;
 }
 
 void* bundle_info_dictionary(void*, const char*) { return new_json_object(json_from_plist(bundle_info())); }
@@ -384,6 +498,15 @@ void* strings_object_from_json(const std::string& json) {
 }
 
 // Every collection the app stores in defaults is a [String].
+bool json_from_plist_bytes(const std::string& bytes, Json& out) {
+    PlistValue value;
+    if (!plist_parse(bytes, value)) return false;
+    out = json_from_plist(value);
+    return true;
+}
+
+std::string plist_bytes_from_json(const Json& value) { return plist_write_binary(plist_from_json(value)); }
+
 bool strings_json_from_object(void* object, std::string& json) {
     if (static_cast<HeapObject*>(object)->metadata != g_bridged_collection_class) return false;
     json = value_to_json(&static_cast<BridgedCollection*>(object)->value, resolve_mangled_type("SaySSG", nullptr));
@@ -416,6 +539,7 @@ void register_foundation_web_classes() {
     objc_register_method("-[WKWebViewConfiguration setApplicationNameForUserAgent:]", reinterpret_cast<const void*>(configuration_set_application_name));
     objc_register_method("-[WKUserContentController addUserScript:]", reinterpret_cast<const void*>(controller_add_script));
     objc_register_method("+[NSPropertyListSerialization propertyListWithData:options:format:error:]", reinterpret_cast<const void*>(property_list_from_data));
+    objc_register_method("+[NSPropertyListSerialization dataWithPropertyList:format:options:error:]", reinterpret_cast<const void*>(data_from_property_list));
     objc_register_method("-[NSBundle infoDictionary]", reinterpret_cast<const void*>(bundle_info_dictionary));
     objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value_string));
 }

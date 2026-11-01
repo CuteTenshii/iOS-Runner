@@ -1,5 +1,7 @@
 #include "json.h"
 
+#include "base64.h"
+
 #include <cstdio>
 #include <cstdlib>
 
@@ -258,6 +260,16 @@ void write_value(const Json& value, std::string& out) {
         }
         case Json::Kind::String:
             write_string(value.text, out);
+            break;
+        // These are JSONEncoder's default strategies.
+        case Json::Kind::Date: {
+            char text[40];
+            snprintf(text, sizeof text, "%.17g", value.number);
+            out += text;
+            break;
+        }
+        case Json::Kind::Data:
+            write_string(base64_encode(value.text), out);
             break;
         case Json::Kind::Array: {
             out += '[';

@@ -76,3 +76,8 @@ void* foundation_new_array(const std::vector<void*>& items);
 
 // A new NSDictionary-like object holding this parsed value, as bridged property lists are.
 void* foundation_new_json_object(Json value);
+bool json_from_plist_bytes(const std::string& bytes, Json& out);
+bool json_from_object(void* object, Json& out);
+// A null key type means an array, and a null element type means a collection that can't be converted.
+bool json_from_bridged_collection(void* value, void* key_type, void* element_type, Json& out);
+std::string plist_bytes_from_json(const Json& value);

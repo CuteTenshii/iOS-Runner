@@ -273,6 +273,19 @@ SWIFTCC void* collection_bridge_to_objc(void* value) {
     return wrapper;
 }
 
+SWIFTCC void* dictionary_bridge_to_objc(void* value, void* key_type, void* element_type, void*) {
+    auto* wrapper = static_cast<BridgedCollection*>(collection_bridge_to_objc(value));
+    wrapper->key_type = key_type;
+    wrapper->element_type = element_type;
+    return wrapper;
+}
+
+SWIFTCC void* array_bridge_to_objc(void* value, void* element_type) {
+    auto* wrapper = static_cast<BridgedCollection*>(collection_bridge_to_objc(value));
+    wrapper->element_type = element_type;
+    return wrapper;
+}
+
 bool bridged_collection_value(void* object, void*& value) {
     if (object == nullptr || static_cast<HeapObject*>(object)->metadata != g_bridged_collection_class) return false;
     value = static_cast<BridgedCollection*>(object)->value;
@@ -563,8 +576,8 @@ void add_foundation_request_symbols(SymbolTable& table) {
         {"$s10Foundation10URLRequestV8setValue_18forHTTPHeaderFieldySSSg_SStF", reinterpret_cast<void*>(url_request_set_header)},
         {"$s10Foundation10URLRequestV8httpBodyAA4DataVSgvs", reinterpret_cast<void*>(url_request_set_body)},
         {"$s10Foundation10URLRequestV3urlAA3URLVSgvg", reinterpret_cast<void*>(url_request_get_url)},
-        {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
-        {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
+        {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(dictionary_bridge_to_objc)},
+        {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(array_bridge_to_objc)},
         {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
         {"$s10Foundation4DataV7subdata2inACSnySiG_tF", reinterpret_cast<void*>(data_subdata)},
         {"$s10Foundation4DataV5countSivg", reinterpret_cast<void*>(data_count)},

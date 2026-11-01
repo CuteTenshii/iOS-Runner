@@ -265,6 +265,9 @@ extern AsyncFunctionRecord g_url_session_request_record;
 struct BridgedCollection {
     HeapObject header;
     void* value;
+    // Set when the guest bridged it, and null for collections the runtime made.
+    void* key_type;
+    void* element_type;
 };
 
 extern void* g_bridged_collection_class;
@@ -379,6 +382,9 @@ extern void* g_json_value_class;
 void destroy_nsdata(void* raw);
 void destroy_json_value(void* raw);
 void* make_nsdata(const std::string& bytes);
+void* property_list_object_from_file(const std::string& path, bool dictionary);
+bool write_property_list_object(void* object, const std::string& path, bool xml);
+std::string nsobject_path(void* object);
 
 namespace foundation {
 

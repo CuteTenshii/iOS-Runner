@@ -1105,6 +1105,23 @@ void register_foundation_url_classes() {
     objc_register_method("-[NSFileManager removeItemAtURL:error:]", reinterpret_cast<const void*>(file_manager_remove));
     objc_register_method("-[NSFileManager moveItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_move));
     objc_register_method("-[NSFileManager copyItemAtURL:toURL:error:]", reinterpret_cast<const void*>(file_manager_copy));
+    for (const std::string cls : {"NSDictionary", "NSArray", "__NSJSONValue"}) {
+        objc_register_method(("-[" + cls + " writeToURL:error:]").c_str(), reinterpret_cast<const void*>(+[](void* self, const char*, void* url, void** error) {
+            if (write_property_list_object(self, nsobject_path(url), false)) return true;
+            set_cocoa_error(error, "Could not write " + nsobject_path(url));
+            return false;
+        }));
+        objc_register_method(("-[" + cls + " writeToURL:atomically:]").c_str(), reinterpret_cast<const void*>(+[](void* self, const char*, void* url, bool) { return write_property_list_object(self, nsobject_path(url), true); }));
+        objc_register_method(("-[" + cls + " writeToFile:atomically:]").c_str(), reinterpret_cast<const void*>(+[](void* self, const char*, void* path, bool) { return write_property_list_object(self, nsobject_path(path), true); }));
+    }
+    objc_register_method("-[NSDictionary initWithContentsOfURL:]", reinterpret_cast<const void*>(+[](void*, const char*, void* url) { return property_list_object_from_file(nsobject_path(url), true); }));
+    objc_register_method("-[NSDictionary initWithContentsOfFile:]", reinterpret_cast<const void*>(+[](void*, const char*, void* path) { return property_list_object_from_file(nsobject_path(path), true); }));
+    objc_register_method("+[NSDictionary dictionaryWithContentsOfURL:]", reinterpret_cast<const void*>(+[](void*, const char*, void* url) { return property_list_object_from_file(nsobject_path(url), true); }));
+    objc_register_method("+[NSDictionary dictionaryWithContentsOfFile:]", reinterpret_cast<const void*>(+[](void*, const char*, void* path) { return property_list_object_from_file(nsobject_path(path), true); }));
+    objc_register_method("-[NSArray initWithContentsOfURL:]", reinterpret_cast<const void*>(+[](void*, const char*, void* url) { return property_list_object_from_file(nsobject_path(url), false); }));
+    objc_register_method("-[NSArray initWithContentsOfFile:]", reinterpret_cast<const void*>(+[](void*, const char*, void* path) { return property_list_object_from_file(nsobject_path(path), false); }));
+    objc_register_method("+[NSArray arrayWithContentsOfURL:]", reinterpret_cast<const void*>(+[](void*, const char*, void* url) { return property_list_object_from_file(nsobject_path(url), false); }));
+    objc_register_method("+[NSArray arrayWithContentsOfFile:]", reinterpret_cast<const void*>(+[](void*, const char*, void* path) { return property_list_object_from_file(nsobject_path(path), false); }));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtPath:error:]", reinterpret_cast<const void*>(file_manager_contents_path));
     objc_register_method("-[NSFileManager contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:]", reinterpret_cast<const void*>(file_manager_contents_url));
     objc_register_method("-[NSFileManager createDirectoryAtURL:withIntermediateDirectories:attributes:error:]", reinterpret_cast<const void*>(file_manager_create_directory));

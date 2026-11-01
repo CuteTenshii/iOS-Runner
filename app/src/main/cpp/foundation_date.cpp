@@ -52,6 +52,22 @@ SWIFTCC void* dictionary_bridge_from_objc(void* object) {
     return make_string_dictionary(any_type(), {});
 }
 
+// JSON-backed dictionaries only hold [String: Any], so asking for any other shape fails the cast.
+SWIFTCC bool dictionary_conditional_bridge_from_objc(void* object, void** result, void* key_type, void* value_type, void*) {
+    if (void* value; bridged_collection_value(object, value)) {
+        *result = rt_swift_bridgeObjectRetain(value);
+        return true;
+    }
+    if (static_cast<HeapObject*>(object)->metadata == g_json_value_class && static_cast<JSONValueObject*>(object)->value->kind == Json::Kind::Object && key_type == type_system_symbol("$sSSN") && value_type == any_type()) {
+        AnyValue any;
+        json_to_any(*static_cast<JSONValueObject*>(object)->value, &any);
+        *result = reinterpret_cast<void*>(any.buffer[0]);
+        return true;
+    }
+    *result = nullptr;
+    return false;
+}
+
 // A Calendar is an immediate word: only the Gregorian calendar in the device's time zone is implemented.
 constexpr uint64_t kCalendarImmediate = 1ULL << 63;
 
@@ -808,6 +824,7 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"swift_stdlib_random", reinterpret_cast<void*>(stdlib_random)},
         {"$s10Foundation4DateV19_bridgeToObjectiveCSo6NSDateCyF", reinterpret_cast<void*>(date_bridge_to_objc)},
         {"$sSD10FoundationE36_unconditionallyBridgeFromObjectiveCySDyxq_GSo12NSDictionaryCSgFZ", reinterpret_cast<void*>(dictionary_bridge_from_objc)},
+        {"$sSD10FoundationE34_conditionallyBridgeFromObjectiveC_6resultSbSo12NSDictionaryC_SDyxq_GSgztFZ", reinterpret_cast<void*>(dictionary_conditional_bridge_from_objc)},
         {"$s10Foundation22_convertNSErrorToErrorys0E0_pSo0C0CSgF", reinterpret_cast<void*>(error_identity)},
         {"$s10Foundation22_convertErrorToNSErrorySo0E0Cs0C0_pF", reinterpret_cast<void*>(error_identity)},
         {"$ss018_bridgeAnyObjectToB0yypyXlSgF", reinterpret_cast<void*>(bridge_any_object_to_any)},

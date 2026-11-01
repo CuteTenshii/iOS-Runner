@@ -9,7 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base64.h"
 #include "engine.h"
+#include "foundation_internal.h"
 #include "foundation_shim.h"
 #include "json.h"
 #include "macho.h"
@@ -107,7 +109,7 @@ void store_optional_tag(void* out, void* payload, bool none) {
 bool json_seconds(const Json& node, double& seconds) {
     if (node.kind == Json::Kind::Integer)
         seconds = static_cast<double>(node.integer);
-    else if (node.kind == Json::Kind::Number)
+    else if (node.kind == Json::Kind::Number || node.kind == Json::Kind::Date)
         seconds = node.number;
     else
         return false;
@@ -178,6 +180,16 @@ void decode_value(void* type, Json* node, void* out, void** error) {
             memcpy(out, &seconds, sizeof seconds);
             return;
         }
+        if (strcmp(name, "_$s10Foundation4DataVMn") == 0) {
+            std::string bytes = node->text;
+            if (node->kind != Json::Kind::Data && (node->kind != Json::Kind::String || !base64_decode_strict(node->text, bytes))) {
+                *error = decoding_error("expected data");
+                return;
+            }
+            const FoundationData data = foundation_make_data(bytes);
+            memcpy(out, &data, sizeof data);
+            return;
+        }
     }
     if (void* element = array_element_type(type)) {
         if (node->kind != Json::Kind::Array) {
@@ -245,6 +257,18 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
         memcpy(&out.number, value, sizeof out.number);
         return;
     }
+    if (const char* name = foreign_type_name(type)) {
+        if (strcmp(name, "_$s10Foundation4DateVMn") == 0) {
+            out.kind = Json::Kind::Date;
+            memcpy(&out.number, value, sizeof out.number);
+            return;
+        }
+        if (strcmp(name, "_$s10Foundation4DataVMn") == 0) {
+            out.kind = Json::Kind::Data;
+            out.text = foundation_data_bytes(*static_cast<const FoundationData*>(value));
+            return;
+        }
+    }
     if (void* element = array_element_type(type)) {
         out.kind = Json::Kind::Array;
         uint64_t word;
@@ -270,8 +294,26 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
         });
         return;
     }
+    if (type == any_type()) {
+        constexpr uint64_t kLargestMetadataKind = 0x7ff;
+        const auto* any = static_cast<const AnyValue*>(value);
+        if (any->type == nullptr) return;
+        // A class's first word is 0 or an isa pointer, where every other type has a small kind.
+        uint64_t kind;
+        memcpy(&kind, any->type, sizeof kind);
+        if (kind != 0 && kind <= kLargestMetadataKind) {
+            encode_value(any->type, any->buffer, out, error);
+        } else if (!json_from_object(reinterpret_cast<void*>(any->buffer[0]), out)) {
+            *error = foundation_make_error("This value could not be encoded.", 4866);
+        }
+        return;
+    }
     static const void* encodable = unresolved_symbol_named("_$sSEMp");
     void* table = swift_runtime_find_conformance(type, encodable);
+    if (table == nullptr) {
+        *error = foundation_make_error("This value could not be encoded.", 4866);
+        return;
+    }
     const auto encode = reinterpret_cast<EncodeToEncoder>(const_cast<void*>(witness_in(table, "_$sSE6encode2toys7Encoder_p_tKFTq")));
     if (encode == nullptr) {
         *error = foundation_make_error("This value could not be encoded.", 4866);
@@ -311,6 +353,46 @@ SWIFTCC FoundationData json_encoder_encode(const void* value, void* type, void*,
     encode_value(type, value, root, error);
     if (*error != nullptr) return foundation_make_data("");
     return foundation_make_data(json_write(root));
+}
+
+bool convert_bridged_collection(void* value, void* key_type, void* element_type, Json& out) {
+    if (element_type == nullptr || (key_type != nullptr && key_type != type_system_symbol("$sSSN"))) return false;
+    void* storage = reinterpret_cast<void*>(reinterpret_cast<uint64_t>(value) & kBridgeObjectAddressMask);
+    void* error = nullptr;
+    if (key_type != nullptr) {
+        out.kind = Json::Kind::Object;
+        visit_string_dictionary(storage, [&](const std::string& key, void* member) {
+            if (error != nullptr) return;
+            out.members.emplace_back(key, Json{});
+            encode_value(element_type, member, out.members.back().second, &error);
+        });
+    } else {
+        out.kind = Json::Kind::Array;
+        char* elements;
+        const size_t count = array_storage_contents(storage, element_type, &elements);
+        const size_t stride = (size_of(element_type) + 7) & ~size_t{7};
+        out.items.resize(count);
+        for (size_t i = 0; i < count && error == nullptr; ++i) encode_value(element_type, elements + i * stride, out.items[i], &error);
+    }
+    return error == nullptr;
+}
+
+SWIFTCC void plist_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+    auto* root = new Json;
+    if (!json_from_plist_bytes(foundation_data_bytes({range, storage}), *root)) {
+        delete root;
+        *error = decoding_error("it isn't a valid property list");
+        return;
+    }
+    decode_value(type, root, out, error);
+    delete root;
+}
+
+SWIFTCC FoundationData plist_encoder_encode(const void* value, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+    Json root;
+    encode_value(type, value, root, error);
+    if (*error != nullptr) return foundation_make_data("");
+    return foundation_make_data(plist_bytes_from_json(root));
 }
 
 SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
@@ -547,6 +629,8 @@ SWIFTCC void raw_representable_encode(CoderExistential* encoder, void* type, voi
 
 }  // namespace
 
+bool json_from_bridged_collection(void* value, void* key_type, void* element_type, Json& out) { return convert_bridged_collection(value, key_type, element_type, out); }
+
 void* codable_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
         {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeyqd__Sgqd__m_xtKSeRd__lF", reinterpret_cast<void*>(keyed_decode_if_present_generic)},
@@ -582,6 +666,12 @@ void* codable_symbol(std::string_view name) {
         {"$s10Foundation11JSONEncoderCACycfc", reinterpret_cast<void*>(coder_init)},
         {"$s10Foundation11JSONDecoderC6decode_4fromxxm_AA4DataVtKSeRzlFTj", reinterpret_cast<void*>(json_decoder_decode)},
         {"$s10Foundation11JSONEncoderC6encodeyAA4DataVxKSERzlFTj", reinterpret_cast<void*>(json_encoder_encode)},
+        {"$s10Foundation19PropertyListDecoderCMa", reinterpret_cast<void*>(coder_access)},
+        {"$s10Foundation19PropertyListEncoderCMa", reinterpret_cast<void*>(coder_access)},
+        {"$s10Foundation19PropertyListDecoderCACycfc", reinterpret_cast<void*>(coder_init)},
+        {"$s10Foundation19PropertyListEncoderCACycfc", reinterpret_cast<void*>(coder_init)},
+        {"$s10Foundation19PropertyListDecoderC6decode_4fromxxm_AA4DataVtKSeRzlFTj", reinterpret_cast<void*>(plist_decoder_decode)},
+        {"$s10Foundation19PropertyListEncoderC6encodeyAA4DataVxKSERzlFTj", reinterpret_cast<void*>(plist_encoder_encode)},
         {"$ss7DecoderP9container7keyedBys22KeyedDecodingContainerVyqd__Gqd__m_tKs9CodingKeyRd__lFTj", reinterpret_cast<void*>(decoder_container)},
         {"$ss7EncoderP9container7keyedBys22KeyedEncodingContainerVyqd__Gqd__m_ts9CodingKeyRd__lFTj", reinterpret_cast<void*>(encoder_container)},
         {"$ss22KeyedDecodingContainerV6decode_6forKeyS2Sm_xtKF", reinterpret_cast<void*>(keyed_decode_string)},
