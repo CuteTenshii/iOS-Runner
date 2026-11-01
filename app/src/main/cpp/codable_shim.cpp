@@ -631,6 +631,12 @@ SWIFTCC void raw_representable_encode(CoderExistential* encoder, void* type, voi
 
 bool json_from_bridged_collection(void* value, void* key_type, void* element_type, Json& out) { return convert_bridged_collection(value, key_type, element_type, out); }
 
+bool json_from_any(const void* any, Json& out) {
+    void* error = nullptr;
+    encode_value(any_type(), any, out, &error);
+    return error == nullptr;
+}
+
 void* codable_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
         {"$ss22KeyedDecodingContainerV15decodeIfPresent_6forKeyqd__Sgqd__m_xtKSeRd__lF", reinterpret_cast<void*>(keyed_decode_if_present_generic)},

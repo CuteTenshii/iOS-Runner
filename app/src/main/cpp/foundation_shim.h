@@ -81,6 +81,7 @@ void* foundation_new_json_object(Json value);
 void foundation_clear_temporary_directory();
 bool json_from_plist_bytes(const std::string& bytes, Json& out);
 bool json_from_object(void* object, Json& out);
+bool json_from_any(const void* any, Json& out);
 // A null key type means an array, and a null element type means a collection that can't be converted.
 bool json_from_bridged_collection(void* value, void* key_type, void* element_type, Json& out);
 std::string plist_bytes_from_json(const Json& value);

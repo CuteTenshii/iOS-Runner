@@ -16,9 +16,14 @@
 #include "key_path.h"
 #include "macho.h"
 #include "objc_runtime.h"
+#include "predicate.h"
 #include "stdlib_shim.h"
 #include "swift_abi.h"
 #include "type_system.h"
+#include "uikit_internal.h"
+
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
+extern "C" void rt_swift_bridgeObjectRelease(void*);
 
 namespace {
 constexpr size_t kRoNameOffset = 24;
@@ -160,39 +165,117 @@ SWIFTCC void* sort_descriptor_init(void* key_path, bool ascending) {
     return descriptor;
 }
 
-// `key == %@` is the only predicate shape the app builds.
 struct Predicate {
     void* isa;
     uint64_t references;
-    std::string* key;
-    std::string* value;
+    PredicateRef* node;
 };
 
 struct CVarArgExistential {
-    void* buffer[3];
+    uint64_t buffer[3];
     void* type;
     void* table;
 };
 
-SWIFTCC void* predicate_init(SwiftString format, void* arguments, SWIFT_CONTEXT void*) {
-    const std::string text = swift_string_to_utf8(format);
+void* new_predicate(PredicateRef node) {
     auto* predicate = static_cast<Predicate*>(objc_framework_object("NSPredicate"));
-    predicate->key = new std::string(text.substr(0, text.find(' ')));
-    predicate->value = new std::string();
-    int64_t count;
-    memcpy(&count, static_cast<char*>(arguments) + kArrayCountOffset, sizeof count);
-    if (count > 0) {
-        const auto* first = reinterpret_cast<const CVarArgExistential*>(static_cast<char*>(arguments) + kArrayElementsOffset);
-        *predicate->value = first->type == type_system_symbol("$sSSN") ? swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(first->buffer)) : foundation_object_text(first->buffer[0]);
-    }
+    predicate->node = new PredicateRef(std::move(node));
     return predicate;
 }
 
+PredicateValue predicate_value_from_json(const Json& json) {
+    PredicateValue out;
+    switch (json.kind) {
+        case Json::Kind::Null:
+            break;
+        case Json::Kind::Bool:
+            return PredicateValue::of_bool(json.flag);
+        case Json::Kind::Integer:
+            return PredicateValue::of_number(static_cast<double>(json.integer));
+        case Json::Kind::Number:
+        case Json::Kind::Date:
+            return PredicateValue::of_number(json.number);
+        case Json::Kind::String:
+        case Json::Kind::Data:
+            return PredicateValue::of_string(json.text);
+        case Json::Kind::Array:
+            out.kind = PredicateValue::Kind::List;
+            for (const Json& item : json.items) out.items.push_back(predicate_value_from_json(item));
+            break;
+        case Json::Kind::Object:
+            out.kind = PredicateValue::Kind::Dictionary;
+            for (const auto& [key, item] : json.members) out.entries[key] = predicate_value_from_json(item);
+            break;
+    }
+    return out;
+}
+
+// Anything that isn't plain data, such as a managed object, compares by identity.
+PredicateValue predicate_value_from_object(void* object) {
+    Json json;
+    return json_from_object(object, json) ? predicate_value_from_json(json) : PredicateValue::of_object(object);
+}
+
+PredicateValue predicate_value_from_argument(const CVarArgExistential& argument) {
+    constexpr uint64_t kLargestMetadataKind = 0x7ff;
+    uint64_t kind;
+    memcpy(&kind, argument.type, sizeof kind);
+    if (kind == 0 || kind > kLargestMetadataKind) return predicate_value_from_object(reinterpret_cast<void*>(argument.buffer[0]));
+    // A CVarArg existential starts with the same words as an Any.
+    Json json;
+    if (json_from_any(&argument, json)) return predicate_value_from_json(json);
+    engine_log("STOP: an NSPredicate argument of a type this runtime cannot convert");
+    abort();
+}
+
+SWIFTCC void* predicate_init(SwiftString format, void* arguments, SWIFT_CONTEXT void*) {
+    const std::string text = swift_string_to_utf8(format);
+    int64_t count;
+    memcpy(&count, static_cast<char*>(arguments) + kArrayCountOffset, sizeof count);
+    const auto* first = reinterpret_cast<const CVarArgExistential*>(static_cast<char*>(arguments) + kArrayElementsOffset);
+    std::vector<PredicateValue> values;
+    for (int64_t i = 0; i < count; ++i) values.push_back(predicate_value_from_argument(first[i]));
+    std::string error;
+    PredicateRef node = predicate_parse(text, values, error);
+    if (node == nullptr) {
+        engine_log("STOP: unsupported NSPredicate format \"%s\": %s", text.c_str(), error.c_str());
+        abort();
+    }
+    return new_predicate(std::move(node));
+}
+
+PredicateValue read_predicate_key(void* object, const std::string& key) {
+    const auto record = store().records.find(object);
+    if (record != store().records.end()) {
+        const auto found = record->second.attributes.find(key);
+        if (found == record->second.attributes.end()) return PredicateValue{};
+        if (found->second.is_object) return found->second.value != nullptr ? predicate_value_from_object(found->second.value) : PredicateValue{};
+        return PredicateValue::of_number(static_cast<double>(reinterpret_cast<int64_t>(found->second.value)));
+    }
+    if (!objc_responds(object, key.c_str())) return PredicateValue{};
+    using Getter = void* (*)(void*, const char*);
+    void* result = reinterpret_cast<Getter>(const_cast<void*>(objc_method_for(object, key.c_str())))(object, key.c_str());
+    if (property_is_object(*static_cast<void**>(object), key)) return predicate_value_from_object(result);
+    return PredicateValue::of_number(static_cast<double>(reinterpret_cast<int64_t>(result)));
+}
+
 bool matches(void* object, const Predicate* predicate) {
-    if (predicate == nullptr) return true;
-    const auto& attributes = store().records[object].attributes;
-    const auto found = attributes.find(*predicate->key);
-    return found != attributes.end() && found->second.value != nullptr && foundation_object_text(found->second.value) == *predicate->value;
+    return predicate == nullptr || predicate_evaluate(*predicate->node, PredicateValue::of_object(object), read_predicate_key);
+}
+
+std::vector<PredicateRef> predicate_nodes(void* array) {
+    std::vector<PredicateRef> nodes;
+    for (void* item : uikit::object_array_items(array)) nodes.push_back(*static_cast<Predicate*>(item)->node);
+    return nodes;
+}
+
+void* predicate_and_of(void*, const char*, void* subpredicates) { return new_predicate(predicate_and(predicate_nodes(subpredicates))); }
+void* predicate_or_of(void*, const char*, void* subpredicates) { return new_predicate(predicate_or(predicate_nodes(subpredicates))); }
+void* predicate_not_of(void*, const char*, void* subpredicate) { return new_predicate(predicate_not(*static_cast<Predicate*>(subpredicate)->node)); }
+void* predicate_with_value(void*, const char*, bool value) { return new_predicate(predicate_constant(value)); }
+
+bool predicate_evaluate_object(void* self, const char*, void* object) {
+    return predicate_evaluate(*static_cast<Predicate*>(self)->node, predicate_value_from_object(object), read_predicate_key);
 }
 
 // Attribute values compare by what they hold: only strings and dates are ever sorted on.
@@ -268,11 +351,20 @@ void* managed_fetch_request(void* cls, const char*) {
     return request;
 }
 
-void fetch_request_set_predicate(void* self, const char*, void* predicate) { static_cast<FetchRequest*>(self)->predicate = predicate; }
+void fetch_request_set_predicate(void* self, const char*, void* predicate) {
+    auto* request = static_cast<FetchRequest*>(self);
+    if (predicate != nullptr) rt_swift_retain(predicate);
+    if (request->predicate != nullptr) rt_swift_release(request->predicate);
+    request->predicate = predicate;
+}
 
 // The setter receives an NSArray bridged from a native array, and the sort needs the native array back.
 void fetch_request_set_sort(void* self, const char*, void* descriptors) {
-    static_cast<FetchRequest*>(self)->sort_descriptors = foundation_native_array(descriptors);
+    auto* request = static_cast<FetchRequest*>(self);
+    void* native = foundation_native_array(descriptors);
+    if (native != nullptr) rt_swift_bridgeObjectRetain(native);
+    if (request->sort_descriptors != nullptr) rt_swift_bridgeObjectRelease(request->sort_descriptors);
+    request->sort_descriptors = native;
 }
 
 std::vector<void*> run_request(const FetchRequest* request) { return fetch_objects(*request->entity, request->predicate, request->sort_descriptors); }
@@ -304,7 +396,7 @@ void context_delete(void*, const char*, void* object) { remove_object(object); }
 
 void* batch_delete_init(void* self, const char*, void* request) {
     static_cast<FetchRequest*>(self)->entity = static_cast<FetchRequest*>(request)->entity;
-    static_cast<FetchRequest*>(self)->predicate = static_cast<FetchRequest*>(request)->predicate;
+    fetch_request_set_predicate(self, nullptr, static_cast<FetchRequest*>(request)->predicate);
     return self;
 }
 
@@ -647,7 +739,13 @@ void coredata_register_classes() {
     objc_register_fallback("NSManagedObject", managed_accessor);
     objc_register_method("-[NSManagedObject fetchRequest]", reinterpret_cast<const void*>(managed_fetch_request));
     objc_register_method("-[NSFetchRequest initWithEntityName:]", reinterpret_cast<const void*>(fetch_request_init));
+    objc_register_method("+[NSCompoundPredicate andPredicateWithSubpredicates:]", reinterpret_cast<const void*>(predicate_and_of));
+    objc_register_method("+[NSCompoundPredicate orPredicateWithSubpredicates:]", reinterpret_cast<const void*>(predicate_or_of));
+    objc_register_method("+[NSCompoundPredicate notPredicateWithSubpredicate:]", reinterpret_cast<const void*>(predicate_not_of));
+    objc_register_method("+[NSPredicate predicateWithValue:]", reinterpret_cast<const void*>(predicate_with_value));
+    objc_register_method("-[NSPredicate evaluateWithObject:]", reinterpret_cast<const void*>(predicate_evaluate_object));
     objc_register_method("-[NSFetchRequest setPredicate:]", reinterpret_cast<const void*>(fetch_request_set_predicate));
+    objc_register_method("-[NSFetchRequest predicate]", reinterpret_cast<const void*>(+[](void* self, const char*) { return static_cast<FetchRequest*>(self)->predicate; }));
     objc_register_method("-[NSFetchRequest setSortDescriptors:]", reinterpret_cast<const void*>(fetch_request_set_sort));
     objc_register_method("-[NSBatchDeleteRequest initWithFetchRequest:]", reinterpret_cast<const void*>(batch_delete_init));
     objc_register_method("-[NSManagedObjectContext deleteObject:]", reinterpret_cast<const void*>(context_delete));
