@@ -1,4 +1,6 @@
 #include "foundation_internal.h"
+
+#include <sys/statvfs.h>
 #include "macho.h"
 
 #include <poll.h>
@@ -40,6 +42,152 @@ SWIFTCC void url_deleting_extension(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox
     const size_t slash = base.rfind('/');
     if (dot != std::string::npos && (slash == std::string::npos || dot > slash + 1)) base.erase(dot);
     *out = new_url(base);
+}
+
+std::string file_url_text(const std::string& path);
+
+// Removes "." and ".." segments, keeping a trailing slash, the one change standardizing makes that callers can see.
+std::string standardized_path(const std::string& path) {
+    std::vector<std::string> parts;
+    std::stringstream stream(path);
+    std::string part;
+    while (std::getline(stream, part, '/')) {
+        if (part.empty() || part == ".") continue;
+        if (part == "..") {
+            if (!parts.empty()) parts.pop_back();
+        } else {
+            parts.push_back(part);
+        }
+    }
+    std::string out;
+    for (const auto& piece : parts) out += "/" + piece;
+    if (out.empty() || (!path.empty() && path.back() == '/')) out += "/";
+    return out;
+}
+
+SWIFTCC void url_standardized(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox** self) {
+    const std::string& text = *(*self)->text;
+    if (text.rfind("file:", 0) != 0) {
+        *out = static_cast<URLBox*>(rt_swift_retain(*self));
+        return;
+    }
+    *out = new_url(file_url_text(standardized_path(url_path(text))));
+}
+
+SWIFTCC void url_resolving_symlinks(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLBox** self) {
+    char resolved[PATH_MAX];
+    const std::string path = url_path(*(*self)->text);
+    *out = new_url(file_url_text(realpath(path.c_str(), resolved) != nullptr ? std::string(resolved) : standardized_path(path)));
+}
+
+SWIFTCC bool url_is_reachable(SWIFT_CONTEXT URLBox** self, SWIFT_ERROR void** error) {
+    if (access(url_path(*(*self)->text).c_str(), F_OK) == 0) return true;
+    *error = make_error("The file doesn't exist.", ENOENT);
+    return false;
+}
+
+SWIFTCC void url_stop_accessing(SWIFT_CONTEXT URLBox**) {}
+
+SWIFTCC void url_file_with_path_directory(SWIFT_OUT URLBox** out, SwiftString path, bool directory) {
+    std::string text = swift_string_to_utf8(path);
+    if (directory && (text.empty() || text.back() != '/')) text += "/";
+    *out = new_url(file_url_text(text));
+}
+
+// URLResourceValues: one reference to what stat and statvfs said when it was read.
+struct ResourceValues {
+    HeapObject header;
+    std::string* name;
+    bool exists, is_directory, is_regular;
+    int64_t size, allocated, volume_total, volume_available;
+    double access_time, modification_time;
+    bool has_access_time;
+};
+
+void destroy_resource_values(void* raw) {
+    delete static_cast<ResourceValues*>(raw)->name;
+    free(raw);
+}
+
+ResourceValues* new_resource_values() {
+    static void* cls = objc_native_class("URLResourceValues", destroy_resource_values);
+    auto* values = static_cast<ResourceValues*>(calloc(1, sizeof(ResourceValues)));
+    values->header.metadata = cls;
+    values->header.references = 1;
+    return values;
+}
+
+double seconds_since_2001(const timespec& time) { return static_cast<double>(time.tv_sec) + static_cast<double>(time.tv_nsec) / 1e9 - kSecondsFrom1970To2001; }
+
+// Every value is filled whichever keys were asked for; callers only read the ones they named.
+SWIFTCC void url_resource_values(SWIFT_OUT ResourceValues** out, void*, SWIFT_CONTEXT URLBox** self, SWIFT_ERROR void** error) {
+    const std::string path = url_path(*(*self)->text);
+    struct stat info{};
+    if (lstat(path.c_str(), &info) != 0) {
+        *error = make_error("The file doesn't exist.", ENOENT);
+        return;
+    }
+    auto* values = new_resource_values();
+    values->exists = true;
+    values->name = new std::string(path_last_component(path));
+    values->is_directory = S_ISDIR(info.st_mode);
+    values->is_regular = S_ISREG(info.st_mode);
+    values->size = info.st_size;
+    constexpr int64_t kStatBlockBytes = 512;
+    values->allocated = info.st_blocks * kStatBlockBytes;
+    values->access_time = seconds_since_2001(info.st_atim);
+    values->modification_time = seconds_since_2001(info.st_mtim);
+    struct statvfs volume{};
+    if (statvfs(path.c_str(), &volume) == 0) {
+        values->volume_total = static_cast<int64_t>(volume.f_blocks * volume.f_frsize);
+        values->volume_available = static_cast<int64_t>(volume.f_bavail * volume.f_frsize);
+    }
+    *out = values;
+}
+
+SWIFTCC void resource_values_empty(SWIFT_OUT ResourceValues** out) { *out = new_resource_values(); }
+
+struct ResourceOptionalInt {
+    int64_t value;
+    uint64_t is_nil;
+};
+
+struct ResourceOptionalDate {
+    double value;
+    uint8_t is_nil;
+};
+
+constexpr uint8_t kOptionalBoolNil = 2;
+
+SWIFTCC uint8_t resource_is_directory(SWIFT_CONTEXT ResourceValues** self) { return (*self)->exists ? (*self)->is_directory : kOptionalBoolNil; }
+SWIFTCC uint8_t resource_is_regular(SWIFT_CONTEXT ResourceValues** self) { return (*self)->exists ? (*self)->is_regular : kOptionalBoolNil; }
+SWIFTCC SwiftString resource_name(SWIFT_CONTEXT ResourceValues** self) { return (*self)->name != nullptr ? swift_string_from_utf8(*(*self)->name) : SwiftString{0, 0}; }
+
+template <int64_t ResourceValues::*field>
+SWIFTCC ResourceOptionalInt resource_integer(SWIFT_CONTEXT ResourceValues** self) { return {(*self)->*field, (*self)->exists ? 0ULL : 1ULL}; }
+
+template <double ResourceValues::*field>
+SWIFTCC void resource_date(SWIFT_OUT ResourceOptionalDate* out, SWIFT_CONTEXT ResourceValues** self) { *out = {(*self)->*field, static_cast<uint8_t>((*self)->exists ? 0 : 1)}; }
+
+SWIFTCC void resource_set_access_date(const ResourceOptionalDate* date, SWIFT_CONTEXT ResourceValues** self) {
+    (*self)->has_access_time = !date->is_nil;
+    (*self)->access_time = date->value;
+}
+
+SWIFTCC void url_set_resource_values(ResourceValues** values, SWIFT_CONTEXT URLBox** self, SWIFT_ERROR void** error) {
+    if (!(*values)->has_access_time) return;
+    const std::string path = url_path(*(*self)->text);
+    struct stat info{};
+    if (stat(path.c_str(), &info) != 0) {
+        *error = make_error("The file doesn't exist.", ENOENT);
+        return;
+    }
+    const double seconds = (*values)->access_time + kSecondsFrom1970To2001;
+    timespec times[2];
+    times[0].tv_sec = static_cast<time_t>(seconds);
+    times[0].tv_nsec = 0;
+    times[1] = info.st_mtim;
+    utimensat(AT_FDCWD, path.c_str(), times, 0);
 }
 
 SWIFTCC SwiftString url_last_component(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(path_last_component(url_path(*(*self)->text))); }
@@ -820,6 +968,26 @@ void add_foundation_url_symbols(SymbolTable& table) {
         {"$s10Foundation23LocalizedStringResourceV_5table6locale6bundle7commentACSSAAE17LocalizationValueV_SSSgAA6LocaleVAC17BundleDescriptionOs06StaticC0VSgtcfC", reinterpret_cast<void*>(localized_resource_init)},
         {"$s10Foundation23LocalizedStringResourceV_12defaultValue5table6locale6bundle7commentACs06StaticC0V_SSAAE012LocalizationF0VSSSgAA6LocaleVAC17BundleDescriptionOAJSgtcfC", reinterpret_cast<void*>(localized_resource_init_default)},
         {"$sSS10FoundationE9localizedSSAA23LocalizedStringResourceV_tcfC", reinterpret_cast<void*>(string_localized)},
+        {"$s10Foundation3URLV14resourceValues7forKeysAA011URLResourceD0VShySo16NSURLResourceKeyaG_tKF", reinterpret_cast<void*>(url_resource_values)},
+        {"$s10Foundation3URLV17setResourceValuesyyAA011URLResourceE0VKF", reinterpret_cast<void*>(url_set_resource_values)},
+        {"$s10Foundation17URLResourceValuesVACycfC", reinterpret_cast<void*>(resource_values_empty)},
+        {"$s10Foundation17URLResourceValuesV11isDirectorySbSgvg", reinterpret_cast<void*>(resource_is_directory)},
+        {"$s10Foundation17URLResourceValuesV13isRegularFileSbSgvg", reinterpret_cast<void*>(resource_is_regular)},
+        {"$s10Foundation17URLResourceValuesV4nameSSSgvg", reinterpret_cast<void*>(resource_name)},
+        {"$s10Foundation17URLResourceValuesV8fileSizeSiSgvg", reinterpret_cast<void*>(resource_integer<&ResourceValues::size>)},
+        {"$s10Foundation17URLResourceValuesV22totalFileAllocatedSizeSiSgvg", reinterpret_cast<void*>(resource_integer<&ResourceValues::allocated>)},
+        {"$s10Foundation17URLResourceValuesV19volumeTotalCapacitySiSgvg", reinterpret_cast<void*>(resource_integer<&ResourceValues::volume_total>)},
+        {"$s10Foundation17URLResourceValuesV23volumeAvailableCapacitySiSgvg", reinterpret_cast<void*>(resource_integer<&ResourceValues::volume_available>)},
+        {"$s10Foundation17URLResourceValuesV40volumeAvailableCapacityForImportantUsages5Int64VSgvg", reinterpret_cast<void*>(resource_integer<&ResourceValues::volume_available>)},
+        {"$s10Foundation17URLResourceValuesV17contentAccessDateAA0F0VSgvg", reinterpret_cast<void*>(resource_date<&ResourceValues::access_time>)},
+        {"$s10Foundation17URLResourceValuesV23contentModificationDateAA0F0VSgvg", reinterpret_cast<void*>(resource_date<&ResourceValues::modification_time>)},
+        {"$s10Foundation17URLResourceValuesV17contentAccessDateAA0F0VSgvs", reinterpret_cast<void*>(resource_set_access_date)},
+        {"$s10Foundation3URLV016standardizedFileB0ACvg", reinterpret_cast<void*>(url_standardized)},
+        {"$s10Foundation3URLV12standardizedACvg", reinterpret_cast<void*>(url_standardized)},
+        {"$s10Foundation3URLV23resolvingSymlinksInPathACyF", reinterpret_cast<void*>(url_resolving_symlinks)},
+        {"$s10Foundation3URLV24checkResourceIsReachableSbyKF", reinterpret_cast<void*>(url_is_reachable)},
+        {"$s10Foundation3URLV35stopAccessingSecurityScopedResourceyyF", reinterpret_cast<void*>(url_stop_accessing)},
+        {"$s10Foundation3URLV15fileURLWithPath11isDirectoryACSSh_SbtcfC", reinterpret_cast<void*>(url_file_with_path_directory)},
         {"$sSo12NSFileHandleC10FoundationE5write10contentsOfyx_tKAC12DataProtocolRzlF", reinterpret_cast<void*>(handle_write_contents)},
         {"$s10Foundation6LocaleV10identifierACSS_tcfC", reinterpret_cast<void*>(locale_with_identifier)},
         {"$s10Foundation6LocaleV19_bridgeToObjectiveCSo8NSLocaleCyF", reinterpret_cast<void*>(locale_bridge_to_objc)},
