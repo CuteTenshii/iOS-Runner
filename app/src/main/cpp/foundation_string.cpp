@@ -169,50 +169,141 @@ SWIFTCC SwiftString string_replacing(const SwiftString* target, const SwiftStrin
     return swift_string_from_utf8(text);
 }
 
-// CharacterSet is one reference to this set of bytes; the framework's sets are all ASCII as far as this runtime goes.
+// CharacterSet is one reference to a set of scalars, or its complement. Letter classes only cover ASCII.
 struct CharacterSetBox {
     HeapObject header;
-    std::string* members;
+    std::u32string* members;
+    bool inverted;
 };
 
-const HeapMetadata kCharacterSetMetadata = {free, nullptr, 0};
+void destroy_character_set(void* raw) {
+    delete static_cast<CharacterSetBox*>(raw)->members;
+    free(raw);
+}
 
-CharacterSetBox* new_character_set(std::string members) {
+const HeapMetadata kCharacterSetMetadata = {destroy_character_set, nullptr, 0};
+
+struct Utf8Scalar {
+    char32_t scalar;
+    size_t offset;
+    size_t length;
+};
+
+std::vector<Utf8Scalar> utf8_scalars(const std::string& text) {
+    std::vector<Utf8Scalar> scalars;
+    for (size_t i = 0; i < text.size();) {
+        const auto first = static_cast<unsigned char>(text[i]);
+        size_t length = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+        if (i + length > text.size()) length = text.size() - i;
+        char32_t scalar = length == 1 ? first : first & (0xff >> (length + 1));
+        for (size_t j = 1; j < length; ++j) scalar = (scalar << 6) | (static_cast<unsigned char>(text[i + j]) & 0x3f);
+        scalars.push_back({scalar, i, length});
+        i += length;
+    }
+    return scalars;
+}
+
+std::u32string scalars_of(const std::string& text) {
+    std::u32string out;
+    for (const Utf8Scalar& item : utf8_scalars(text)) out += item.scalar;
+    return out;
+}
+
+CharacterSetBox* new_character_set(std::u32string members, bool inverted = false) {
     auto* box = static_cast<CharacterSetBox*>(calloc(1, sizeof(CharacterSetBox)));
     box->header.metadata = const_cast<uint64_t*>(&kCharacterSetMetadata.kind);
     box->header.references = 1;
-    box->members = new std::string(std::move(members));
+    box->members = new std::u32string(std::move(members));
+    box->inverted = inverted;
     return box;
+}
+
+CharacterSetBox* new_character_set(const std::string& members) { return new_character_set(scalars_of(members)); }
+
+bool set_contains(const CharacterSetBox* set, char32_t scalar) { return (set->members->find(scalar) != std::u32string::npos) != set->inverted; }
+
+// CharacterSet is a value type: a copy has to stop sharing the box before it changes.
+CharacterSetBox* unique_character_set(CharacterSetBox** self) {
+    CharacterSetBox* box = *self;
+    if (box->header.references.load(std::memory_order_relaxed) == 1) return box;
+    CharacterSetBox* copy = new_character_set(*box->members, box->inverted);
+    rt_swift_release(box);
+    *self = copy;
+    return copy;
 }
 
 constexpr const char* kAlphanumerics = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
-SWIFTCC void set_whitespace(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(" \t"); }
+SWIFTCC void set_whitespace(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(" \t")); }
 
-SWIFTCC void set_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set("\n\r"); }
+SWIFTCC void set_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string("\n\r")); }
 
-SWIFTCC void set_whitespace_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(" \t\n\r"); }
+SWIFTCC void set_whitespace_newlines(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(" \t\n\r")); }
 
-SWIFTCC void set_alphanumerics(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(kAlphanumerics); }
+SWIFTCC void set_alphanumerics(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics)); }
 
 SWIFTCC void set_url_query(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics) + "-._~!$&'()*+,;=:@/?"); }
 
+SWIFTCC void set_url_host(SWIFT_OUT CharacterSetBox** out) { *out = new_character_set(std::string(kAlphanumerics) + "-._~!$&'()*+,;=:[]"); }
+
 SWIFTCC void set_characters_in(SWIFT_OUT CharacterSetBox** out, SwiftString text) { *out = new_character_set(swift_string_to_utf8(text)); }
 
-SWIFTCC void set_insert_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) { *(*self)->members += swift_string_to_utf8(text); }
+SWIFTCC void set_inverted(SWIFT_OUT CharacterSetBox** out, SWIFT_CONTEXT CharacterSetBox** self) { *out = new_character_set(*(*self)->members, !(*self)->inverted); }
 
-SWIFTCC void set_remove_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) {
-    for (const char c : swift_string_to_utf8(text)) {
-        std::string& members = *(*self)->members;
-        members.erase(std::remove(members.begin(), members.end(), c), members.end());
+void add_to_set(CharacterSetBox* box, const std::u32string& scalars) {
+    for (const char32_t scalar : scalars) {
+        std::u32string& members = *box->members;
+        if (box->inverted) members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
+        else if (members.find(scalar) == std::u32string::npos) members += scalar;
     }
 }
 
+void remove_from_set(CharacterSetBox* box, const std::u32string& scalars) {
+    for (const char32_t scalar : scalars) {
+        std::u32string& members = *box->members;
+        if (!box->inverted) members.erase(std::remove(members.begin(), members.end(), scalar), members.end());
+        else if (members.find(scalar) == std::u32string::npos) members += scalar;
+    }
+}
+
+SWIFTCC void set_insert_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) { add_to_set(unique_character_set(self), scalars_of(swift_string_to_utf8(text))); }
+
+SWIFTCC void set_remove_characters(SwiftString text, SWIFT_CONTEXT CharacterSetBox** self) { remove_from_set(unique_character_set(self), scalars_of(swift_string_to_utf8(text))); }
+
+SWIFTCC void set_union(SWIFT_OUT CharacterSetBox** out, CharacterSetBox** other, SWIFT_CONTEXT CharacterSetBox** self) {
+    const CharacterSetBox* a = *self;
+    const CharacterSetBox* b = *other;
+    if (a->inverted || b->inverted) {
+        // The complement of a union is what both complements share.
+        std::u32string outside;
+        const CharacterSetBox* source = a->inverted ? a : b;
+        const CharacterSetBox* against = a->inverted ? b : a;
+        for (const char32_t scalar : *source->members) {
+            if (!set_contains(against, scalar)) outside += scalar;
+        }
+        *out = new_character_set(std::move(outside), true);
+        return;
+    }
+    CharacterSetBox* merged = new_character_set(*a->members);
+    add_to_set(merged, *b->members);
+    *out = merged;
+}
+
+SWIFTCC bool set_contains_scalar(uint32_t scalar, SWIFT_CONTEXT CharacterSetBox** self) { return set_contains(*self, scalar); }
+
+// NSCharacterSet is the same box: nothing here sends it messages.
+SWIFTCC void* character_set_bridge_to_objc(SWIFT_CONTEXT CharacterSetBox** self) { return rt_swift_retain(*self); }
+SWIFTCC void character_set_bridge_from_objc(SWIFT_OUT void** out, void* object) { *out = rt_swift_retain(object); }
+
 SWIFTCC SwiftString string_trimming_set(CharacterSetBox** set, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     const std::string text = swift_string_to_utf8(*self);
-    const size_t first = text.find_first_not_of(*(*set)->members);
-    if (first == std::string::npos) return swift_string_from_utf8("");
-    return swift_string_from_utf8(text.substr(first, text.find_last_not_of(*(*set)->members) - first + 1));
+    const auto scalars = utf8_scalars(text);
+    size_t first = 0, last = scalars.size();
+    while (first < last && set_contains(*set, scalars[first].scalar)) ++first;
+    while (last > first && set_contains(*set, scalars[last - 1].scalar)) --last;
+    if (first == last) return swift_string_from_utf8("");
+    const size_t begin = scalars[first].offset;
+    return swift_string_from_utf8(text.substr(begin, scalars[last - 1].offset + scalars[last - 1].length - begin));
 }
 
 void* string_array(const std::vector<std::string>& parts) {
@@ -242,9 +333,10 @@ SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, SWIFT_C
     const std::string text = swift_string_to_utf8(*self);
     std::vector<std::string> parts;
     size_t start = 0;
-    for (size_t at = text.find_first_of(*(*set)->members); at != std::string::npos; at = text.find_first_of(*(*set)->members, start)) {
-        parts.push_back(text.substr(start, at - start));
-        start = at + 1;
+    for (const Utf8Scalar& item : utf8_scalars(text)) {
+        if (!set_contains(*set, item.scalar)) continue;
+        parts.push_back(text.substr(start, item.offset - start));
+        start = item.offset + item.length;
     }
     parts.push_back(text.substr(start));
     return string_array(parts);
@@ -252,12 +344,15 @@ SWIFTCC void* string_components_set(CharacterSetBox** set, void*, void*, SWIFT_C
 
 SWIFTCC OptionalSwiftString string_adding_percent(CharacterSetBox** set, void*, void*, SWIFT_CONTEXT const SwiftString* self) {
     std::string out;
-    for (const char c : swift_string_to_utf8(*self)) {
-        if ((*set)->members->find(c) != std::string::npos) {
-            out += c;
-        } else {
+    const std::string text = swift_string_to_utf8(*self);
+    for (const Utf8Scalar& item : utf8_scalars(text)) {
+        if (set_contains(*set, item.scalar)) {
+            out.append(text, item.offset, item.length);
+            continue;
+        }
+        for (size_t i = 0; i < item.length; ++i) {
             char escaped[4];
-            snprintf(escaped, sizeof escaped, "%%%02X", static_cast<unsigned char>(c));
+            snprintf(escaped, sizeof escaped, "%%%02X", static_cast<unsigned char>(text[item.offset + i]));
             out += escaped;
         }
     }
@@ -361,6 +456,12 @@ void add_foundation_string_symbols(SymbolTable& table) {
         {"$s10Foundation12CharacterSetV13alphanumericsACvgZ", reinterpret_cast<void*>(set_alphanumerics)},
         {"$s10Foundation12CharacterSetV15urlQueryAllowedACvgZ", reinterpret_cast<void*>(set_url_query)},
         {"$s10Foundation12CharacterSetV12charactersInACSSh_tcfC", reinterpret_cast<void*>(set_characters_in)},
+        {"$s10Foundation12CharacterSetV8invertedACvg", reinterpret_cast<void*>(set_inverted)},
+        {"$s10Foundation12CharacterSetV5unionyA2CF", reinterpret_cast<void*>(set_union)},
+        {"$s10Foundation12CharacterSetV8containsySbs7UnicodeO6ScalarVF", reinterpret_cast<void*>(set_contains_scalar)},
+        {"$s10Foundation12CharacterSetV14urlHostAllowedACvgZ", reinterpret_cast<void*>(set_url_host)},
+        {"$s10Foundation12CharacterSetV19_bridgeToObjectiveCSo011NSCharacterC0CyF", reinterpret_cast<void*>(character_set_bridge_to_objc)},
+        {"$s10Foundation12CharacterSetV36_unconditionallyBridgeFromObjectiveCyACSo011NSCharacterC0CSgFZ", reinterpret_cast<void*>(character_set_bridge_from_objc)},
         {"$s10Foundation12CharacterSetV6insert12charactersInySS_tF", reinterpret_cast<void*>(set_insert_characters)},
         {"$s10Foundation12CharacterSetV6remove12charactersInySS_tF", reinterpret_cast<void*>(set_remove_characters)},
         {"$s10Foundation17NSLocalizedString_9tableName6bundle5value7commentS2S_SSSgSo8NSBundleCS2StF", reinterpret_cast<void*>(ns_localized_string)},
