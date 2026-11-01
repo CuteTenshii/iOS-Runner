@@ -453,7 +453,7 @@ SWIFTCC void integer_formatted_style(SWIFT_OUT SwiftString* out, const uint64_t*
 SWIFTCC SwiftString integer_formatted(void*, void*, SWIFT_CONTEXT const int64_t* self) { return swift_string_from_utf8(group_thousands(*self)); }
 
 SWIFTCC void date_now(SWIFT_OUT double* out) {
-    struct timespec now {};
+    struct timespec now{};
     clock_gettime(CLOCK_REALTIME, &now);
     *out = static_cast<double>(now.tv_sec) - kSecondsFrom1970To2001 + static_cast<double>(now.tv_nsec) * 1e-9;
 }
@@ -462,7 +462,7 @@ SWIFTCC void date_style_word(SWIFT_OUT uint64_t* out) { *out = kStyleWord; }
 
 SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CONTEXT const double* self) {
     const auto seconds = static_cast<time_t>(*self + kSecondsFrom1970To2001);
-    struct tm local {};
+    struct tm local{};
     localtime_r(&seconds, &local);
     char text[64];
     strftime(text, sizeof text, "%b %e, %Y at %H:%M", &local);

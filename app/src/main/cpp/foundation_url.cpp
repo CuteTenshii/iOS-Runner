@@ -122,7 +122,7 @@ double seconds_since_2001(const timespec& time) { return static_cast<double>(tim
 // Every value is filled whichever keys were asked for; callers only read the ones they named.
 SWIFTCC void url_resource_values(SWIFT_OUT ResourceValues** out, void*, SWIFT_CONTEXT URLBox** self, SWIFT_ERROR void** error) {
     const std::string path = url_path(*(*self)->text);
-    struct stat info {};
+    struct stat info{};
     if (lstat(path.c_str(), &info) != 0) {
         *error = make_error("The file doesn't exist.", ENOENT);
         return;
@@ -137,7 +137,7 @@ SWIFTCC void url_resource_values(SWIFT_OUT ResourceValues** out, void*, SWIFT_CO
     values->allocated = info.st_blocks * kStatBlockBytes;
     values->access_time = seconds_since_2001(info.st_atim);
     values->modification_time = seconds_since_2001(info.st_mtim);
-    struct statvfs volume {};
+    struct statvfs volume{};
     if (statvfs(path.c_str(), &volume) == 0) {
         values->volume_total = static_cast<int64_t>(volume.f_blocks * volume.f_frsize);
         values->volume_available = static_cast<int64_t>(volume.f_bavail * volume.f_frsize);
@@ -163,10 +163,10 @@ SWIFTCC uint8_t resource_is_directory(SWIFT_CONTEXT ResourceValues** self) { ret
 SWIFTCC uint8_t resource_is_regular(SWIFT_CONTEXT ResourceValues** self) { return (*self)->exists ? (*self)->is_regular : kOptionalBoolNil; }
 SWIFTCC SwiftString resource_name(SWIFT_CONTEXT ResourceValues** self) { return (*self)->name != nullptr ? swift_string_from_utf8(*(*self)->name) : SwiftString{0, 0}; }
 
-template <int64_t ResourceValues::*field>
+template <int64_t ResourceValues::* field>
 SWIFTCC ResourceOptionalInt resource_integer(SWIFT_CONTEXT ResourceValues** self) { return {(*self)->*field, (*self)->exists ? 0ULL : 1ULL}; }
 
-template <double ResourceValues::*field>
+template <double ResourceValues::* field>
 SWIFTCC void resource_date(SWIFT_OUT ResourceOptionalDate* out, SWIFT_CONTEXT ResourceValues** self) { *out = {(*self)->*field, static_cast<uint8_t>((*self)->exists ? 0 : 1)}; }
 
 SWIFTCC void resource_set_access_date(const ResourceOptionalDate* date, SWIFT_CONTEXT ResourceValues** self) {
@@ -177,7 +177,7 @@ SWIFTCC void resource_set_access_date(const ResourceOptionalDate* date, SWIFT_CO
 SWIFTCC void url_set_resource_values(ResourceValues** values, SWIFT_CONTEXT URLBox** self, SWIFT_ERROR void** error) {
     if (!(*values)->has_access_time) return;
     const std::string path = url_path(*(*self)->text);
-    struct stat info {};
+    struct stat info{};
     if (stat(path.c_str(), &info) != 0) {
         *error = make_error("The file doesn't exist.", ENOENT);
         return;
@@ -427,7 +427,7 @@ void* file_manager_temporary_directory(void*, const char*) {
 }
 
 bool file_manager_exists_directory(void*, const char*, void* path, bool* is_directory) {
-    struct stat info {};
+    struct stat info{};
     if (stat(nsstring_text(path).c_str(), &info) != 0) return false;
     if (is_directory != nullptr) *is_directory = S_ISDIR(info.st_mode);
     return true;
@@ -703,7 +703,7 @@ bool file_manager_create_path(void*, const char*, void* path, bool, void*, void*
 }
 
 bool remove_recursively(const std::string& path) {
-    struct stat info {};
+    struct stat info{};
     if (lstat(path.c_str(), &info) != 0) return false;
     if (S_ISDIR(info.st_mode)) {
         if (DIR* directory = opendir(path.c_str())) {
@@ -751,7 +751,7 @@ bool is_data_container(const std::string& path) {
 
 bool copy_recursively(const std::string& from, const std::string& to) {
     if (to == from || is_data_container(from)) return true;
-    struct stat info {};
+    struct stat info{};
     if (stat(from.c_str(), &info) != 0) return false;
     if (S_ISDIR(info.st_mode)) {
         make_directory_tree(to);
