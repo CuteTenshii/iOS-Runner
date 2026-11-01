@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <new>
 #include <unordered_map>
 #include <vector>
@@ -114,6 +115,18 @@ bool json_seconds(const Json& node, double& seconds) {
     else
         return false;
     return true;
+}
+
+// The value type comes from the caller, as a dictionary's storage doesn't always record it.
+void visit_typed_dictionary(void* storage, void* value_type, const std::function<void(const std::string&, void*)>& visit) {
+    constexpr size_t kCountOffset = 16;
+    int64_t count;
+    memcpy(&count, static_cast<char*>(storage) + kCountOffset, sizeof count);
+    if (count == 0) return;
+    const size_t stride = witnesses_of(value_type)->stride;
+    visit_dictionary_buckets(static_cast<const char*>(storage), [&](const char* keys, const char* values, size_t bucket) {
+        visit(swift_string_to_utf8(reinterpret_cast<const SwiftString*>(keys)[bucket]), const_cast<char*>(values) + bucket * stride);
+    });
 }
 
 void decode_value(void* type, Json* node, void* out, void** error) {
@@ -287,7 +300,7 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
         out.kind = Json::Kind::Object;
         uint64_t word;
         memcpy(&word, value, sizeof word);
-        visit_string_dictionary(reinterpret_cast<void*>(word & kBridgeObjectAddressMask), [&](const std::string& key, void* member) {
+        visit_typed_dictionary(reinterpret_cast<void*>(word & kBridgeObjectAddressMask), value_type, [&](const std::string& key, void* member) {
             if (*error != nullptr) return;
             out.members.emplace_back(key, Json{});
             encode_value(value_type, member, out.members.back().second, error);
@@ -378,7 +391,7 @@ bool convert_bridged_collection(void* value, void* key_type, void* element_type,
     void* error = nullptr;
     if (key_type != nullptr) {
         out.kind = Json::Kind::Object;
-        visit_string_dictionary(storage, [&](const std::string& key, void* member) {
+        visit_typed_dictionary(storage, element_type, [&](const std::string& key, void* member) {
             if (error != nullptr) return;
             out.members.emplace_back(key, Json{});
             encode_value(element_type, member, out.members.back().second, &error);

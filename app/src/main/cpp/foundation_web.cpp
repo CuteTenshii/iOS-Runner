@@ -497,7 +497,6 @@ void* strings_object_from_json(const std::string& json) {
     return object;
 }
 
-// Every collection the app stores in defaults is a [String].
 bool json_from_plist_bytes(const std::string& bytes, Json& out) {
     PlistValue value;
     if (!plist_parse(bytes, value)) return false;
@@ -507,9 +506,17 @@ bool json_from_plist_bytes(const std::string& bytes, Json& out) {
 
 std::string plist_bytes_from_json(const Json& value) { return plist_write_binary(plist_from_json(value)); }
 
+// Defaults keep collections as JSON. A collection the runtime made has no element types, and those are [String].
 bool strings_json_from_object(void* object, std::string& json) {
     if (static_cast<HeapObject*>(object)->metadata != g_bridged_collection_class) return false;
-    json = value_to_json(&static_cast<BridgedCollection*>(object)->value, resolve_mangled_type("SaySSG", nullptr));
+    auto* collection = static_cast<BridgedCollection*>(object);
+    if (collection->element_type == nullptr) {
+        json = value_to_json(&collection->value, resolve_mangled_type("SaySSG", nullptr));
+        return true;
+    }
+    Json parsed;
+    if (!json_from_object(object, parsed)) return false;
+    json = json_write(parsed);
     return true;
 }
 
