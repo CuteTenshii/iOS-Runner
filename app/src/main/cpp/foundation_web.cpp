@@ -1,5 +1,6 @@
 #include "foundation_internal.h"
 #include "plist.h"
+#include "symbols.h"
 
 using namespace foundation;
 
@@ -197,8 +198,15 @@ Json json_from_plist(const PlistValue& value) {
             out.number = value.real;
             break;
         case PlistValue::Kind::String:
-        case PlistValue::Kind::Data:
             return json_text(value.text);
+        case PlistValue::Kind::Data:
+            out.kind = Json::Kind::Data;
+            out.text = value.text;
+            break;
+        case PlistValue::Kind::Date:
+            out.kind = Json::Kind::Date;
+            out.number = value.real;
+            break;
         case PlistValue::Kind::Array:
             out.kind = Json::Kind::Array;
             for (const auto& item : value.items) out.items.push_back(json_from_plist(item));
@@ -222,12 +230,11 @@ const PlistValue& bundle_info() {
     return info;
 }
 
-// Binary plists only, for now: an XML one fails here with an error the caller can handle.
 void* property_list_from_data(void*, const char*, void* data, uint64_t, uint64_t* format, void** error) {
     constexpr uint64_t kBinaryFormat = 200;
     PlistValue value;
     if (data == nullptr || !plist_parse(*static_cast<NSDataObject*>(data)->bytes, value)) {
-        if (error != nullptr) *error = foundation_make_error("The data isn't a binary property list", 0);
+        if (error != nullptr) *error = foundation_make_error("The data isn't a property list", 0);
         return nullptr;
     }
     if (format != nullptr) *format = kBinaryFormat;
@@ -292,6 +299,16 @@ void json_to_any(const Json& json, AnyValue* out) {
             out->buffer[0] = reinterpret_cast<uint64_t>(framework_singleton("NSNull"));
             out->type = any_object_metadata();
             return;
+        case Json::Kind::Date:
+            memcpy(out->buffer, &json.number, sizeof json.number);
+            out->type = date_metadata();
+            return;
+        case Json::Kind::Data: {
+            const FoundationData data = foundation_make_data(json.text);
+            memcpy(out->buffer, &data, sizeof data);
+            out->type = resolve_symbol("$s10Foundation4DataVN");
+            return;
+        }
         case Json::Kind::Bool:
             memcpy(out->buffer, &json.flag, sizeof json.flag);
             out->type = type_system_symbol("$sSbN");

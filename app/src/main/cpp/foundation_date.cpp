@@ -557,6 +557,23 @@ SWIFTCC SwiftString string_trimming(const uint64_t* set, void* type, void*, SWIF
 }
 
 // UUID is kept as its string, in the same box as a URL.
+// Nil, as a null box, unless the text is 32 hex digits in 8-4-4-4-12 groups.
+SWIFTCC void uuid_from_string(SWIFT_OUT URLBox** out, SwiftString text) {
+    constexpr size_t kUuidLength = 36;
+    std::string value = swift_string_to_utf8(text);
+    bool valid = value.size() == kUuidLength;
+    for (size_t i = 0; valid && i < value.size(); ++i) {
+        const bool dash_here = i == 8 || i == 13 || i == 18 || i == 23;
+        valid = dash_here ? value[i] == '-' : isxdigit(static_cast<unsigned char>(value[i])) != 0;
+    }
+    if (!valid) {
+        *out = nullptr;
+        return;
+    }
+    for (char& c : value) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    *out = new_url(value);
+}
+
 SWIFTCC void uuid_init(SWIFT_OUT URLBox** out) {
     uint8_t bytes[16];
     arc4random_buf(bytes, sizeof bytes);
@@ -636,6 +653,7 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$s10Foundation14DateComponentsV6minuteSiSgvg", reinterpret_cast<void*>(components_field<kMinute>)},
         {"$s10Foundation14DateComponentsV6secondSiSgvg", reinterpret_cast<void*>(components_field<kSecond>)},
         {"$s10Foundation14DateComponentsV10nanosecondSiSgvg", reinterpret_cast<void*>(components_field<kNanosecond>)},
+        {"$s10Foundation4UUIDV10uuidStringACSgSSh_tcfC", reinterpret_cast<void*>(uuid_from_string)},
         {"$s10Foundation4UUIDVACycfC", reinterpret_cast<void*>(uuid_init)},
         {"$s10Foundation4UUIDV10uuidStringSSvg", reinterpret_cast<void*>(uuid_string)},
         {"swift_stdlib_random", reinterpret_cast<void*>(stdlib_random)},

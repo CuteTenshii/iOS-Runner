@@ -74,8 +74,44 @@ void connect_scene() {
     }
 }
 
+// Every app installed on iOS has a signed profile, and some refuse to start without one. Signing isn't implemented,
+// so a bundle gets this stand-in: it names no certificates and proves nothing, it only lets the app read a profile.
+void write_placeholder_profile() {
+    const std::string path = engine_bundle_dir() + "/embedded.mobileprovision";
+    if (access(path.c_str(), F_OK) == 0) return;
+    PlistValue info;
+    plist_read_file(engine_bundle_dir() + "/Info.plist", info);
+    const std::string identifier = info.string_at("CFBundleIdentifier");
+    std::ofstream file(path, std::ios::trunc);
+    // A real profile's plist sits inside a signature blob, and parsers expect something before it.
+    file << "iOSRunner placeholder, not signed\n";
+    file << R"(<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>AppIDName</key><string>iOSRunner</string>
+<key>ApplicationIdentifierPrefix</key><array><string>RUNNER0000</string></array>
+<key>CreationDate</key><date>2020-01-01T00:00:00Z</date>
+<key>DeveloperCertificates</key><array></array>
+<key>Entitlements</key><dict>
+<key>application-identifier</key><string>RUNNER0000.)" << identifier << R"(</string>
+<key>com.apple.developer.team-identifier</key><string>RUNNER0000</string>
+<key>get-task-allow</key><true/>
+</dict>
+<key>ExpirationDate</key><date>2100-01-01T00:00:00Z</date>
+<key>IsXcodeManaged</key><false/>
+<key>Name</key><string>iOSRunner placeholder profile</string>
+<key>ProvisionedDevices</key><array></array>
+<key>TeamIdentifier</key><array><string>RUNNER0000</string></array>
+<key>TeamName</key><string>iOSRunner</string>
+<key>TimeToLive</key><integer>365</integer>
+<key>UUID</key><string>00000000-0000-4000-8000-000000000000</string>
+<key>Version</key><integer>1</integer>
+</dict></plist>
+)";
+}
+
 int application_main(int, char**, void*, void* delegate_name) {
     objc_set_uikit_active();
+    write_placeholder_profile();
     engine_log("UIKIT: UIApplicationMain, delegate %s", delegate_name != nullptr ? nsstring_text(delegate_name).c_str() : "(none)");
     g_application = objc_framework_object("UIApplication");
     if (delegate_name != nullptr) {

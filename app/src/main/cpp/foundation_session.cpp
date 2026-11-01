@@ -143,7 +143,22 @@ void* bundle_identifier_object(void*, const char*) { return new_nsstring(bundle_
 struct ScannerObject {
     HeapObject header;
     std::string* text;
+    size_t position;
 };
+
+// Scanners skip leading whitespace by default, and stop short of the string they're scanning up to.
+SWIFTCC SwiftString scanner_scan_up_to(SwiftString target, SWIFT_CONTEXT void* self) {
+    auto* scanner = static_cast<ScannerObject*>(self);
+    const std::string& text = *scanner->text;
+    while (scanner->position < text.size() && isspace(static_cast<unsigned char>(text[scanner->position]))) ++scanner->position;
+    if (scanner->position >= text.size()) return {0, 0};
+    size_t end = text.find(swift_string_to_utf8(target), scanner->position);
+    if (end == std::string::npos) end = text.size();
+    if (end == scanner->position) return {0, 0};
+    const std::string found = text.substr(scanner->position, end - scanner->position);
+    scanner->position = end;
+    return swift_string_from_utf8(found);
+}
 
 void* scanner_init(void* self, const char*, void* text) {
     static_cast<ScannerObject*>(self)->text = new std::string(nsstring_text(text));
@@ -384,6 +399,7 @@ namespace foundation {
 
 void add_foundation_session_symbols(SymbolTable& table) {
     table.insert({
+        {"$sSo9NSScannerC10FoundationE14scanUpToStringySSSgSSF", reinterpret_cast<void*>(scanner_scan_up_to)},
         {"$s10Foundation4DateV36_unconditionallyBridgeFromObjectiveCyACSo6NSDateCSgFZ", reinterpret_cast<void*>(date_unbridge)},
         {"$s10Foundation4DateV11distantPastACvgZ", reinterpret_cast<void*>(date_distant_past)},
         {"$s10Foundation4DateV17timeIntervalSinceySdACF", reinterpret_cast<void*>(date_interval_since)},

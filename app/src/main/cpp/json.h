@@ -12,7 +12,9 @@ struct Json {
                       Number,
                       String,
                       Array,
-                      Object };
+                      Object,
+                      Date,   // `number` holds seconds since 2001; plists have these and JSON doesn't.
+                      Data }; // `text` holds the bytes.
     Kind kind = Kind::Null;
     bool flag = false;
     int64_t integer = 0;
