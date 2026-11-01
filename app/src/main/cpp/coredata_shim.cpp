@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "foundation_internal.h"
 #include "foundation_shim.h"
 #include "json.h"
 #include "key_path.h"
@@ -658,9 +659,12 @@ void container_load_stores(void*, const char*, void* block) {
 void context_ignore_argument(void*, const char*, void*) {}
 void context_set_bool(void*, const char*, bool) {}
 bool context_has_changes(void*, const char*) { return store().has_changes; }
+void notify_results_controllers();
+
 bool context_save(void*, const char*, void**) {
     save_store();
     store().has_changes = false;
+    notify_results_controllers();
     return true;
 }
 
@@ -750,36 +754,147 @@ void* context_empty_set(void*, const char*) { return foundation_new_array({}); }
 // A fetched results controller: one section holding the request's results, refetched on demand.
 constexpr size_t kControllerRequestWord = 2, kControllerDelegateWord = 3;
 
-std::unordered_map<void*, std::vector<void*>>& controller_results() {
-    static std::unordered_map<void*, std::vector<void*>> results;
-    return results;
+struct ResultsSection {
+    std::string name;
+    std::vector<void*> objects;
+};
+
+struct ResultsController {
+    std::string section_key_path;
+    bool fetched = false;
+    std::vector<void*> objects;
+    std::vector<ResultsSection> sections;
+};
+
+std::unordered_map<void*, ResultsController>& controllers() {
+    static std::unordered_map<void*, ResultsController> table;
+    return table;
 }
 
-void* results_controller_init(void* self, const char*, void* request, void*, void*, void*) {
+std::string section_name_of(void* object, const std::string& key_path) {
+    // An object's ID is unique, so apps use it to give each object a section.
+    if (key_path == "objectID") return std::to_string(reinterpret_cast<uintptr_t>(object));
+    void* value = object;
+    size_t start = 0;
+    while (value != nullptr && start <= key_path.size()) {
+        const size_t dot = key_path.find('.', start);
+        const std::string key = key_path.substr(start, dot == std::string::npos ? dot : dot - start);
+        value = managed_get(value, key.c_str());
+        if (dot == std::string::npos) break;
+        start = dot + 1;
+    }
+    return value != nullptr ? foundation_object_text(value) : std::string();
+}
+
+// Results are sorted by section first, so a section is a run of equal names.
+void fill_sections(ResultsController& controller) {
+    controller.sections.clear();
+    if (controller.section_key_path.empty()) {
+        controller.sections.push_back({"", controller.objects});
+        return;
+    }
+    for (void* object : controller.objects) {
+        std::string name = section_name_of(object, controller.section_key_path);
+        if (controller.sections.empty() || controller.sections.back().name != name) controller.sections.push_back({std::move(name), {}});
+        controller.sections.back().objects.push_back(object);
+    }
+}
+
+void* results_controller_init(void* self, const char*, void* request, void*, void* section_key_path, void*) {
     static_cast<void**>(self)[kControllerRequestWord] = rt_swift_retain(request);
+    controllers()[self].section_key_path = section_key_path != nullptr ? foundation_object_text(section_key_path) : std::string();
     return self;
 }
 
+std::vector<void*> controller_fetch(void* self) { return run_request(static_cast<FetchRequest*>(static_cast<void**>(self)[kControllerRequestWord])); }
+
 bool results_controller_fetch(void* self, const char*, void**) {
-    controller_results()[self] = run_request(static_cast<FetchRequest*>(static_cast<void**>(self)[kControllerRequestWord]));
+    ResultsController& controller = controllers()[self];
+    // Saves refetch it from here on, so it has to outlive whoever made it.
+    if (!controller.fetched) rt_swift_retain(self);
+    controller.fetched = true;
+    controller.objects = controller_fetch(self);
+    fill_sections(controller);
     return true;
 }
 
-void* results_controller_objects(void* self, const char*) { return foundation_new_array(controller_results()[self]); }
-void* results_controller_request(void* self, const char*) { return static_cast<void**>(self)[kControllerRequestWord]; }
-void results_controller_set_delegate(void* self, const char*, void* delegate) { static_cast<void**>(self)[kControllerDelegateWord] = delegate; }
-void* results_controller_delegate(void* self, const char*) { return static_cast<void**>(self)[kControllerDelegateWord]; }
-
-void* results_controller_sections(void* self, const char*) {
-    static_cast<void>(self);
-    auto** section = static_cast<void**>(objc_framework_object("_NSDefaultSectionInfo"));
-    section[kControllerRequestWord] = self;
-    return foundation_new_array({section});
+void notify_results_controllers() {
+    for (auto& [self, controller] : controllers()) {
+        if (!controller.fetched) continue;
+        std::vector<void*> objects = controller_fetch(self);
+        if (objects == controller.objects) continue;
+        void* delegate = static_cast<void**>(self)[kControllerDelegateWord];
+        if (delegate != nullptr && objc_responds(delegate, "controllerWillChangeContent:")) objc_send(delegate, "controllerWillChangeContent:", self);
+        controller.objects = std::move(objects);
+        fill_sections(controller);
+        if (delegate != nullptr && objc_responds(delegate, "controllerDidChangeContent:")) objc_send(delegate, "controllerDidChangeContent:", self);
+    }
 }
 
-int64_t section_count(void* self, const char*) { return static_cast<int64_t>(controller_results()[static_cast<void**>(self)[kControllerRequestWord]].size()); }
-void* section_objects(void* self, const char*) { return foundation_new_array(controller_results()[static_cast<void**>(self)[kControllerRequestWord]]); }
-void* section_name(void*, const char*) { return nullptr; }
+void* results_controller_objects(void* self, const char*) {
+    const ResultsController& controller = controllers()[self];
+    return controller.fetched ? foundation_new_array(controller.objects) : nullptr;
+}
+void* results_controller_request(void* self, const char*) { return static_cast<void**>(self)[kControllerRequestWord]; }
+void results_controller_set_delegate(void* self, const char*, void* delegate) { static_cast<void**>(self)[kControllerDelegateWord] = delegate != nullptr ? rt_swift_retain(delegate) : nullptr; }
+void* results_controller_delegate(void* self, const char*) { return static_cast<void**>(self)[kControllerDelegateWord]; }
+
+constexpr size_t kSectionControllerWord = 2, kSectionIndexWord = 3;
+
+// Apps fetch only once this is nil, as it is on iOS before the first fetch.
+void* results_controller_sections(void* self, const char*) {
+    const ResultsController& controller = controllers()[self];
+    if (!controller.fetched) return nullptr;
+    std::vector<void*> sections;
+    for (size_t i = 0; i < controller.sections.size(); ++i) {
+        auto** section = static_cast<void**>(objc_framework_object("_NSDefaultSectionInfo"));
+        section[kSectionControllerWord] = self;
+        section[kSectionIndexWord] = reinterpret_cast<void*>(i);
+        sections.push_back(section);
+    }
+    return foundation_new_array(sections);
+}
+
+const ResultsSection* section_of(void* self) {
+    auto** words = static_cast<void**>(self);
+    const auto& sections = controllers()[words[kSectionControllerWord]].sections;
+    const auto index = reinterpret_cast<size_t>(words[kSectionIndexWord]);
+    return index < sections.size() ? &sections[index] : nullptr;
+}
+
+int64_t section_count(void* self, const char*) {
+    const ResultsSection* section = section_of(self);
+    return section != nullptr ? static_cast<int64_t>(section->objects.size()) : 0;
+}
+void* section_objects(void* self, const char*) {
+    const ResultsSection* section = section_of(self);
+    return foundation_new_array(section != nullptr ? section->objects : std::vector<void*>{});
+}
+void* section_name(void* self, const char*) {
+    const ResultsSection* section = section_of(self);
+    return section != nullptr ? foundation::new_nsstring(section->name) : nullptr;
+}
+
+void* results_controller_object_at(void* self, const char*, void* path) {
+    const auto& sections = controllers()[self].sections;
+    const auto section = static_cast<size_t>(uikit::index_path_section(path));
+    const auto item = static_cast<size_t>(uikit::index_path_item(path));
+    if (section >= sections.size() || item >= sections[section].objects.size()) {
+        engine_log("STOP: no fetched object at section %zu, item %zu", section, item);
+        abort();
+    }
+    return sections[section].objects[item];
+}
+
+void* results_controller_path_of(void* self, const char*, void* object) {
+    const auto& sections = controllers()[self].sections;
+    for (size_t section = 0; section < sections.size(); ++section) {
+        const auto& objects = sections[section].objects;
+        const auto found = std::find(objects.begin(), objects.end(), object);
+        if (found != objects.end()) return uikit::index_path_at(static_cast<int64_t>(section), found - objects.begin());
+    }
+    return nullptr;
+}
 
 void* merged_model(void*, const char*, void*) { return objc_framework_object("NSManagedObjectModel"); }
 
@@ -852,6 +967,8 @@ void coredata_register_classes() {
     objc_register_method("-[NSFetchedResultsController sections]", reinterpret_cast<const void*>(results_controller_sections));
     objc_register_method("-[NSFetchedResultsController setDelegate:]", reinterpret_cast<const void*>(results_controller_set_delegate));
     objc_register_method("-[NSFetchedResultsController delegate]", reinterpret_cast<const void*>(results_controller_delegate));
+    objc_register_method("-[NSFetchedResultsController objectAtIndexPath:]", reinterpret_cast<const void*>(results_controller_object_at));
+    objc_register_method("-[NSFetchedResultsController indexPathForObject:]", reinterpret_cast<const void*>(results_controller_path_of));
     objc_register_method("-[_NSDefaultSectionInfo numberOfObjects]", reinterpret_cast<const void*>(section_count));
     objc_register_method("-[_NSDefaultSectionInfo objects]", reinterpret_cast<const void*>(section_objects));
     objc_register_method("-[_NSDefaultSectionInfo name]", reinterpret_cast<const void*>(section_name));
