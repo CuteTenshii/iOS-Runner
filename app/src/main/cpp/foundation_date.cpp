@@ -1,4 +1,7 @@
 #include "foundation_internal.h"
+#include "symbols.h"
+
+#include <cmath>
 
 using namespace foundation;
 
@@ -18,7 +21,7 @@ bool date_from_object(void* object, double& seconds) {
     return true;
 }
 
-SWIFTCC void* date_bridge_to_objc(double seconds) { return new_date_object(seconds); }
+SWIFTCC void* date_bridge_to_objc(SWIFT_CONTEXT const double* self) { return new_date_object(*self); }
 
 // Only the keys of dictionaryRepresentation are read, so stored values all surface as their text.
 void* defaults_dictionary_representation(void*, const char*) {
@@ -45,6 +48,222 @@ SWIFTCC void* dictionary_bridge_from_objc(void* object) {
         return reinterpret_cast<void*>(any.buffer[0]);
     }
     return make_string_dictionary(any_type(), {});
+}
+
+// A Calendar is an immediate word: only the Gregorian calendar in the device's time zone is implemented.
+constexpr uint64_t kCalendarImmediate = 1ULL << 63;
+
+SWIFTCC void calendar_current(SWIFT_OUT uint64_t* out) { *out = kCalendarImmediate; }
+SWIFTCC void calendar_with_identifier(SWIFT_OUT uint64_t* out, const void*) { *out = kCalendarImmediate; }
+
+constexpr size_t kComponentCount = 7;
+enum ComponentField { kYear,
+                      kMonth,
+                      kDay,
+                      kHour,
+                      kMinute,
+                      kSecond,
+                      kNanosecond };
+
+struct DateComponentsObject {
+    HeapObject header;
+    int64_t fields[kComponentCount];
+};
+
+void* g_date_components_class = nullptr;
+
+time_t seconds_of(const double* date) { return static_cast<time_t>(floor(*date + kSecondsFrom1970To2001)); }
+
+void fill_components(int64_t* fields, double date) {
+    const time_t seconds = seconds_of(&date);
+    tm parts{};
+    localtime_r(&seconds, &parts);
+    fields[kYear] = parts.tm_year + 1900;
+    fields[kMonth] = parts.tm_mon + 1;
+    fields[kDay] = parts.tm_mday;
+    fields[kHour] = parts.tm_hour;
+    fields[kMinute] = parts.tm_min;
+    fields[kSecond] = parts.tm_sec;
+    const double whole = floor(date);
+    fields[kNanosecond] = static_cast<int64_t>((date - whole) * 1e9);
+}
+
+DateComponentsObject* new_date_components() {
+    if (g_date_components_class == nullptr) g_date_components_class = objc_native_class("NSDateComponents", free);
+    auto* object = static_cast<DateComponentsObject*>(calloc(1, sizeof(DateComponentsObject)));
+    object->header.metadata = g_date_components_class;
+    object->header.references = 1;
+    return object;
+}
+
+// The requested set is ignored: every field is filled, and code only reads the ones it asked for.
+SWIFTCC void calendar_components_from(SWIFT_OUT DateComponentsObject** out, void*, const double* date, SWIFT_CONTEXT void*) {
+    *out = new_date_components();
+    fill_components((*out)->fields, *date);
+}
+
+SWIFTCC void calendar_components_between(SWIFT_OUT DateComponentsObject** out, void*, const double* from, const double* to, SWIFT_CONTEXT void*) {
+    *out = new_date_components();
+    auto delta = static_cast<int64_t>(*to - *from);
+    (*out)->fields[kDay] = delta / 86400;
+    delta %= 86400;
+    (*out)->fields[kHour] = delta / 3600;
+    delta %= 3600;
+    (*out)->fields[kMinute] = delta / 60;
+    (*out)->fields[kSecond] = delta % 60;
+}
+
+struct OptionalInt {
+    int64_t value;
+    uint64_t is_nil;
+};
+
+template <ComponentField field>
+SWIFTCC OptionalInt components_field(SWIFT_CONTEXT DateComponentsObject** self) { return {(*self)->fields[field], 0}; }
+
+int component_field_of(const uint64_t* component) {
+    static const char* const kNames[kComponentCount] = {"$s10Foundation8CalendarV9ComponentO4yearyA2EmFWC", "$s10Foundation8CalendarV9ComponentO5monthyA2EmFWC", "$s10Foundation8CalendarV9ComponentO3dayyA2EmFWC", "$s10Foundation8CalendarV9ComponentO4houryA2EmFWC", "$s10Foundation8CalendarV9ComponentO6minuteyA2EmFWC", "$s10Foundation8CalendarV9ComponentO6secondyA2EmFWC", "$s10Foundation8CalendarV9ComponentO10nanosecondyA2EmFWC"};
+    for (size_t i = 0; i < kComponentCount; ++i) {
+        const auto* tag = static_cast<const int32_t*>(resolve_symbol(kNames[i]));
+        if (static_cast<uint64_t>(*tag) == *component) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+SWIFTCC int64_t calendar_component(const uint64_t* component, const double* date, SWIFT_CONTEXT void*) {
+    int64_t fields[kComponentCount];
+    fill_components(fields, *date);
+    const int field = component_field_of(component);
+    return field < 0 ? 0 : fields[field];
+}
+
+double start_of_day(double date) {
+    const time_t seconds = seconds_of(&date);
+    tm parts{};
+    localtime_r(&seconds, &parts);
+    parts.tm_hour = parts.tm_min = parts.tm_sec = 0;
+    return static_cast<double>(mktime(&parts)) - kSecondsFrom1970To2001;
+}
+
+SWIFTCC void calendar_start_of_day(SWIFT_OUT double* out, const double* date, SWIFT_CONTEXT void*) { *out = start_of_day(*date); }
+
+SWIFTCC bool calendar_is_today(const double* date, SWIFT_CONTEXT void*) {
+    const double now = static_cast<double>(time(nullptr)) - kSecondsFrom1970To2001;
+    return start_of_day(*date) == start_of_day(now);
+}
+
+struct OptionalDate {
+    double value;
+    uint8_t is_nil;
+};
+
+// Normalizes through mktime, which carries overflowing fields into the larger ones.
+SWIFTCC void calendar_date_adding(SWIFT_OUT OptionalDate* out, const uint64_t* component, int64_t value, const double* date, bool, SWIFT_CONTEXT void*) {
+    const time_t seconds = seconds_of(date);
+    tm parts{};
+    localtime_r(&seconds, &parts);
+    const double fraction = *date - floor(*date);
+    double nanoseconds = 0;
+    switch (component_field_of(component)) {
+        case kYear:
+            parts.tm_year += static_cast<int>(value);
+            break;
+        case kMonth:
+            parts.tm_mon += static_cast<int>(value);
+            break;
+        case kDay:
+            parts.tm_mday += static_cast<int>(value);
+            break;
+        case kHour:
+            parts.tm_hour += static_cast<int>(value);
+            break;
+        case kMinute:
+            parts.tm_min += static_cast<int>(value);
+            break;
+        case kSecond:
+            parts.tm_sec += static_cast<int>(value);
+            break;
+        case kNanosecond:
+            nanoseconds = static_cast<double>(value) / 1e9;
+            break;
+        default:
+            out->is_nil = 1;
+            return;
+    }
+    parts.tm_isdst = -1;
+    out->value = static_cast<double>(mktime(&parts)) - kSecondsFrom1970To2001 + fraction + nanoseconds;
+    out->is_nil = 0;
+}
+
+SWIFTCC void byte_count_units_all(SWIFT_OUT uint64_t* out) { *out = UINT64_MAX; }
+
+SWIFTCC void byte_count_style(SWIFT_OUT uint64_t* out, const void*, const void*, bool, bool) { *out = 1ULL << 63; }
+
+// Decimal units, as the .file style shows them: one digit once past bytes.
+std::string byte_count_text(int64_t count) {
+    static constexpr const char* kUnits[] = {"bytes", "KB", "MB", "GB", "TB", "PB"};
+    constexpr double kUnitStep = 1000;
+    double value = static_cast<double>(count);
+    size_t unit = 0;
+    while (fabs(value) >= kUnitStep && unit + 1 < std::size(kUnits)) {
+        value /= kUnitStep;
+        ++unit;
+    }
+    char text[64];
+    if (unit == 0)
+        snprintf(text, sizeof text, "%lld bytes", static_cast<long long>(count));
+    else
+        snprintf(text, sizeof text, "%.1f %s", value, kUnits[unit]);
+    return text;
+}
+
+SWIFTCC void integer_formatted_byte_count(SWIFT_OUT SwiftString* out, const void*, void* type, void* style_type, void*, void*, void*, SWIFT_CONTEXT const void* self) {
+    const char* style_name = foreign_type_name(style_type);
+    if (style_name == nullptr || strcmp(style_name, "_$s10Foundation20ByteCountFormatStyleVMn") != 0) {
+        engine_log("STOP: formatted(_:) with a format style other than ByteCountFormatStyle: %s", style_name != nullptr ? style_name : "(app type)");
+        abort();
+    }
+    int64_t count = 0;
+    memcpy(&count, self, witnesses_of(type)->size < sizeof count ? witnesses_of(type)->size : sizeof count);
+    *out = swift_string_from_utf8(byte_count_text(count));
+}
+
+std::map<std::string, void*>& value_transformers() {
+    static std::map<std::string, void*> transformers;
+    return transformers;
+}
+
+void value_transformer_register(void*, const char*, void* transformer, void* name) {
+    rt_swift_retain(transformer);
+    value_transformers()[nsstring_text(name)] = transformer;
+}
+
+void* value_transformer_named(void*, const char*, void* name) {
+    const auto found = value_transformers().find(nsstring_text(name));
+    return found == value_transformers().end() ? nullptr : found->second;
+}
+
+// Sets only reach this bridge from framework objects that hold none: a scene's connection options, so far.
+SWIFTCC void* set_bridge_from_objc(void*, void*, void*) { return resolve_symbol("_swiftEmptySetSingleton"); }
+
+// NSDictionary's literal, of (Any, Any) pairs. Keys here are always strings, in Swift or Objective-C form.
+SWIFTCC void* nsdictionary_literal(void* pairs) {
+    constexpr size_t kPairSize = 2 * sizeof(AnyValue), kCountOffset = 16;
+    int64_t count;
+    memcpy(&count, static_cast<char*>(pairs) + kCountOffset, sizeof count);
+    std::vector<std::pair<std::string, const void*>> entries;
+    auto* cursor = static_cast<char*>(pairs) + kArrayElementsOffset;
+    for (int64_t i = 0; i < count; ++i, cursor += kPairSize) {
+        const auto* key = reinterpret_cast<const AnyValue*>(cursor);
+        std::string text;
+        if (key->type == type_system_symbol("$sSSN"))
+            text = swift_string_to_utf8(*reinterpret_cast<const SwiftString*>(key->buffer));
+        else
+            text = foundation_object_text(reinterpret_cast<void*>(key->buffer[0]));
+        entries.emplace_back(text, cursor + sizeof(AnyValue));
+    }
+    void* storage = make_string_dictionary(any_type(), entries);
+    return collection_bridge_to_objc(storage);
 }
 
 void* regular_expression_escaped_pattern(void*, const char*, void* text) {
@@ -397,6 +616,26 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$s10Foundation13URLComponentsV4pathSSvg", reinterpret_cast<void*>(components_path)},
         {"$s10Foundation13URLComponentsV10queryItemsSayAA12URLQueryItemVGSgvg", reinterpret_cast<void*>(components_query_items)},
         {"$s10Foundation13URLComponentsV10queryItemsSayAA12URLQueryItemVGSgvs", reinterpret_cast<void*>(components_set_query_items)},
+        {"$s10Foundation8CalendarV4date8byAdding5value2to18wrappingComponentsAA4DateVSgAC9ComponentO_SiAJSbtF", reinterpret_cast<void*>(calendar_date_adding)},
+        {"$s10Foundation20ByteCountFormatStyleV5UnitsV3allAEvgZ", reinterpret_cast<void*>(byte_count_units_all)},
+        {"$s10Foundation11FormatStylePA2A09ByteCountbC0VRszrlE04byteE05style12allowedUnits13spellsOutZero014includesActualdE0A2E0C0O_AE0I0VS2btFZ", reinterpret_cast<void*>(byte_count_style)},
+        {"$sSz10FoundationE9formattedy12FormatOutputQyd__qd__AA0C5StyleRd__Sz0C5InputRpd__lF", reinterpret_cast<void*>(integer_formatted_byte_count)},
+        {"$sSh10FoundationE36_unconditionallyBridgeFromObjectiveCyShyxGSo5NSSetCSgFZ", reinterpret_cast<void*>(set_bridge_from_objc)},
+        {"$sSo12NSDictionaryC10FoundationE17dictionaryLiteralAByp_yptd_tcfC", reinterpret_cast<void*>(nsdictionary_literal)},
+        {"$s10Foundation8CalendarV7currentACvgZ", reinterpret_cast<void*>(calendar_current)},
+        {"$s10Foundation8CalendarV10identifierA2C10IdentifierOh_tcfC", reinterpret_cast<void*>(calendar_with_identifier)},
+        {"$s10Foundation8CalendarV14dateComponents_4fromAA04DateD0VShyAC9ComponentOG_AA0F0VtF", reinterpret_cast<void*>(calendar_components_from)},
+        {"$s10Foundation8CalendarV14dateComponents_4from2toAA04DateD0VShyAC9ComponentOG_AA0G0VAMtF", reinterpret_cast<void*>(calendar_components_between)},
+        {"$s10Foundation8CalendarV9component_4fromSiAC9ComponentO_AA4DateVtF", reinterpret_cast<void*>(calendar_component)},
+        {"$s10Foundation8CalendarV10startOfDay3forAA4DateVAG_tF", reinterpret_cast<void*>(calendar_start_of_day)},
+        {"$s10Foundation8CalendarV13isDateInTodayySbAA0D0VF", reinterpret_cast<void*>(calendar_is_today)},
+        {"$s10Foundation14DateComponentsV4yearSiSgvg", reinterpret_cast<void*>(components_field<kYear>)},
+        {"$s10Foundation14DateComponentsV5monthSiSgvg", reinterpret_cast<void*>(components_field<kMonth>)},
+        {"$s10Foundation14DateComponentsV3daySiSgvg", reinterpret_cast<void*>(components_field<kDay>)},
+        {"$s10Foundation14DateComponentsV4hourSiSgvg", reinterpret_cast<void*>(components_field<kHour>)},
+        {"$s10Foundation14DateComponentsV6minuteSiSgvg", reinterpret_cast<void*>(components_field<kMinute>)},
+        {"$s10Foundation14DateComponentsV6secondSiSgvg", reinterpret_cast<void*>(components_field<kSecond>)},
+        {"$s10Foundation14DateComponentsV10nanosecondSiSgvg", reinterpret_cast<void*>(components_field<kNanosecond>)},
         {"$s10Foundation4UUIDVACycfC", reinterpret_cast<void*>(uuid_init)},
         {"$s10Foundation4UUIDV10uuidStringSSvg", reinterpret_cast<void*>(uuid_string)},
         {"swift_stdlib_random", reinterpret_cast<void*>(stdlib_random)},
@@ -409,6 +648,8 @@ void add_foundation_date_symbols(SymbolTable& table) {
 }
 
 void register_foundation_date_classes() {
+    objc_register_method("+[NSValueTransformer setValueTransformer:forName:]", reinterpret_cast<const void*>(value_transformer_register));
+    objc_register_method("+[NSValueTransformer valueTransformerForName:]", reinterpret_cast<const void*>(value_transformer_named));
     objc_register_method("-[NSUserDefaults dictionaryRepresentation]", reinterpret_cast<const void*>(defaults_dictionary_representation));
     objc_register_method("+[NSRegularExpression escapedPatternForString:]", reinterpret_cast<const void*>(regular_expression_escaped_pattern));
     objc_register_method("+[NSJSONSerialization JSONObjectWithData:options:error:]", reinterpret_cast<const void*>(json_object_with_data));

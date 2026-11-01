@@ -1,4 +1,5 @@
 #include "dispatch_shim.h"
+#include "symbols.h"
 
 #include <time.h>
 
@@ -181,6 +182,40 @@ int64_t semaphore_wait(Semaphore* semaphore, uint64_t timeout) {
     return 0;
 }
 
+// DispatchTimeInterval is laid out as its count, then a case tag; the tags are the ones case symbols resolve to.
+struct TimeInterval {
+    int64_t count;
+    uint64_t tag;
+};
+
+bool interval_is(const TimeInterval* interval, const char* case_symbol) {
+    return static_cast<uint64_t>(*static_cast<const int32_t*>(resolve_symbol(case_symbol))) == interval->tag;
+}
+
+int64_t interval_nanoseconds(const TimeInterval* interval) {
+    if (interval_is(interval, "$s8Dispatch0A12TimeIntervalO7secondsyACSicACmFWC")) return interval->count * 1000000000;
+    if (interval_is(interval, "$s8Dispatch0A12TimeIntervalO12millisecondsyACSicACmFWC")) return interval->count * 1000000;
+    if (interval_is(interval, "$s8Dispatch0A12TimeIntervalO12microsecondsyACSicACmFWC")) return interval->count * 1000;
+    if (interval_is(interval, "$s8Dispatch0A12TimeIntervalO11nanosecondsyACSicACmFWC")) return interval->count;
+    return -1;
+}
+
+SWIFTCC void time_plus_interval(SWIFT_OUT uint64_t* out, const uint64_t* time, const TimeInterval* interval) {
+    const int64_t delta = interval_nanoseconds(interval);
+    *out = delta < 0 || *time == kDispatchTimeForever ? kDispatchTimeForever : *time + static_cast<uint64_t>(delta);
+}
+
+SWIFTCC void semaphore_overlay_wait(SWIFT_CONTEXT Semaphore* self) { semaphore_wait(self, kDispatchTimeForever); }
+SWIFTCC uint8_t semaphore_overlay_wait_until(const uint64_t* deadline, SWIFT_CONTEXT Semaphore* self) { return semaphore_wait(self, *deadline) != 0; }
+SWIFTCC int64_t semaphore_overlay_signal(SWIFT_CONTEXT Semaphore* self) { return semaphore_signal(self); }
+bool timeout_result_equal(uint8_t left, uint8_t right) { return left == right; }
+
+// Runs in order on this thread: the guest's tasks all live on one thread anyway.
+SWIFTCC void queue_concurrent_perform(int64_t iterations, void (*body)(int64_t, void*), void* context) {
+    using Body = SWIFTCC void (*)(int64_t, SWIFT_CONTEXT void*);
+    for (int64_t i = 0; i < iterations; ++i) reinterpret_cast<Body>(body)(i, context);
+}
+
 uint64_t dispatch_time_after(uint64_t when, int64_t delta) {
     if (when == kDispatchTimeForever) return when;
     return (when == 0 ? static_cast<uint64_t>(monotonic_now()) : when) + static_cast<uint64_t>(delta);
@@ -272,6 +307,7 @@ void* dispatch_symbol(std::string_view name) {
         ENTRY("$s8Dispatch0A4TimeV17uptimeNanosecondsACs6UInt64V_tcfC", time_from_uptime),
         ENTRY("$s8Dispatch0A4TimeV17uptimeNanosecondss6UInt64Vvg", time_uptime),
         ENTRY("$s8Dispatch1poiyAA0A4TimeVAD_SdtF", time_plus_seconds),
+        ENTRY("$s8Dispatch1poiyAA0A4TimeVAD_AA0aB8IntervalOtF", time_plus_interval),
         ENTRY("$s8Dispatch0A3QoSV11unspecifiedACvgZ", immediate_indirect),
         ENTRY("$s8Dispatch0A3QoSV7defaultACvgZ", immediate_indirect),
         ENTRY("$s8Dispatch0A3QoSV7utilityACvgZ", immediate_indirect),
@@ -288,6 +324,12 @@ void* dispatch_symbol(std::string_view name) {
         ENTRY("dispatch_group_create", group_create),
         ENTRY("dispatch_group_enter", group_enter),
         ENTRY("dispatch_group_leave", group_leave),
+        ENTRY("$sSo21OS_dispatch_semaphoreC8DispatchE4waityyF", semaphore_overlay_wait),
+        ENTRY("$sSo21OS_dispatch_semaphoreC8DispatchE4wait7timeoutAC0D13TimeoutResultOAC0D4TimeV_tF", semaphore_overlay_wait_until),
+        ENTRY("$sSo21OS_dispatch_semaphoreC8DispatchE6signalSiyF", semaphore_overlay_signal),
+        ENTRY("$s8Dispatch0A13TimeoutResultO2eeoiySbAC_ACtFZ", timeout_result_equal),
+        ENTRY("$sSo17OS_dispatch_queueC8DispatchE17concurrentPerform10iterations7executeySi_ySiXEtFZ", queue_concurrent_perform),
+        ENTRY("$sSo18OS_dispatch_sourceP8DispatchE8activateyyF", dispatch_ignored),
         ENTRY("dispatch_semaphore_create", semaphore_create),
         ENTRY("dispatch_semaphore_signal", semaphore_signal),
         ENTRY("dispatch_semaphore_wait", semaphore_wait),

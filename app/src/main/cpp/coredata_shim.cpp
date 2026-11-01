@@ -445,9 +445,119 @@ std::vector<void*> coredata_fetch(const std::string& entity, void* predicate, vo
     return fetch_objects(entity, predicate, sort_descriptors);
 }
 
+namespace {
+
+constexpr size_t kBlockInvokeWord = 2;
+
+void invoke_plain_block(void* block) {
+    using Invoke = void (*)(void*);
+    reinterpret_cast<Invoke>(static_cast<void**>(block)[kBlockInvokeWord])(block);
+}
+
+void* return_self_argument(void* self, const char*, void*) { return self; }
+void* return_self_two_arguments(void* self, const char*, void*, void*) { return self; }
+void* return_self_word(void* self, const char*, uint64_t) { return self; }
+void ignore_word(void*, const char*, uint64_t) {}
+void ignore_argument(void*, const char*, void*) {}
+void ignore_nothing(void*, const char*) {}
+
+// Every context shares the one store, and all the guest's work is on one thread, so blocks just run.
+void context_perform(void*, const char*, void* block) { invoke_plain_block(block); }
+void* container_background_context(void*, const char*) { return view_context(); }
+
+void container_background_task(void*, const char*, void* block) {
+    using Invoke = void (*)(void*, void*);
+    reinterpret_cast<Invoke>(static_cast<void**>(block)[kBlockInvokeWord])(block, view_context());
+}
+
+void* context_object_with_id(void*, const char*, void* identifier) { return identifier; }
+void* managed_object_id(void* self, const char*) { return self; }
+void* managed_context(void*, const char*) { return view_context(); }
+bool managed_is_deleted(void* self, const char*) { return store().records.count(self) == 0; }
+bool managed_false(void*, const char*) { return false; }
+
+using PerformBody = SWIFTCC void (*)(SWIFT_OUT void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+using ContextBody = SWIFTCC void (*)(SWIFT_OUT void*, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+
+// performAndWait: the body runs right here, and whatever it throws passes through.
+SWIFTCC void context_perform_and_wait(SWIFT_OUT void* out, PerformBody body, void* body_context, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) { body(out, body_context, error); }
+
+extern "C" void* rt_coredata_perform_body(void* out, PerformBody body, void* body_context) {
+    void* error = nullptr;
+    body(out, body_context, &error);
+    return error;
+}
+
+extern "C" void* rt_coredata_background_body(void* out, ContextBody body, void* body_context) {
+    void* error = nullptr;
+    body(out, view_context(), body_context, &error);
+    return error;
+}
+
+extern "C" void rt_coredata_perform();
+extern "C" void rt_coredata_background();
+
+struct AsyncRecord {
+    int32_t function;
+    uint32_t context_size;
+};
+
+AsyncRecord g_perform_record;
+AsyncRecord g_background_record;
+
+void* merged_model(void*, const char*, void*) { return objc_framework_object("NSManagedObjectModel"); }
+
+void* managed_value_for_key(void* self, const char*, void* key) { return managed_get(self, foundation_object_text(key).c_str()); }
+
+void managed_set_value(void* self, const char*, void* value, void* key) {
+    std::string property = foundation_object_text(key);
+    std::string selector = "set" + property + ":";
+    selector[3] = static_cast<char>(toupper(static_cast<unsigned char>(selector[3])));
+    managed_set(self, selector.c_str(), value);
+}
+
+}  // namespace
+
+// The async forms run their bodies at once, since all contexts share this thread, then return as async callees do.
+__asm__(
+    ".text\n"
+    ".globl rt_coredata_perform\n"
+    "rt_coredata_perform:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  mov x1, x2\n"
+    "  mov x2, x3\n"
+    "  bl rt_coredata_perform_body\n"
+    "  mov x20, x0\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ldr x16, [x22, #8]\n"
+    "  br x16\n"
+    ".globl rt_coredata_background\n"
+    "rt_coredata_background:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  bl rt_coredata_background_body\n"
+    "  mov x20, x0\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ldr x16, [x22, #8]\n"
+    "  br x16\n");
+
 std::string coredata_entity_name(void* description) { return nsstring_of_description(description); }
 
 void* coredata_symbol(std::string_view name) {
+    constexpr std::string_view kPerform = "$sSo22NSManagedObjectContextC8CoreDataE7perform8schedule_xAbCE17ScheduledTaskTypeO_xyKctYaKlF";
+    constexpr std::string_view kBackground = "$sSo21NSPersistentContainerC8CoreDataE21performBackgroundTaskyxxSo22NSManagedObjectContextCKcYaKlF";
+    if (name == kPerform) return reinterpret_cast<void*>(rt_coredata_perform);
+    if (name == kBackground) return reinterpret_cast<void*>(rt_coredata_background);
+    if (name.size() > 2 && name.substr(name.size() - 2) == "Tu" && (name.substr(0, name.size() - 2) == kPerform || name.substr(0, name.size() - 2) == kBackground)) {
+        const bool perform = name.substr(0, name.size() - 2) == kPerform;
+        AsyncRecord& record = perform ? g_perform_record : g_background_record;
+        const auto entry = reinterpret_cast<const char*>(perform ? rt_coredata_perform : rt_coredata_background);
+        record.function = static_cast<int32_t>(entry - reinterpret_cast<const char*>(&record.function));
+        record.context_size = sizeof(void*) * 2;
+        return &record;
+    }
+    if (name == "$sSo22NSManagedObjectContextC8CoreDataE14performAndWaityxxyKXEKlF") return reinterpret_cast<void*>(context_perform_and_wait);
     static void* merge_policy = objc_framework_object("NSMergePolicy");
     if (name == "NSMergeByPropertyObjectTrumpMergePolicy") return &merge_policy;
     if (name == "$sSo16NSSortDescriptorC10FoundationE7keyPath9ascendingABs03KeyE0Cyxq_G_Sbtcr0_lufC") return reinterpret_cast<void*>(sort_descriptor_init);
@@ -458,6 +568,33 @@ void* coredata_symbol(std::string_view name) {
 }
 
 void coredata_register_classes() {
+    objc_register_method("-[NSMergePolicy initWithMergeType:]", reinterpret_cast<const void*>(return_self_word));
+    objc_register_method("-[NSManagedObjectContext initWithConcurrencyType:]", reinterpret_cast<const void*>(return_self_word));
+    objc_register_method("-[NSManagedObjectContext setParentContext:]", reinterpret_cast<const void*>(ignore_argument));
+    objc_register_method("-[NSManagedObjectContext setPersistentStoreCoordinator:]", reinterpret_cast<const void*>(ignore_argument));
+    objc_register_method("-[NSManagedObjectContext performBlock:]", reinterpret_cast<const void*>(context_perform));
+    objc_register_method("-[NSManagedObjectContext performBlockAndWait:]", reinterpret_cast<const void*>(context_perform));
+    objc_register_method("-[NSManagedObjectContext objectWithID:]", reinterpret_cast<const void*>(context_object_with_id));
+    objc_register_method("-[NSManagedObjectContext refreshAllObjects]", reinterpret_cast<const void*>(ignore_nothing));
+    objc_register_method("-[NSManagedObjectContext reset]", reinterpret_cast<const void*>(ignore_nothing));
+    objc_register_method("-[NSPersistentContainer initWithName:managedObjectModel:]", reinterpret_cast<const void*>(return_self_two_arguments));
+    objc_register_method("-[NSPersistentContainer newBackgroundContext]", reinterpret_cast<const void*>(container_background_context));
+    objc_register_method("-[NSPersistentContainer performBackgroundTask:]", reinterpret_cast<const void*>(container_background_task));
+    objc_register_method("+[NSManagedObjectModel mergedModelFromBundles:]", reinterpret_cast<const void*>(merged_model));
+    objc_register_method("-[NSManagedObjectModel initWithContentsOfURL:]", reinterpret_cast<const void*>(return_self_argument));
+    objc_register_method("-[NSManagedObject objectID]", reinterpret_cast<const void*>(managed_object_id));
+    objc_register_method("-[NSManagedObject managedObjectContext]", reinterpret_cast<const void*>(managed_context));
+    objc_register_method("-[NSManagedObject isDeleted]", reinterpret_cast<const void*>(managed_is_deleted));
+    objc_register_method("-[NSManagedObject isInserted]", reinterpret_cast<const void*>(managed_false));
+    objc_register_method("-[NSManagedObject willAccessValueForKey:]", reinterpret_cast<const void*>(ignore_argument));
+    objc_register_method("-[NSManagedObject didAccessValueForKey:]", reinterpret_cast<const void*>(ignore_argument));
+    objc_register_method("-[NSManagedObject valueForKey:]", reinterpret_cast<const void*>(managed_value_for_key));
+    objc_register_method("-[NSManagedObject setValue:forKey:]", reinterpret_cast<const void*>(managed_set_value));
+    objc_register_method("-[NSFetchRequest setResultType:]", reinterpret_cast<const void*>(ignore_word));
+    objc_register_method("-[NSFetchRequest setReturnsObjectsAsFaults:]", reinterpret_cast<const void*>(ignore_word));
+    objc_register_method("-[NSFetchRequest setIncludesPendingChanges:]", reinterpret_cast<const void*>(ignore_word));
+    objc_register_method("-[NSFetchRequest setPropertiesToFetch:]", reinterpret_cast<const void*>(ignore_argument));
+    objc_register_method("-[NSFetchRequest setRelationshipKeyPathsForPrefetching:]", reinterpret_cast<const void*>(ignore_argument));
     objc_register_fallback("NSManagedObject", managed_accessor);
     objc_register_method("-[NSManagedObject fetchRequest]", reinterpret_cast<const void*>(managed_fetch_request));
     objc_register_method("-[NSFetchRequest initWithEntityName:]", reinterpret_cast<const void*>(fetch_request_init));

@@ -1,5 +1,6 @@
 #pragma once
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>

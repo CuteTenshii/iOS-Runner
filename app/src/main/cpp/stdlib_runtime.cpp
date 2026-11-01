@@ -377,6 +377,9 @@ SWIFTCC void object_array_make_unique(SWIFT_CONTEXT void** self) {
 
 SWIFTCC void object_array_create_new_buffer(bool, int64_t minimum_capacity, bool, SWIFT_CONTEXT void** self) { object_array_grow(self, minimum_capacity); }
 
+// A URL and a UUID are both one box holding their text, and compare by that text.
+static bool is_text_box_type(const char* name) { return name != nullptr && (strcmp(name, "_$s10Foundation3URLVMn") == 0 || strcmp(name, "_$s10Foundation4UUIDVMn") == 0); }
+
 SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_CONTEXT void** self) {
     auto* header = static_cast<HashedHeader*>(*self);
     char* elements;
@@ -385,10 +388,10 @@ SWIFTCC void object_array_append(int64_t old_count, void* element, SWIFT_CONTEXT
     header->count = old_count + 1;
 }
 
-// Equatable's dispatch thunk; framework types only reach it as String or URL.
+// Equatable's dispatch thunk; framework types only reach it as String, URL or UUID.
 SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, void* table) {
     if (type == type_system_symbol("$sSSN")) return swift_string_to_utf8(*static_cast<const SwiftString*>(left)) == swift_string_to_utf8(*static_cast<const SwiftString*>(right));
-    if (const char* name = foreign_type_name(type); name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) {
+    if (is_text_box_type(foreign_type_name(type))) {
         return foundation_url_text(*static_cast<void* const*>(left)) == foundation_url_text(*static_cast<void* const*>(right));
     }
     // Framework values with no references, such as enum tags, are equal when their bytes are.
@@ -423,6 +426,32 @@ int64_t scalar_count(const std::string& text) {
 }
 
 SWIFTCC int64_t string_count(SwiftString text) { return scalar_count(swift_string_to_utf8(text)); }
+
+SWIFTCC SwiftString string_describing(const void* value, void* type);
+
+// The items array holds existentials: inline buffer words, then the value's type in the fourth.
+SWIFTCC void swift_print(void* items, SwiftString separator, SwiftString terminator) {
+    constexpr size_t kExistentialSize = 32, kExistentialTypeWord = 3, kArrayCountOffset = 16;
+    int64_t count;
+    memcpy(&count, static_cast<char*>(items) + kArrayCountOffset, sizeof count);
+    std::string line;
+    for (int64_t i = 0; i < count; ++i) {
+        auto* item = reinterpret_cast<void**>(static_cast<char*>(items) + kArrayElementsOffset + static_cast<size_t>(i) * kExistentialSize);
+        void* type = item[kExistentialTypeWord];
+        const auto* witnesses = witnesses_of(type);
+        const void* value = item;
+        if (witnesses->flags & kFlagNonInline) {
+            const size_t mask = witnesses->flags & 0xff;
+            value = static_cast<char*>(item[0]) + ((sizeof(HeapObject) + mask) & ~mask);
+        }
+        if (i != 0) line += swift_string_to_utf8(separator);
+        line += swift_string_to_utf8(string_describing(value, type));
+    }
+    engine_log("PRINT: %s", line.c_str());
+    line += swift_string_to_utf8(terminator);
+    fwrite(line.data(), 1, line.size(), stdout);
+    fflush(stdout);
+}
 
 SWIFTCC SwiftString string_describing(const void* value, void* type) {
     SwiftString out = swift_string_from_utf8("");
@@ -614,7 +643,7 @@ SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWI
 SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_CONTEXT const void* self) {
     if (type == type_system_symbol("$sSSN")) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(swift_string_to_utf8(*static_cast<const SwiftString*>(self))));
     const char* name = foreign_type_name(type);
-    if (name != nullptr && strcmp(name, "_$s10Foundation3URLVMn") == 0) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(foundation_url_text(*static_cast<void* const*>(self))));
+    if (is_text_box_type(name)) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(foundation_url_text(*static_cast<void* const*>(self))));
     if (const auto* witnesses = witnesses_of(type); name != nullptr || (witnesses->flags & kFlagNonPod) == 0) {
         const std::string bytes(static_cast<const char*>(self), witnesses->size);
         return seed ^ static_cast<int64_t>(std::hash<std::string>{}(bytes));
@@ -662,6 +691,8 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"$sSo18os_signpost_type_ta0A0E5eventABvgZ", reinterpret_cast<void*>(log_type_getter<0x00>)},
         {"$sSo18os_signpost_type_ta0A0E5beginABvgZ", reinterpret_cast<void*>(log_type_getter<0x01>)},
         {"$sSo18os_signpost_type_ta0A0E3endABvgZ", reinterpret_cast<void*>(log_type_getter<0x02>)},
+        {"$sSo9OS_os_logC0B0E9subsystem8categoryABSS_SStcfC", reinterpret_cast<void*>(+[](uint64_t, uint64_t, uint64_t, uint64_t) -> void* { return objc_framework_object("OS_os_log"); })},
+        {"$s2os0A4_log_3dso0B04type_ys12StaticStringV_SVSgSo03OS_a1_B0CSo0a1_b1_D2_tas7CVarArg_pdtF", reinterpret_cast<void*>(+[]() {})},
         {"$s2os6LoggerV9subsystem8categoryACSS_SStcfC", reinterpret_cast<void*>(logger_init)},
         {"$s2os6LoggerV9logObjectSo03OS_a1_C0Cvg", reinterpret_cast<void*>(logger_object)},
         {"$sSo13os_log_type_ta0A0E5errorABvgZ", reinterpret_cast<void*>(log_type_getter<0x10>)},
@@ -672,6 +703,7 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"$sSS6append10contentsOfyx_tSTRzSJ7ElementRtzlF", reinterpret_cast<void*>(string_append_sequence)},
         {"$sSH13_rawHashValue4seedS2i_tFTj", reinterpret_cast<void*>(hashable_raw_value)},
         {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
+        {"$ss5print_9separator10terminatoryypd_S2StF", reinterpret_cast<void*>(swift_print)},
         {"$sSS10describingSSx_tclufC", reinterpret_cast<void*>(string_describing)},
         {"$sSS7cStringSSSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},
         {"$sSS7cStringSSSPys5UInt8VG_tcfC", reinterpret_cast<void*>(string_from_c_string)},

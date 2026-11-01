@@ -416,6 +416,9 @@ void register_foundation_session_classes() {
     objc_register_method("-[NSURLSessionDataTask setPriority:]", reinterpret_cast<const void*>(url_cache_set_word));
     objc_register_method("-[NSISO8601DateFormatter setFormatOptions:]", reinterpret_cast<const void*>(formatter_ignore_word));
     objc_register_method("-[NSISO8601DateFormatter dateFromString:]", reinterpret_cast<const void*>(iso_formatter_date));
+    // Requests are made synchronously by the host, so nothing is still in flight to cancel.
+    objc_register_method("-[NSURLSession invalidateAndCancel]", reinterpret_cast<const void*>(+[](void*, const char*) {}));
+    objc_register_method("-[NSURLSession finishTasksAndInvalidate]", reinterpret_cast<const void*>(+[](void*, const char*) {}));
     objc_register_method("-[NSDateFormatter setDateFormat:]", reinterpret_cast<const void*>(date_formatter_set_format));
     objc_register_method("-[NSDateFormatter setLocale:]", reinterpret_cast<const void*>(formatter_ignore_word));
     objc_register_method("-[NSDateFormatter setTimeZone:]", reinterpret_cast<const void*>(formatter_ignore_word));

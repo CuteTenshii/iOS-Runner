@@ -1,9 +1,20 @@
 #include "stdlib_internal.h"
 
+#include <type_traits>
+#include "symbols.h"
+
 using namespace stdlib;
+
+SWIFTCC void* dictionary_literal(void* elements, void* key_type, void* value_type, void** hashable);
+
+template <typename Integer>
+SWIFTCC SwiftString integer_description(SWIFT_CONTEXT const Integer* self) {
+    return swift_string_from_utf8(std::to_string(static_cast<std::conditional_t<std::is_signed_v<Integer>, int64_t, uint64_t>>(*self)));
+}
 
 static SymbolTable all_stdlib_symbols() {
     SymbolTable all = {
+        {"$sSD17dictionaryLiteralSDyxq_Gx_q_td_tcfC", reinterpret_cast<void*>(dictionary_literal)},
         {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
         {"$s2os12OSSignpostIDV3log6objectACSo03OS_a1_D0C_yXltcfC", reinterpret_cast<void*>(+[](void*, void*) -> uint64_t { return 0; })},
         {"$s2os0A9_signpost_3dso3log4name0B2IDySo0a1_B7_type_ta_SVSo03OS_a1_D0Cs12StaticStringVAA010OSSignpostF0VtF", reinterpret_cast<void*>(+[] {})},
@@ -25,6 +36,15 @@ static SymbolTable all_stdlib_symbols() {
 
 void* stdlib_symbol(std::string_view name) {
     static const bool registered = [] {
+        register_foreign_witness("_$sSus23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint64_t>));
+        register_foreign_witness("_$ss4Int8Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<int8_t>));
+        register_foreign_witness("_$ss5Int16Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<int16_t>));
+        register_foreign_witness("_$ss5Int32Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<int32_t>));
+        register_foreign_witness("_$ss5Int64Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<int64_t>));
+        register_foreign_witness("_$ss5UInt8Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint8_t>));
+        register_foreign_witness("_$ss6UInt16Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint16_t>));
+        register_foreign_witness("_$ss6UInt32Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint32_t>));
+        register_foreign_witness("_$ss6UInt64Vs23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(integer_description<uint64_t>));
         register_foreign_witness("_$sSis23CustomStringConvertiblesWP", "_$ss23CustomStringConvertibleP11descriptionSSvgTq", reinterpret_cast<const void*>(int_description));
         return true;
     }();
@@ -66,6 +86,54 @@ void* make_string_dictionary(void* value_type, const std::vector<std::pair<std::
         memcpy(values + bucket * stride, value, size);
     }
     header->count = static_cast<int64_t>(entries.size());
+    return raw;
+}
+
+using RawHashThunk = SWIFTCC int64_t (*)(int64_t, void*, void*, SWIFT_CONTEXT const void*);
+
+// String keys must land where the guest's specialized lookups hash them, through Hasher.
+int64_t hash_for_bucket(const void* key, int64_t seed, void* key_type, void* hashable) {
+    if (key_type == type_system_symbol("$sSSN")) {
+        HasherState hasher;
+        hasher_seed(&hasher, seed);
+        string_hash_into(&hasher, *static_cast<const SwiftString*>(key));
+        return hasher_finalize(&hasher);
+    }
+    static const auto thunk = reinterpret_cast<RawHashThunk>(resolve_symbol("$sSH13_rawHashValue4seedS2i_tFTj"));
+    return thunk(seed, key_type, hashable, key);
+}
+
+// Takes the array, as a variadic literal hands over its only reference.
+SWIFTCC void* dictionary_literal(void* elements, void* key_type, void* value_type, void** hashable) {
+    int64_t count;
+    memcpy(&count, static_cast<char*>(elements) + kArrayCountOffset, sizeof count);
+    void* arguments[] = {key_type, value_type, hashable};
+    void* metadata = storage_class_metadata("_$ss18_DictionaryStorageCMn", arguments, 3);
+    auto* raw = static_cast<char*>(allocate_dictionary(metadata, scale_for_capacity(count), 0, 0, false));
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    char* keys;
+    char* values;
+    memcpy(&keys, raw + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
+    auto* bitmap = reinterpret_cast<uint64_t*>(raw + kDictionaryBitmapOffset);
+    const uint64_t mask = (1ULL << header->scale) - 1;
+    const auto* key_witnesses = witnesses_of(key_type);
+    const auto* value_witnesses = witnesses_of(value_type);
+    const size_t value_mask = value_witnesses->flags & 0xff;
+    const size_t value_offset = (key_witnesses->size + value_mask) & ~value_mask;
+    const size_t tuple_mask = (key_witnesses->flags & 0xff) > value_mask ? (key_witnesses->flags & 0xff) : value_mask;
+    const size_t stride = (value_offset + value_witnesses->size + tuple_mask) & ~tuple_mask;
+    char* element = static_cast<char*>(elements) + ((kArrayElementsOffset + tuple_mask) & ~tuple_mask);
+    for (int64_t i = 0; i < count; ++i, element += stride) {
+        uint64_t bucket = static_cast<uint64_t>(hash_for_bucket(element, header->seed, key_type, hashable)) & mask;
+        while ((bitmap[bucket / kWordBits] >> (bucket % kWordBits)) & 1) bucket = (bucket + 1) & mask;
+        bitmap[bucket / kWordBits] |= 1ULL << (bucket % kWordBits);
+        key_witnesses->initialize_with_copy(keys + bucket * key_witnesses->stride, element, key_type);
+        value_witnesses->initialize_with_copy(values + bucket * value_witnesses->stride, element + value_offset, value_type);
+    }
+    header->count = count;
+    using Release = void (*)(void*);
+    reinterpret_cast<Release>(resolve_symbol("swift_release"))(elements);
     return raw;
 }
 

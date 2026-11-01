@@ -1,4 +1,6 @@
 #include "foundation_internal.h"
+#include "symbols.h"
+#include "uikit_internal.h"
 
 using namespace foundation;
 
@@ -73,10 +75,45 @@ void* new_nsnumber(int64_t value, bool is_bool) {
     return number;
 }
 
-const std::string* stored_value(void* key) {
-    const auto found = defaults().values.find(nsstring_text(key));
-    return found == defaults().values.end() || found->second.empty() ? nullptr : &found->second;
+// Values from registerDefaults: are never saved, and only answer for keys the app hasn't set.
+std::map<std::string, std::string>& registered_defaults() {
+    static std::map<std::string, std::string> values;
+    return values;
 }
+
+const std::string* stored_value(void* key) {
+    const std::string name = nsstring_text(key);
+    const auto found = defaults().values.find(name);
+    if (found != defaults().values.end() && !found->second.empty()) return &found->second;
+    const auto registered = registered_defaults().find(name);
+    return registered == registered_defaults().end() ? nullptr : &registered->second;
+}
+
+void defaults_register(void*, const char*, void* dictionary) {
+    void* storage = nullptr;
+    if (dictionary == nullptr || !bridged_collection_value(dictionary, storage)) return;
+    constexpr size_t kExistentialTypeWord = 3;
+    visit_string_dictionary(storage, [](const std::string& name, void* entry) {
+        auto** words = static_cast<void**>(entry);
+        void* type = words[kExistentialTypeWord];
+        if (type == type_system_symbol("$sSbN")) {
+            registered_defaults()[name] = std::string(1, kStoredBool) + (*reinterpret_cast<bool*>(entry) ? "1" : "0");
+        } else if (type == type_system_symbol("$sSiN")) {
+            registered_defaults()[name] = kStoredInteger + std::to_string(*reinterpret_cast<int64_t*>(entry));
+        } else if (type == type_system_symbol("$sSSN")) {
+            registered_defaults()[name] = kStoredString + swift_string_to_utf8(*reinterpret_cast<SwiftString*>(entry));
+        } else {
+            engine_log("DEFAULTS: not registering a value of an unsupported type for %s", name.c_str());
+        }
+    });
+}
+
+double defaults_double_for_key(void*, const char*, void* key) {
+    const auto* stored = stored_value(key);
+    return stored == nullptr ? 0 : strtod(stored->c_str() + 1, nullptr);
+}
+
+bool defaults_synchronize(void*, const char*) { return true; }
 
 void* defaults_string_for_key(void*, const char*, void* key) {
     const auto* stored = stored_value(key);
@@ -123,6 +160,13 @@ void defaults_set_bool(void*, const char*, bool value, void* key) {
 
 void defaults_set_integer(void*, const char*, int64_t value, void* key) {
     defaults().values[nsstring_text(key)] = kStoredInteger + std::to_string(value);
+    defaults().save();
+}
+
+void defaults_set_double(void*, const char*, void* key, double value) {
+    char text[64];
+    snprintf(text, sizeof text, "%.17g", value);
+    defaults().values[nsstring_text(key)] = kStoredInteger + std::string(text);
     defaults().save();
 }
 
@@ -189,6 +233,13 @@ void* framework_singleton(const char* class_name) {
 }
 
 void* process_info_shared(void*, const char*) { return framework_singleton("NSProcessInfo"); }
+
+// Answers as the app's deployment target, like __isPlatformVersionAtLeast.
+bool process_info_at_least(void*, const char*, const OperatingSystemVersion* version) {
+    using Check = int32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t);
+    static const auto check = reinterpret_cast<Check>(resolve_symbol("__isPlatformVersionAtLeast"));
+    return check(0, static_cast<uint32_t>(version->major), static_cast<uint32_t>(version->minor), static_cast<uint32_t>(version->patch)) != 0;
+}
 
 void* main_bundle(void*, const char*) { return framework_singleton("NSBundle"); }
 
@@ -282,7 +333,10 @@ int64_t device_idiom_phone(void*, const char*) { return 0; }
 
 struct NotificationObserver {
     std::string name;
+    void* object;
     void* block;
+    void* target;
+    std::string selector;
 };
 
 std::vector<NotificationObserver>& notification_observers() {
@@ -290,32 +344,153 @@ std::vector<NotificationObserver>& notification_observers() {
     return observers;
 }
 
+// Hash tables and map tables keep their entries strongly: nothing here frees an object a guest still points at.
+struct ObjectTable {
+    std::vector<void*> values;
+    std::vector<void*> keys;
+};
+
+std::unordered_map<void*, ObjectTable>& object_tables() {
+    static std::unordered_map<void*, ObjectTable> tables;
+    return tables;
+}
+
+void* hash_table_make(void*, const char*) { return objc_framework_object("NSHashTable"); }
+void* map_table_make(void*, const char*) { return objc_framework_object("NSMapTable"); }
+
+void hash_table_add(void* self, const char*, void* object) {
+    auto& values = object_tables()[self].values;
+    if (std::find(values.begin(), values.end(), object) == values.end()) {
+        rt_swift_retain(object);
+        values.push_back(object);
+    }
+}
+
+void hash_table_remove(void* self, const char*, void* object) {
+    auto& values = object_tables()[self].values;
+    values.erase(std::remove(values.begin(), values.end(), object), values.end());
+}
+
+bool hash_table_contains(void* self, const char*, void* object) {
+    const auto& values = object_tables()[self].values;
+    return std::find(values.begin(), values.end(), object) != values.end();
+}
+
+void* hash_table_all(void* self, const char*) {
+    auto* array = static_cast<NSArrayObject*>(new_nsarray());
+    *array->items = object_tables()[self].values;
+    return array;
+}
+
+int64_t hash_table_count(void* self, const char*) { return static_cast<int64_t>(object_tables()[self].values.size()); }
+void table_remove_all(void* self, const char*) { object_tables().erase(self); }
+
+void map_table_set(void* self, const char*, void* value, void* key) {
+    auto& table = object_tables()[self];
+    const auto found = std::find(table.keys.begin(), table.keys.end(), key);
+    rt_swift_retain(value);
+    if (found != table.keys.end()) {
+        table.values[static_cast<size_t>(found - table.keys.begin())] = value;
+        return;
+    }
+    rt_swift_retain(key);
+    table.keys.push_back(key);
+    table.values.push_back(value);
+}
+
+void* map_table_get(void* self, const char*, void* key) {
+    auto& table = object_tables()[self];
+    const auto found = std::find(table.keys.begin(), table.keys.end(), key);
+    return found == table.keys.end() ? nullptr : table.values[static_cast<size_t>(found - table.keys.begin())];
+}
+
+void map_table_remove(void* self, const char*, void* key) {
+    auto& table = object_tables()[self];
+    const auto found = std::find(table.keys.begin(), table.keys.end(), key);
+    if (found == table.keys.end()) return;
+    table.values.erase(table.values.begin() + (found - table.keys.begin()));
+    table.keys.erase(found);
+}
+
 void* notification_center_default(void*, const char*) { return framework_singleton("NSNotificationCenter"); }
 
+// An NSNotification keeps its parts in the words after its object header.
+constexpr size_t kNotificationNameWord = 2, kNotificationObjectWord = 3, kNotificationInfoWord = 4;
+
+void* new_notification(void* name, void* object, void* info) {
+    auto** notification = static_cast<void**>(objc_framework_object("NSNotification"));
+    notification[kNotificationNameWord] = name;
+    notification[kNotificationObjectWord] = object;
+    notification[kNotificationInfoWord] = info;
+    return notification;
+}
+
+void* notification_name(void* self, const char*) { return static_cast<void**>(self)[kNotificationNameWord]; }
+void* notification_object(void* self, const char*) { return static_cast<void**>(self)[kNotificationObjectWord]; }
+void* notification_info(void* self, const char*) { return static_cast<void**>(self)[kNotificationInfoWord]; }
+
 // The block runs synchronously when posted, as it would with a nil queue; the returned token is the block.
-void* notification_add_block(void*, const char*, void* name, void*, void*, void* block) {
+void* notification_add_block(void*, const char*, void* name, void* object, void*, void* block) {
     void* copy = darwin_block_copy(block);
-    notification_observers().push_back({name == nullptr ? std::string() : nsstring_text(name), copy});
+    notification_observers().push_back({name == nullptr ? std::string() : nsstring_text(name), object, copy, nullptr, {}});
     return copy;
+}
+
+void notification_add_observer(void*, const char*, void* target, const char* selector, void* name, void* object) {
+    notification_observers().push_back({name == nullptr ? std::string() : nsstring_text(name), object, nullptr, target, selector});
 }
 
 void notification_remove(void*, const char*, void* token) {
     auto& observers = notification_observers();
-    observers.erase(std::remove_if(observers.begin(), observers.end(), [token](const NotificationObserver& o) { return o.block == token; }), observers.end());
+    observers.erase(std::remove_if(observers.begin(), observers.end(), [token](const NotificationObserver& o) { return o.block == token || o.target == token; }), observers.end());
 }
 
-void notification_post_name(void*, const char*, void* name, void*) {
-    using Invoke = void (*)(void*, void*);
-    struct Literal {
-        void* isa;
-        int32_t flags, reserved;
-        Invoke invoke;
-    };
+void notification_remove_named(void*, const char*, void* token, void* name, void*) {
+    auto& observers = notification_observers();
+    const std::string text = name == nullptr ? std::string() : nsstring_text(name);
+    observers.erase(std::remove_if(observers.begin(), observers.end(), [&](const NotificationObserver& o) { return (o.block == token || o.target == token) && (text.empty() || o.name == text); }), observers.end());
+}
+
+void deliver_notification(void* notification, void* name, void* object) {
+    constexpr size_t kBlockInvokeWord = 2;
     const std::string text = nsstring_text(name);
     const auto observers = notification_observers();
     for (const auto& observer : observers) {
-        if (observer.name.empty() || observer.name == text) static_cast<Literal*>(observer.block)->invoke(observer.block, framework_singleton("NSNotification"));
+        if (!observer.name.empty() && observer.name != text) continue;
+        if (observer.object != nullptr && observer.object != object) continue;
+        if (observer.block != nullptr) {
+            using Invoke = void (*)(void*, void*);
+            reinterpret_cast<Invoke>(static_cast<void**>(observer.block)[kBlockInvokeWord])(observer.block, notification);
+        } else {
+            objc_send(observer.target, observer.selector.c_str(), notification);
+        }
     }
+}
+
+void notification_post_info(void*, const char*, void* name, void* object, void* info) { deliver_notification(new_notification(name, object, info), name, object); }
+void notification_post_name(void* self, const char* selector, void* name, void* object) { notification_post_info(self, selector, name, object, nullptr); }
+
+void notification_post(void*, const char*, void* notification) {
+    deliver_notification(notification, notification_name(notification, nullptr), notification_object(notification, nullptr));
+}
+
+SWIFTCC void notification_bridge_out(SWIFT_OUT void** out, void* object) { *out = object != nullptr ? rt_swift_retain(object) : nullptr; }
+
+SWIFTCC void* notification_value_name(SWIFT_CONTEXT void** self) { return notification_name(*self, nullptr); }
+
+SWIFTCC void* notification_value_info(SWIFT_CONTEXT void** self) {
+    void* info = notification_info(*self, nullptr);
+    if (void* value; info != nullptr && bridged_collection_value(info, value)) return rt_swift_bridgeObjectRetain(value);
+    return nullptr;
+}
+
+// Optional<Any>: an empty existential means nil, and a posted object is always one reference.
+SWIFTCC void notification_value_object(SWIFT_OUT AnyValue* out, SWIFT_CONTEXT void** self) {
+    void* object = notification_object(*self, nullptr);
+    memset(out, 0, sizeof *out);
+    if (object == nullptr) return;
+    out->buffer[0] = reinterpret_cast<uint64_t>(rt_swift_retain(object));
+    out->type = *static_cast<void**>(object);
 }
 
 void* url_session_configuration_default(void*, const char*) { return framework_singleton("NSURLSessionConfiguration"); }
@@ -378,6 +553,10 @@ SWIFTCC void url_file_with_path(SWIFT_OUT URLBox** out, SwiftString path) { *out
 
 void add_foundation_objects_symbols(SymbolTable& table) {
     table.insert({
+        {"$s10Foundation12NotificationV36_unconditionallyBridgeFromObjectiveCyACSo14NSNotificationCSgFZ", reinterpret_cast<void*>(notification_bridge_out)},
+        {"$s10Foundation12NotificationV4nameSo18NSNotificationNameavg", reinterpret_cast<void*>(notification_value_name)},
+        {"$s10Foundation12NotificationV6objectypSgvg", reinterpret_cast<void*>(notification_value_object)},
+        {"$s10Foundation12NotificationV8userInfoSDys11AnyHashableVypGSgvg", reinterpret_cast<void*>(notification_value_info)},
         {"$s10Foundation3URLV15fileURLWithPathACSSh_tcfC", reinterpret_cast<void*>(url_file_with_path)},
         {"$sSa10FoundationE36_unconditionallyBridgeFromObjectiveCySayxGSo7NSArrayCSgFZ", reinterpret_cast<void*>(array_bridge_from_objc)},
     });
@@ -397,6 +576,12 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSURLSessionConfiguration defaultSessionConfiguration]", reinterpret_cast<const void*>(url_session_configuration_default));
     objc_register_method("-[NSURLSessionConfiguration setTimeoutIntervalForRequest:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
+    objc_register_method("-[NSProcessInfo isOperatingSystemAtLeastVersion:]", reinterpret_cast<const void*>(process_info_at_least));
+    // The end of every guest dealloc chain. A stale property set must not reach whoever reuses this address.
+    objc_register_method("-[NSObject dealloc]", reinterpret_cast<const void*>(+[](void* self, const char*) {
+                             uikit::property_forget(self);
+                             free(self);
+                         }));
     objc_register_method("-[NSObject init]", reinterpret_cast<const void*>(return_self));
     objc_register_method("-[NSObject self]", reinterpret_cast<const void*>(return_self));
     objc_register_method("-[NSObject retain]", reinterpret_cast<const void*>(return_self));
@@ -413,6 +598,25 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSNotificationCenter defaultCenter]", reinterpret_cast<const void*>(notification_center_default));
     objc_register_method("-[NSNotificationCenter addObserverForName:object:queue:usingBlock:]", reinterpret_cast<const void*>(notification_add_block));
     objc_register_method("-[NSNotificationCenter removeObserver:]", reinterpret_cast<const void*>(notification_remove));
+    objc_register_method("-[NSNotificationCenter addObserver:selector:name:object:]", reinterpret_cast<const void*>(notification_add_observer));
+    objc_register_method("-[NSNotificationCenter removeObserver:name:object:]", reinterpret_cast<const void*>(notification_remove_named));
+    objc_register_method("-[NSNotificationCenter postNotificationName:object:userInfo:]", reinterpret_cast<const void*>(notification_post_info));
+    objc_register_method("-[NSNotificationCenter postNotification:]", reinterpret_cast<const void*>(notification_post));
+    objc_register_method("+[NSHashTable weakObjectsHashTable]", reinterpret_cast<const void*>(hash_table_make));
+    objc_register_method("-[NSHashTable addObject:]", reinterpret_cast<const void*>(hash_table_add));
+    objc_register_method("-[NSHashTable removeObject:]", reinterpret_cast<const void*>(hash_table_remove));
+    objc_register_method("-[NSHashTable containsObject:]", reinterpret_cast<const void*>(hash_table_contains));
+    objc_register_method("-[NSHashTable allObjects]", reinterpret_cast<const void*>(hash_table_all));
+    objc_register_method("-[NSHashTable count]", reinterpret_cast<const void*>(hash_table_count));
+    objc_register_method("-[NSHashTable removeAllObjects]", reinterpret_cast<const void*>(table_remove_all));
+    for (const char* maker : {"+[NSMapTable strongToStrongObjectsMapTable]", "+[NSMapTable strongToWeakObjectsMapTable]", "+[NSMapTable weakToStrongObjectsMapTable]", "+[NSMapTable weakToWeakObjectsMapTable]"}) objc_register_method(maker, reinterpret_cast<const void*>(map_table_make));
+    objc_register_method("-[NSMapTable setObject:forKey:]", reinterpret_cast<const void*>(map_table_set));
+    objc_register_method("-[NSMapTable objectForKey:]", reinterpret_cast<const void*>(map_table_get));
+    objc_register_method("-[NSMapTable removeObjectForKey:]", reinterpret_cast<const void*>(map_table_remove));
+    objc_register_method("-[NSMapTable removeAllObjects]", reinterpret_cast<const void*>(table_remove_all));
+    objc_register_method("-[NSNotification name]", reinterpret_cast<const void*>(notification_name));
+    objc_register_method("-[NSNotification object]", reinterpret_cast<const void*>(notification_object));
+    objc_register_method("-[NSNotification userInfo]", reinterpret_cast<const void*>(notification_info));
     objc_register_method("-[NSNotificationCenter postNotificationName:object:]", reinterpret_cast<const void*>(notification_post_name));
     objc_register_method("+[NSURLSession sessionWithConfiguration:delegate:delegateQueue:]", reinterpret_cast<const void*>(url_session_with_delegate));
     objc_register_method("+[NSBundle mainBundle]", reinterpret_cast<const void*>(main_bundle));
@@ -439,6 +643,12 @@ void register_foundation_objects_classes() {
     objc_register_method("-[NSUserDefaults setBool:forKey:]", reinterpret_cast<const void*>(defaults_set_bool));
     objc_register_method("-[NSUserDefaults setInteger:forKey:]", reinterpret_cast<const void*>(defaults_set_integer));
     objc_register_method("-[NSUserDefaults setObject:forKey:]", reinterpret_cast<const void*>(defaults_set_object));
+    objc_register_method("-[NSUserDefaults registerDefaults:]", reinterpret_cast<const void*>(defaults_register));
+    objc_register_method("-[NSUserDefaults doubleForKey:]", reinterpret_cast<const void*>(defaults_double_for_key));
+    objc_register_method("-[NSUserDefaults setDouble:forKey:]", reinterpret_cast<const void*>(defaults_set_double));
+    objc_register_method("-[NSUserDefaults setValue:forKey:]", reinterpret_cast<const void*>(defaults_set_object));
+    objc_register_method("-[NSUserDefaults valueForKey:]", reinterpret_cast<const void*>(defaults_object_for_key));
+    objc_register_method("-[NSUserDefaults synchronize]", reinterpret_cast<const void*>(defaults_synchronize));
     objc_register_method("-[NSUserDefaults removeObjectForKey:]", reinterpret_cast<const void*>(defaults_remove));
 }
 

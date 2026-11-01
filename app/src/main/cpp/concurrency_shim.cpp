@@ -53,8 +53,22 @@ std::deque<ReadyTask>& ready_tasks() {
     return queue;
 }
 
+struct TaskWaiter {
+    void* out;
+    void* context;
+};
+
+// What a finished Task keeps for anyone awaiting its value.
+struct TaskCompletion {
+    bool finished = false;
+    void* error = nullptr;
+    void* result = nullptr;
+    std::vector<TaskWaiter> waiters;
+};
+
 struct TaskObject {
     HeapObject header;
+    TaskCompletion* completion;
 };
 
 struct TaskCreation {
@@ -309,13 +323,51 @@ struct TaskOptionRecord {
     void** group;
 };
 
+extern "C" void rt_task_note_finished();
+
+void deliver_task_value(const TaskCompletion& completion, void* out, void* type) {
+    if (completion.error != nullptr || type == nullptr) return;
+    witnesses_of(type)->initialize_with_copy(out, completion.result, type);
+}
+
+struct TaskValueReady {
+    uint64_t ready;
+    void* error;
+};
+
+// Parks the awaiting call unless the task is done; a parked one resumes through its own context's return address.
+extern "C" TaskValueReady rt_task_value_begin(void* out, TaskObject* task, void* type, void* context) {
+    TaskCompletion& completion = *task->completion;
+    if (completion.finished) {
+        deliver_task_value(completion, out, type);
+        return {1, completion.error};
+    }
+    static_cast<void**>(context)[2] = type;
+    completion.waiters.push_back({out, context});
+    return {0, nullptr};
+}
+
+extern "C" void rt_task_completed(TaskCompletion* completion, void* error) {
+    completion->finished = true;
+    completion->error = error;
+    for (const TaskWaiter& waiter : completion->waiters) {
+        deliver_task_value(*completion, waiter.out, static_cast<void**>(waiter.context)[2]);
+        ready_tasks().push_back({static_cast<AsyncContextHeader*>(waiter.context)->resume_parent, error, nullptr, waiter.context, true, g_current_task});
+    }
+    completion->waiters.clear();
+}
+
+extern "C" void rt_task_value();
+
 TaskCreation task_create(size_t, TaskOptionRecord* options, void* result_type, const AsyncFunctionPointer* entry, void* closure_context) {
     auto* task = static_cast<TaskObject*>(calloc(1, sizeof(TaskObject)));
     task->header.metadata = const_cast<uint64_t*>(&kTaskMetadata.kind);
     new (&task->header.references) std::atomic<uint64_t>(2);
 
     auto* context = static_cast<AsyncContextHeader*>(calloc(1, entry->context_size));
-    context->resume_parent = reinterpret_cast<void*>(rt_task_finished);
+    task->completion = new TaskCompletion;
+    context->parent = task->completion;
+    context->resume_parent = reinterpret_cast<void*>(rt_task_note_finished);
 
     size_t result_size = kMinimumResultBytes;
     if (result_type != nullptr) {
@@ -324,6 +376,7 @@ TaskCreation task_create(size_t, TaskOptionRecord* options, void* result_type, c
     }
     const char* base = reinterpret_cast<const char*>(&entry->function);
     void* result = calloc(1, result_size);
+    task->completion->result = result;
     for (; options != nullptr; options = options->parent) {
         if ((options->flags & kOptionKindMask) != kOptionKindGroup) continue;
         auto* group = static_cast<TaskGroupState*>(options->group[0]);
@@ -436,6 +489,7 @@ bool task_equal(const void* left, const void* right) { return left == right; }
 SWIFTCC void task_deinit_on_executor(void* object, SWIFTCC void (*work)(void*), void*, void*, size_t) { work(object); }
 
 AsyncFunctionPointer g_clock_sleep_record;
+AsyncFunctionPointer g_task_value_record;
 
 struct ExecutorReference {
     uint64_t identity;
@@ -489,6 +543,29 @@ __asm__(
     "rt_task_switch:\n"
     "  br x0\n"
     // Where a task's top-level function returns: back to rt_start_task's frame.
+    ".globl rt_task_note_finished\n"
+    "rt_task_note_finished:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  ldr x0, [x22]\n"
+    "  mov x1, x20\n"
+    "  bl rt_task_completed\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  ret\n"
+    // Task.value: (result, task, Success, ...), returning through its own context as any async callee does.
+    ".globl rt_task_value\n"
+    "rt_task_value:\n"
+    "  stp x29, x30, [sp, #-16]!\n"
+    "  mov x29, sp\n"
+    "  mov x3, x22\n"
+    "  bl rt_task_value_begin\n"
+    "  ldp x29, x30, [sp], #16\n"
+    "  cbz x0, 2f\n"
+    "  mov x20, x1\n"
+    "  ldr x16, [x22, #8]\n"
+    "  br x16\n"
+    "2:\n"
+    "  ret\n"
     ".globl rt_task_finished\n"
     "rt_task_finished:\n"
     "  ret\n"
@@ -666,6 +743,9 @@ void* concurrency_symbol(std::string_view name) {
         register_foreign_witness("_$sScMScAsMc", "_$sScA15unownedExecutorScevgTq", reinterpret_cast<const void*>(main_actor_executor));
         g_clock_sleep_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_clock_sleep) - reinterpret_cast<const char*>(&g_clock_sleep_record.function));
         g_clock_sleep_record.context_size = sizeof(AsyncContextHeader);
+        g_task_value_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_task_value) - reinterpret_cast<const char*>(&g_task_value_record.function));
+        // Room past the header for the awaited type, kept for when the task finishes.
+        g_task_value_record.context_size = sizeof(AsyncContextHeader) + sizeof(void*);
         g_checked_continuation_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_with_checked_continuation) - reinterpret_cast<const char*>(&g_checked_continuation_record.function));
         g_checked_continuation_record.context_size = sizeof(ContinuationContext);
         g_group_await_all_record.function = static_cast<int32_t>(reinterpret_cast<const char*>(rt_group_await_all) - reinterpret_cast<const char*>(&g_group_await_all_record.function));
@@ -691,6 +771,10 @@ void* concurrency_symbol(std::string_view name) {
         {"$sSL1goiySbx_xtFZTj", reinterpret_cast<void*>(instant_greater)},
         {"$ss5ClockP5sleep5until9tolerancey7InstantQz_8DurationQzSgtYaKFTj", reinterpret_cast<void*>(rt_clock_sleep)},
         {"$ss5ClockP5sleep5until9tolerancey7InstantQz_8DurationQzSgtYaKFTjTu", &g_clock_sleep_record},
+        {"$sScT5valuexvg", reinterpret_cast<void*>(rt_task_value)},
+        {"$sScT5valuexvgTu", &g_task_value_record},
+        {"$sScTss5NeverORs_rlE5valuexvg", reinterpret_cast<void*>(rt_task_value)},
+        {"$sScTss5NeverORs_rlE5valuexvgTu", &g_task_value_record},
         {"$sScT6cancelyyF", reinterpret_cast<void*>(task_cancel)},
         {"$sScT2eeoiySbScTyxq_G_ABtFZ", reinterpret_cast<void*>(task_equal)},
         {"swift_task_deinitOnExecutor", reinterpret_cast<void*>(task_deinit_on_executor)},

@@ -1,4 +1,5 @@
 #include "foundation_internal.h"
+#include "plist.h"
 
 using namespace foundation;
 
@@ -172,9 +173,74 @@ void* g_cookie_observer = nullptr;
 
 void cookie_store_add_observer(void*, const char*, void* observer) { g_cookie_observer = observer; }
 
+void* new_json_object(Json value) {
+    auto* object = static_cast<JSONValueObject*>(calloc(1, sizeof(JSONValueObject)));
+    object->header.metadata = g_json_value_class;
+    object->header.references = 1;
+    object->value = new Json(std::move(value));
+    return object;
+}
+
+Json json_from_plist(const PlistValue& value) {
+    Json out;
+    switch (value.kind) {
+        case PlistValue::Kind::Boolean:
+            out.kind = Json::Kind::Bool;
+            out.flag = value.boolean;
+            break;
+        case PlistValue::Kind::Integer:
+            out.kind = Json::Kind::Integer;
+            out.integer = value.integer;
+            break;
+        case PlistValue::Kind::Real:
+            out.kind = Json::Kind::Number;
+            out.number = value.real;
+            break;
+        case PlistValue::Kind::String:
+        case PlistValue::Kind::Data:
+            return json_text(value.text);
+        case PlistValue::Kind::Array:
+            out.kind = Json::Kind::Array;
+            for (const auto& item : value.items) out.items.push_back(json_from_plist(item));
+            break;
+        case PlistValue::Kind::Dictionary:
+            out.kind = Json::Kind::Object;
+            for (const auto& [key, item] : value.entries) out.members.emplace_back(key, json_from_plist(item));
+            break;
+        case PlistValue::Kind::Null:
+            break;
+    }
+    return out;
+}
+
+const PlistValue& bundle_info() {
+    static const PlistValue info = [] {
+        PlistValue loaded;
+        plist_read_file(engine_bundle_dir() + "/Info.plist", loaded);
+        return loaded;
+    }();
+    return info;
+}
+
+// Binary plists only, for now: an XML one fails here with an error the caller can handle.
+void* property_list_from_data(void*, const char*, void* data, uint64_t, uint64_t* format, void** error) {
+    constexpr uint64_t kBinaryFormat = 200;
+    PlistValue value;
+    if (data == nullptr || !plist_parse(*static_cast<NSDataObject*>(data)->bytes, value)) {
+        if (error != nullptr) *error = foundation_make_error("The data isn't a binary property list", 0);
+        return nullptr;
+    }
+    if (format != nullptr) *format = kBinaryFormat;
+    return new_json_object(json_from_plist(value));
+}
+
+void* bundle_info_dictionary(void*, const char*) { return new_json_object(json_from_plist(bundle_info())); }
+
 void* bundle_info_value_string(void*, const char*, void* key) {
-    const std::string value = bundle_info_string(nsstring_text(key));
-    return value.empty() ? nullptr : new_nsstring(value);
+    const PlistValue* value = bundle_info().get(nsstring_text(key));
+    if (value == nullptr) return nullptr;
+    if (value->kind == PlistValue::Kind::String) return new_nsstring(value->text);
+    return new_json_object(json_from_plist(*value));
 }
 
 void cookie_store_get_all(void*, const char*, BlockHeader* completion) {
@@ -338,6 +404,8 @@ void register_foundation_web_classes() {
     objc_register_method("-[WKWebViewConfiguration userContentController]", reinterpret_cast<const void*>(configuration_controller));
     objc_register_method("-[WKWebViewConfiguration setApplicationNameForUserAgent:]", reinterpret_cast<const void*>(configuration_set_application_name));
     objc_register_method("-[WKUserContentController addUserScript:]", reinterpret_cast<const void*>(controller_add_script));
+    objc_register_method("+[NSPropertyListSerialization propertyListWithData:options:format:error:]", reinterpret_cast<const void*>(property_list_from_data));
+    objc_register_method("-[NSBundle infoDictionary]", reinterpret_cast<const void*>(bundle_info_dictionary));
     objc_register_method("-[NSBundle objectForInfoDictionaryKey:]", reinterpret_cast<const void*>(bundle_info_value_string));
 }
 
