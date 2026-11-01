@@ -319,6 +319,7 @@ void* uikit_symbol(std::string_view name) {
         uikit::add_app_symbols(all);
         uikit::add_constant_symbols(all);
         uikit::add_collection_symbols(all);
+        uikit::add_view_symbols(all);
         return all;
     }();
     const auto found = table.find(name);

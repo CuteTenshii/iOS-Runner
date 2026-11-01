@@ -579,6 +579,16 @@ void* storyboard_named(const std::string& name) {
     return object;
 }
 
+void* controller_from(void* storyboard, const std::string& identifier);
+
+// UIStoryboard.instantiateViewController(identifier:creator:), with the app's closure making the controller.
+SWIFTCC void* storyboard_with_creator(SwiftString identifier, void* creator, void* context, void*, SWIFT_CONTEXT void* self) {
+    if (creator != nullptr) nib_set_next_controller_creator(creator, context);
+    void* controller = controller_from(self, swift_string_to_utf8(identifier));
+    nib_set_next_controller_creator(nullptr, nullptr);
+    return controller != nullptr ? object_retain(controller) : nullptr;
+}
+
 void* controller_from(void* storyboard, const std::string& identifier) {
     const auto found = storyboards().find(storyboard);
     if (found == storyboards().end()) return nullptr;
@@ -746,6 +756,10 @@ const void* uikit_method_for_selector(const std::string& selector) {
     if (const void* layout = uikit_layout_method_for_selector(selector)) return layout;
     if (const void* collection = uikit_collection_method_for_selector(selector)) return collection;
     return uikit_color_method_for_selector(selector);
+}
+
+void add_view_symbols(SymbolMap& table) {
+    table.insert({{"$sSo12UIStoryboardC5UIKitE25instantiateViewController10identifier7creatorxSS_xSgSo7NSCoderCcSgtSo06UIViewE0CRbzlF", reinterpret_cast<void*>(storyboard_with_creator)}});
 }
 
 void register_view_classes() {

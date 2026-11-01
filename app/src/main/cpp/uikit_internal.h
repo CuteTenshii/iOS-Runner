@@ -29,9 +29,12 @@ struct Rect4 {
 std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard, void* externals = nullptr);
 const void* nib_init_with_coder();
 void register_nib_classes();
+// The next controller a nib builds comes from this Swift closure instead of initWithCoder:.
+void nib_set_next_controller_creator(void* creator, void* context);
 void register_view_classes();
 void register_collection_classes();
 void add_collection_symbols(SymbolMap& table);
+void add_view_symbols(SymbolMap& table);
 // A UINib's contents, from the file it names or the archive a storyboard embedded in it.
 std::vector<void*> nib_instantiate_object(void* nib, void* owner);
 

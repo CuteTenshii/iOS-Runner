@@ -409,6 +409,25 @@ SWIFTCC void* button_init(int64_t, void* action) {
     return button;
 }
 
+// The host draws one button style and plain cell backgrounds, so these structs are accepted and not read.
+SWIFTCC void style_ignore(uint64_t, uint64_t, uint64_t, uint64_t, SWIFT_CONTEXT void*) {}
+SWIFTCC void style_box(SWIFT_OUT void** out) { *out = object_retain(objc_framework_object("UIStyleBox")); }
+SWIFTCC void* style_nil() { return nullptr; }
+void style_modify_end(void*, bool) {}
+struct StyleModify {
+    void (*finish)(void*, bool);
+    void** value;
+};
+SWIFTCC StyleModify style_modify(void*, SWIFT_CONTEXT void*) {
+    static void* scratch = object_retain(objc_framework_object("UIStyleBox"));
+    return {style_modify_end, &scratch};
+}
+SWIFTCC void button_get_configuration(SWIFT_OUT void** out, SWIFT_CONTEXT void* self) {
+    void* configuration = property_get_object(self, "swiftConfiguration");
+    *out = configuration != nullptr ? object_retain(configuration) : nullptr;
+}
+SWIFTCC void button_set_configuration(void** value, SWIFT_CONTEXT void* self) { property_set_object(self, "swiftConfiguration", *value); }
+
 void* list_configuration_box() { return objc_framework_object("UICollectionLayoutListConfiguration"); }
 SWIFTCC void list_configuration_init(SWIFT_OUT void** out, uint64_t) { *out = list_configuration_box(); }
 // The host draws its own lists, so a list's looks are accepted and not kept.
@@ -506,6 +525,10 @@ void run_primary_action(void* action) {
 }
 
 void register_collection_classes() {
+    // Attributed text is drawn as plain text, so its paragraph settings have nothing to change.
+    for (const char* setter : {"setAlignment:", "setLineBreakMode:", "setLineSpacing:", "setParagraphSpacing:", "setParagraphSpacingBefore:", "setFirstLineHeadIndent:", "setHeadIndent:", "setTailIndent:", "setMinimumLineHeight:", "setMaximumLineHeight:", "setLineHeightMultiple:"}) {
+        objc_register_method((std::string("-[NSMutableParagraphStyle ") + setter + "]").c_str(), reinterpret_cast<const void*>(+[](void*, const char*) {}));
+    }
     objc_register_method("-[UITableViewController numberOfSectionsInTableView:]", reinterpret_cast<const void*>(controller_section_count));
     objc_register_method("-[UITableViewController tableView:numberOfRowsInSection:]", reinterpret_cast<const void*>(controller_row_count));
     objc_register_method("-[UITableViewController tableView:cellForRowAtIndexPath:]", reinterpret_cast<const void*>(controller_cell));
@@ -536,6 +559,26 @@ void add_collection_symbols(SymbolMap& table) {
         {"$sSo15UIBarButtonItemC5UIKitE06systemC013primaryAction4menuABSo0ab6SystemC0V_So8UIActionCSgSo6UIMenuCSgtcfC", reinterpret_cast<void*>(bar_item_system_init)},
         {"$sSo15UIBarButtonItemC5UIKitE5title5image13primaryAction4menuABSSSg_So7UIImageCSgSo8UIActionCSgSo6UIMenuCSgtcfC", reinterpret_cast<void*>(bar_item_title_init)},
         {"$sSo8UIButtonC5UIKitE4type13primaryActionABSo0A4TypeV_So8UIActionCSgtcfC", reinterpret_cast<void*>(button_init)},
+        {"$s5UIKit25UIBackgroundConfigurationV12cornerRadius12CoreGraphics7CGFloatVvs", reinterpret_cast<void*>(style_ignore)},
+        {"$s5UIKit25UIBackgroundConfigurationV12visualEffectSo08UIVisualE0CSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$s5UIKit25UIBackgroundConfigurationV13listPlainCellACyFZ", reinterpret_cast<void*>(style_box)},
+        {"$s5UIKit25UIBackgroundConfigurationV15backgroundColorSo7UIColorCSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$s5UIKit25UIBackgroundConfigurationV15listGroupedCellACyFZ", reinterpret_cast<void*>(style_box)},
+        {"$s5UIKit25UIBackgroundConfigurationV26backgroundColorTransformerAA015UIConfigurationeF0VSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$s5UIKit25UIBackgroundConfigurationV5clearACyFZ", reinterpret_cast<void*>(style_box)},
+        {"$s5UIKit25UIBackgroundConfigurationV5imageSo7UIImageCSgvg", reinterpret_cast<void*>(style_nil)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV10backgroundAC012UIBackgroundC0VvM", reinterpret_cast<void*>(style_modify)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV10backgroundAC012UIBackgroundC0Vvg", reinterpret_cast<void*>(style_box)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV10backgroundAC012UIBackgroundC0Vvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV11cornerStyleAE06CornerE0Ovs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV13contentInsetsSo017NSDirectionalEdgeE0Vvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV18titleLineBreakModeSo06NSLinefG0Vvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV19baseForegroundColorSo7UIColorCSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV30titleTextAttributesTransformerAC015UIConfigurationefG0VSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV5imageSo7UIImageCSgvs", reinterpret_cast<void*>(style_ignore)},
+        {"$sSo8UIButtonC5UIKitE13ConfigurationV5plainAEyFZ", reinterpret_cast<void*>(style_box)},
+        {"$sSo8UIButtonC5UIKitE13configurationAbCE13ConfigurationVSgvg", reinterpret_cast<void*>(button_get_configuration)},
+        {"$sSo8UIButtonC5UIKitE13configurationAbCE13ConfigurationVSgvs", reinterpret_cast<void*>(button_set_configuration)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV10appearanceA2C10AppearanceO_tcfC", reinterpret_cast<void*>(list_configuration_init)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV15showsSeparatorsSbvs", reinterpret_cast<void*>(list_configuration_ignore)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV15backgroundColorSo7UIColorCSgvs", reinterpret_cast<void*>(list_configuration_ignore)},

@@ -14,6 +14,7 @@
 #include "plist.h"
 #include "swift_abi.h"
 #include "uikit_internal.h"
+#include "uikit_shim.h"
 
 using foundation::new_nsarray;
 using foundation::new_nsstring;
@@ -245,6 +246,10 @@ void apply_values(void* self, NibArchive& archive, uint32_t index) {
     finish_decoded_object(self, object.class_name);
 }
 
+using ControllerCreator = SWIFTCC void* (*)(void* coder, SWIFT_CONTEXT void* context);
+ControllerCreator g_controller_creator = nullptr;
+void* g_controller_creator_context = nullptr;
+
 std::string object_data_bytes(const NibArchive& archive, uint32_t index) {
     const NibValue* bytes = value_named(archive.objects[index], "NS.bytes");
     return bytes != nullptr ? bytes->data : std::string();
@@ -288,6 +293,14 @@ void* build_object(NibArchive& archive, uint32_t index) {
         if (objc_framework_class_name(cls).empty() && cls != nullptr) {
             void* decoder = objc_framework_object("UINibDecoder");
             decoders()[decoder] = {&archive, index};
+            if (g_controller_creator != nullptr && uikit_class_inherits(objc_framework_root_of(object.instance), "UIViewController")) {
+                // The app's own initializer, which takes the coder along with whatever else it wants.
+                const ControllerCreator creator = g_controller_creator;
+                void* context = g_controller_creator_context;
+                g_controller_creator = nullptr;
+                object.instance = creator(decoder, context);
+                return object.instance;
+            }
             using InitWithCoder = void* (*)(void*, const char*, void*);
             object.instance = reinterpret_cast<InitWithCoder>(const_cast<void*>(objc_method_for(object.instance, "initWithCoder:")))(object.instance, "initWithCoder:", decoder);
         } else {
@@ -429,6 +442,11 @@ std::vector<void*> instantiate_archive(const std::string& data, const std::strin
     return top_objects;
 }
 }  // namespace
+
+void nib_set_next_controller_creator(void* creator, void* context) {
+    g_controller_creator = reinterpret_cast<ControllerCreator>(creator);
+    g_controller_creator_context = context;
+}
 
 void register_nib_classes() {
     objc_register_method("-[UINibDecoder decodeObjectForKey:]", reinterpret_cast<const void*>(decode_object));
