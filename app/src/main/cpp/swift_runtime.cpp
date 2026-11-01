@@ -103,7 +103,8 @@ ResilientWitnesses resilient_witnesses(const char* conformance) {
 extern "C" {
 
 void* rt_swift_getWitnessTable(const char* conformance, void* type, void* arguments) {
-    static std::mutex lock;
+    // Instantiating a table can ask for another one, which is the same thread re-entering this.
+    static std::recursive_mutex lock;
     static std::map<std::pair<const void*, void*>, void**> cache;
     const std::lock_guard guard(lock);
     const auto key = std::make_pair(static_cast<const void*>(conformance), type);
@@ -129,11 +130,11 @@ void* rt_swift_getWitnessTable(const char* conformance, void* type, void* argume
     auto** table = allocation + private_words;
     memcpy(table, pattern, words * sizeof(void*));
     table[0] = const_cast<char*>(conformance);
+    cache[key] = table;
     using Instantiator = void (*)(void**, void*, void*);
     if (const void* instantiator = relative_direct(generic + 4)) {
         reinterpret_cast<Instantiator>(const_cast<void*>(instantiator))(table, type, arguments);
     }
-    cache[key] = table;
     return table;
 }
 
