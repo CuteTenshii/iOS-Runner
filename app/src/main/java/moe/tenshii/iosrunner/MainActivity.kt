@@ -1,6 +1,7 @@
 package moe.tenshii.iosrunner
 
 import android.app.Activity
+import android.content.pm.ApplicationInfo
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -27,9 +28,17 @@ class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val mainThread = Handler(Looper.getMainLooper())
 
+    // Debug builds let tools/phone-run.sh start an app by its bundle id, since RunActivity isn't exported.
+    private fun runRequestedApp() {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        val app = intent?.getStringExtra(EXTRA_RUN)?.let(library::find) ?: return
+        startActivity(RunActivity.intent(this, app))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         library = AppLibrary(this)
+        runRequestedApp()
 
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         importButton = Button(this).apply {
@@ -149,6 +158,7 @@ class MainActivity : Activity() {
     }
 
     private companion object {
+        private const val EXTRA_RUN = "run"
         const val REQUEST_PICK = 1
     }
 }

@@ -16,7 +16,15 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
-            cmake { cppFlags += "-std=c++20" }
+            cmake {
+                cppFlags += "-std=c++20"
+                if (providers.gradleProperty("iosrunner.efence").isPresent) {
+                    arguments += "-DIOSRUNNER_EFENCE=ON"
+                    providers.gradleProperty("iosrunner.efenceAfter").orNull?.takeIf { it.isNotEmpty() }?.let {
+                        arguments += "-DIOSRUNNER_EFENCE_AFTER=$it"
+                    }
+                }
+            }
         }
     }
     externalNativeBuild {

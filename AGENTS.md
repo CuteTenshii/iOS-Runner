@@ -11,7 +11,7 @@ iOSRunner is an Android app (arm64 only, `minSdk` 30) that runs iOS `.ipa` files
 ./gradlew :app:testDebugUnitTest             # JVM unit tests (only the template test so far)
 ./gradlew :app:testDebugUnitTest --tests 'moe.tenshii.iosrunner.ExampleUnitTest'
 adb install -r -t app/build/outputs/apk/debug/app-debug.apk
-tools/lint.zsh                               # clang-format and clang-tidy; --fix applies the formatting
+tools/lint.sh                               # clang-format and clang-tidy; --fix applies the formatting
 ```
 
 `tools/host-test.sh <ipa>` builds the engine as a static arm64 binary and runs an app under `qemu-aarch64`, with no phone. The host build poisons guest allocations with `0x5b`, and imports the engine can't resolve are printed as `UNRESOLVED:` lines. It is the fastest way to check a change to the engine, and these environment variables extend it:
@@ -22,6 +22,19 @@ tools/lint.zsh                               # clang-format and clang-tidy; --fi
 | `IOSRUNNER_EFENCE=1` | Links `tools/efence.cpp`, a guard-page allocator that turns heap overruns and use-after-free into immediate faults |
 | `IOSRUNNER_TRACE_HEAP=1` | Logs object destruction |
 | `IOSRUNNER_SEED_ACCOUNTS=<file>` | Installs a file as Block Extreme Droite's saved `accounts.json` |
+
+`tools/phone-run.sh <bundle id>` does the same on a connected phone, which is where UIKit, Keychain and the other host services are real: it builds, installs, runs the app, and prints why it stopped with the stack symbolized. Its log and screenshot land in `build/phone`.
+
+| Option | Effect |
+|---|---|
+| `-n` | Uses the installed build |
+| `-t SECONDS` | How long to wait before the first tap and after each one (default 15) |
+| `--tap X,Y` | Taps these screen pixels, repeatable |
+| `--guard TEXT` | Links `tools/efence.cpp`, guarding allocations once a log line contains `TEXT`. Guarding everything from launch runs out of memory mappings in larger apps |
+
+Two more tools read an app's files. Run them with `python3 -I` on anything untrusted:
+- `tools/macho.py calls|dis|selector|typeref <binary> ...` lists what a range of guest code calls, with selector names filled in. A crash's `app+0xOFFSET` is address `0x100000000 + OFFSET`.
+- `tools/nibdump.py <file.nib>` prints a compiled nib's objects and keys.
 
 On a phone, the guest's log is at `cache/engine.log`, read with `adb shell run-as moe.tenshii.iosrunner cat cache/engine.log`. Installed apps are under `files/apps/<bundle id>/`. `logcat` can be empty on some phones, so fatal VM errors and uncaught C++ exceptions are also copied into this log.
 

@@ -256,6 +256,10 @@ void engine_log(const char* format, ...) {
     va_start(arguments, format);
     const int length = vsnprintf(buffer, sizeof buffer, format, arguments);
     va_end(arguments);
+#ifdef IOSRUNNER_EFENCE_AFTER
+    extern bool g_efence_guarding;
+    if (strstr(buffer, IOSRUNNER_EFENCE_AFTER) != nullptr) g_efence_guarding = true;
+#endif
     if (length > 0) write_log_line(buffer, strnlen(buffer, sizeof buffer));
 }
 

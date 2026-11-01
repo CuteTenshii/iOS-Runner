@@ -5,3 +5,12 @@ add_library(iosrunner SHARED jni_bridge.cpp engine.cpp macho.cpp symbols.cpp pli
 target_compile_options(iosrunner PRIVATE -Wall -Wextra)
 target_link_options(iosrunner PRIVATE -Wl,-z,max-page-size=16384)
 target_link_libraries(iosrunner PRIVATE log)
+
+# A debugging aid for heap corruption, turned on through the iosrunner.efence Gradle property.
+if(IOSRUNNER_EFENCE)
+    target_sources(iosrunner PRIVATE ../../../../tools/efence.cpp)
+    target_link_options(iosrunner PRIVATE -Wl,--wrap=malloc,--wrap=calloc,--wrap=free,--wrap=realloc,--wrap=posix_memalign,--wrap=malloc_usable_size)
+    if(IOSRUNNER_EFENCE_AFTER)
+        target_compile_definitions(iosrunner PRIVATE "IOSRUNNER_EFENCE_AFTER=\"${IOSRUNNER_EFENCE_AFTER}\"")
+    endif()
+endif()
