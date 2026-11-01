@@ -126,6 +126,22 @@ HttpResult perform_http(const std::string& url, const std::string& method, const
     return out;
 }
 
+jmethodID g_host_query = nullptr;
+
+std::string perform_host_query(const std::string& kind, const std::string& argument) {
+    JNIEnv* env = guest_env();
+    jstring java_kind = to_java_string(env, kind.c_str());
+    jstring java_argument = to_java_string(env, argument.c_str());
+    auto answer = static_cast<jstring>(env->CallStaticObjectMethod(g_activity_class, g_host_query, java_kind, java_argument));
+    report_exception(env, kind.c_str());
+    env->DeleteLocalRef(java_kind);
+    env->DeleteLocalRef(java_argument);
+    if (answer == nullptr) return {};
+    std::string text = to_string(env, answer);
+    env->DeleteLocalRef(answer);
+    return text;
+}
+
 std::string read_cookies() {
     JNIEnv* env = guest_env();
     auto cookies = static_cast<jstring>(env->CallStaticObjectMethod(g_activity_class, g_cookies));
@@ -149,8 +165,14 @@ extern "C" JNIEXPORT jint JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativ
     engine_set_http_handler(perform_http);
     g_cookies = env->GetStaticMethodID(activity_class, "readCookies", "()Ljava/lang/String;");
     engine_set_cookie_handler(read_cookies);
+    g_host_query = env->GetStaticMethodID(activity_class, "hostQuery", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    engine_set_host_query_handler(perform_host_query);
     localization_set_language(to_string(env, language));
     return run_app_bundle(to_string(env, bundle_dir), to_string(env, executable), to_string(env, log_path));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeHostReply(JNIEnv* env, jclass, jint id, jstring payload) {
+    engine_host_reply(id, to_string(env, payload));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_moe_tenshii_iosrunner_GuestActivity_nativeAction(JNIEnv*, jclass, jint action) {
