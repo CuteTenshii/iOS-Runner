@@ -124,6 +124,8 @@ struct NSNumberObject {
     HeapObject header;
     int64_t value;
     bool is_bool;
+    bool is_real;
+    double real;
 };
 
 extern void* g_nsnumber_class;

@@ -1,6 +1,9 @@
 #include "foundation_internal.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <initializer_list>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -610,6 +613,46 @@ void* new_progress(int64_t total) {
     return progress;
 }
 
+void* new_real_number(double value) {
+    auto* number = static_cast<NSNumberObject*>(new_nsnumber(static_cast<int64_t>(value), false));
+    number->is_real = true;
+    number->real = value;
+    return number;
+}
+
+double number_as_double(const void* self) {
+    const auto* number = static_cast<const NSNumberObject*>(self);
+    return number->is_real ? number->real : static_cast<double>(number->value);
+}
+
+void register_number_methods() {
+    const auto from_word = reinterpret_cast<const void*>(+[](void*, const char*, int64_t value) { return new_nsnumber(value, false); });
+    const auto from_int32 = reinterpret_cast<const void*>(+[](void*, const char*, int32_t value) { return new_nsnumber(value, false); });
+    const auto from_uint32 = reinterpret_cast<const void*>(+[](void*, const char*, uint32_t value) { return new_nsnumber(value, false); });
+    const auto from_int16 = reinterpret_cast<const void*>(+[](void*, const char*, int16_t value) { return new_nsnumber(value, false); });
+    const auto from_bool = reinterpret_cast<const void*>(+[](void*, const char*, bool value) { return new_nsnumber(value ? 1 : 0, true); });
+    const auto from_double = reinterpret_cast<const void*>(+[](void*, const char*, double value) { return new_real_number(value); });
+    const auto from_float = reinterpret_cast<const void*>(+[](void*, const char*, float value) { return new_real_number(value); });
+    for (const std::string prefix : {"-[NSNumber initWith", "+[NSNumber numberWith"}) {
+        for (const auto& [name, method] : std::initializer_list<std::pair<const char*, const void*>>{{"Integer:]", from_word}, {"LongLong:]", from_word}, {"Long:]", from_word}, {"UnsignedInteger:]", from_word}, {"UnsignedLongLong:]", from_word}, {"Int:]", from_int32}, {"UnsignedInt:]", from_uint32}, {"Short:]", from_int16}, {"Bool:]", from_bool}, {"Double:]", from_double}, {"Float:]", from_float}}) {
+            objc_register_method((prefix + name).c_str(), method);
+        }
+    }
+    const auto as_word = reinterpret_cast<const void*>(+[](void* self, const char*) { return static_cast<NSNumberObject*>(self)->value; });
+    for (const char* selector : {"-[NSNumber integerValue]", "-[NSNumber longLongValue]", "-[NSNumber longValue]", "-[NSNumber unsignedIntegerValue]", "-[NSNumber unsignedLongLongValue]"}) objc_register_method(selector, as_word);
+    objc_register_method("-[NSNumber intValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return static_cast<int32_t>(static_cast<NSNumberObject*>(self)->value); }));
+    objc_register_method("-[NSNumber boolValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return number_as_double(self) != 0; }));
+    objc_register_method("-[NSNumber doubleValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return number_as_double(self); }));
+    objc_register_method("-[NSNumber floatValue]", reinterpret_cast<const void*>(+[](void* self, const char*) { return static_cast<float>(number_as_double(self)); }));
+    objc_register_method("-[NSNumber stringValue]", reinterpret_cast<const void*>(+[](void* self, const char*) -> void* {
+        const auto* number = static_cast<NSNumberObject*>(self);
+        if (!number->is_real) return new_nsstring(std::to_string(number->value));
+        char text[40];
+        snprintf(text, sizeof text, "%.17g", number->real);
+        return new_nsstring(text);
+    }));
+}
+
 void register_progress_methods() {
     const auto with_total = reinterpret_cast<const void*>(+[](void*, const char*, int64_t total) { return new_progress(total); });
     objc_register_method("+[NSProgress discreteProgressWithTotalUnitCount:]", with_total);
@@ -657,6 +700,7 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
     objc_register_method("-[NSProcessInfo globallyUniqueString]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(uuid4()); }));
     register_progress_methods();
+    register_number_methods();
     // One shared object: main-thread work runs from the guest's run loop, not from this one.
     objc_register_method("+[NSRunLoop mainRunLoop]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* {
                              static void* const loop = objc_framework_object("NSRunLoop");
