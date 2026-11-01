@@ -208,6 +208,13 @@ std::vector<void*> object_array_items(void* array) {
         int64_t count;
         memcpy(&count, static_cast<char*>(bridged) + kArrayCountOffset, sizeof count);
         auto* elements = reinterpret_cast<void**>(static_cast<char*>(bridged) + kArrayElementsStart);
+        // A [String] holds its strings inline, which callers expect as objects.
+        if (static_cast<foundation::BridgedCollection*>(array)->element_type == resolve_mangled_type("SS", nullptr)) {
+            std::vector<void*> strings;
+            const auto* text = reinterpret_cast<const SwiftString*>(elements);
+            for (int64_t i = 0; i < count; ++i) strings.push_back(foundation::new_nsstring(swift_string_to_utf8(text[i])));
+            return strings;
+        }
         return std::vector<void*>(elements, elements + count);
     }
     return *static_cast<foundation::NSArrayObject*>(array)->items;

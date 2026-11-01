@@ -177,18 +177,25 @@ bool is_on_current_stack(const void* object) {
     return address >= low && address < high;
 }
 
+// In an async function a promoted object lives in task-allocated memory, off the thread's stack, but is marked immortal.
+bool is_stack_promoted(const void* object) {
+    uint64_t references;
+    memcpy(&references, static_cast<const char*>(object) + sizeof(void*), sizeof references);
+    return references == kImmortal || is_on_current_stack(object);
+}
+
 void rt_swift_deallocObject(void* object, size_t, size_t) {
 #ifdef IOSRUNNER_TRACE_HEAP
     engine_log("HEAP deallocObject %p", object);
 #endif
-    if (!is_on_current_stack(object)) free(object);
+    if (!is_stack_promoted(object)) free(object);
 }
 
 void rt_swift_deallocClassInstance(void* object, size_t, size_t) {
 #ifdef IOSRUNNER_TRACE_HEAP
     engine_log("HEAP deallocClassInstance %p", object);
 #endif
-    if (!is_on_current_stack(object)) free(object);
+    if (!is_stack_promoted(object)) free(object);
 }
 void* rt_swift_setDeallocating(void* object) { return object; }
 
