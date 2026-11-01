@@ -219,6 +219,13 @@ void* bundle_with_identifier(void*, const char*, void* identifier) {
     return reinterpret_cast<MainBundle>(const_cast<void*>(objc_method_for(cls, "mainBundle")))(cls, "mainBundle");
 }
 
+// Only the app's own bundle can be loaded; another directory has nothing a shim could read as a bundle yet.
+void* bundle_with_url(void*, const char*, void* url) {
+    std::string path = nsobject_path(url);
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    return path == engine_bundle_dir() ? bundle_with_identifier(nullptr, nullptr, nullptr) : nullptr;
+}
+
 void* bundle_all(void*, const char*) {
     auto* array = static_cast<NSArrayObject*>(new_nsarray());
     array->items->push_back(bundle_with_identifier(nullptr, nullptr, nullptr));
@@ -882,7 +889,7 @@ void register_foundation_url_classes() {
     objc_register_method("-[NSBundle pathForResource:ofType:]", reinterpret_cast<const void*>(bundle_path_for_resource));
     objc_register_method("-[NSBundle URLsForResourcesWithExtension:subdirectory:]", reinterpret_cast<const void*>(bundle_urls_with_extension));
     objc_register_method("-[NSBundle initWithURL:]", reinterpret_cast<const void*>(bundle_main_for_any));
-    objc_register_method("+[NSBundle bundleWithURL:]", reinterpret_cast<const void*>(bundle_with_identifier));
+    objc_register_method("+[NSBundle bundleWithURL:]", reinterpret_cast<const void*>(bundle_with_url));
     objc_register_method("+[NSBundle bundleWithIdentifier:]", reinterpret_cast<const void*>(bundle_with_identifier));
     objc_register_method("+[NSBundle allBundles]", reinterpret_cast<const void*>(bundle_all));
     objc_register_method("-[NSBundle localizedStringForKey:value:table:]", reinterpret_cast<const void*>(bundle_localized_string));

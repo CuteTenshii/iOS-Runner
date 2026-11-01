@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -62,6 +63,8 @@ std::string text_of(void* view) {
     return inner != nullptr ? nsstring_text(inner) : std::string();
 }
 
+int add_action(std::function<void()> action);
+
 Json describe_view(void* view, double parent_x, double parent_y) {
     double bounds[4], center[4];
     property_get_rect(view, "bounds", bounds);
@@ -86,6 +89,11 @@ Json describe_view(void* view, double parent_x, double parent_y) {
         members.emplace_back("lines", number(static_cast<double>(property_get_word(view, "numberOfLines"))));
     }
     if (property_get_word(view, "hidden") != 0) members.emplace_back("hidden", number(1));
+    if (void* target = property_get_object(view, "actionTarget")) {
+        void* selector = property_get_object(view, "actionSelector");
+        const int id = add_action([target, selector, view] { objc_send(target, nsstring_text(selector).c_str(), view); });
+        members.emplace_back("a", number(id));
+    }
     std::vector<Json> children;
     auto* subviews = static_cast<NSArrayObject*>(property_get_object(view, "subviews"));
     if (subviews != nullptr) {
@@ -102,6 +110,94 @@ void* visible_controller(void* controller) {
 }
 
 std::string g_last_tree;
+std::string g_last_status_bar;
+std::vector<std::function<void()>> g_actions;
+
+int add_action(std::function<void()> action) {
+    g_actions.push_back(std::move(action));
+    return static_cast<int>(g_actions.size()) - 1;
+}
+
+Json tree_leaf(const char* kind, std::vector<std::pair<std::string, Json>> members) {
+    members.insert(members.begin(), {"k", json_text(kind)});
+    return object_of(std::move(members));
+}
+
+std::string text_property(void* object, const char* key) {
+    void* value = property_get_object(object, key);
+    return value != nullptr ? nsstring_text(value) : std::string();
+}
+
+// The screen an action or redraw concerns, down through containers and presented controllers.
+void* top_controller(void* controller) {
+    if (controller == nullptr) return nullptr;
+    if (void* presented = property_get_object(controller, "presentedViewController"); presented != nullptr && !object_is_kind(presented, "UIAlertController")) return top_controller(presented);
+    if (object_is_kind(controller, "UINavigationController")) {
+        const auto items = object_array_items(property_get_object(controller, "viewControllers"));
+        if (!items.empty()) return top_controller(items.back());
+    }
+    if (object_is_kind(controller, "UITabBarController")) {
+        const auto items = object_array_items(property_get_object(controller, "viewControllers"));
+        if (!items.empty()) {
+            const auto index = static_cast<size_t>(property_get_word(controller, "selectedIndex"));
+            return top_controller(items[index < items.size() ? index : 0]);
+        }
+    }
+    return controller;
+}
+
+void* presented_alert(void* controller) {
+    for (; controller != nullptr; controller = property_get_object(controller, "presentedViewController")) {
+        if (object_is_kind(controller, "UIAlertController")) return controller;
+    }
+    return nullptr;
+}
+
+Json describe_alert(void* alert, void* window_root) {
+    std::vector<Json> children;
+    if (const std::string message = text_property(alert, "message"); !message.empty()) children.push_back(tree_leaf("text", {{"t", json_text(message)}}));
+    for (void* action : object_array_items(property_get_object(alert, "actions"))) {
+        const int id = add_action([action, alert, window_root] {
+            uikit_dismiss_presented(alert);
+            uikit_run_alert_action(action);
+        });
+        children.push_back(tree_leaf("button", {{"a", number(id)}, {"c", array_of({tree_leaf("text", {{"t", json_text(text_property(action, "title"))}})})}}));
+    }
+    // Every press also sends this one, which has nothing left to do by then.
+    const int dismissed = add_action([] {});
+    return tree_leaf("alert", {{"d", number(dismissed)}, {"t", json_text(text_property(alert, "title"))}, {"c", array_of(std::move(children))}});
+}
+
+constexpr int64_t kStatusBarLightContent = 1, kStatusBarDarkContent = 3;
+
+int64_t status_bar_style(void* controller) {
+    if (controller != nullptr && objc_responds(controller, "childViewControllerForStatusBarStyle")) {
+        using Child = void* (*)(void*, const char*);
+        void* child = reinterpret_cast<Child>(const_cast<void*>(objc_method_for(controller, "childViewControllerForStatusBarStyle")))(controller, "childViewControllerForStatusBarStyle");
+        if (child != nullptr) return status_bar_style(child);
+    }
+    if (controller == nullptr || !objc_responds(controller, "preferredStatusBarStyle")) return 0;
+    using Style = int64_t (*)(void*, const char*);
+    return reinterpret_cast<Style>(const_cast<void*>(objc_method_for(controller, "preferredStatusBarStyle")))(controller, "preferredStatusBarStyle");
+}
+
+bool status_bar_hidden(void* controller) {
+    if (controller == nullptr || !objc_responds(controller, "prefersStatusBarHidden")) return false;
+    using Hidden = bool (*)(void*, const char*);
+    return reinterpret_cast<Hidden>(const_cast<void*>(objc_method_for(controller, "prefersStatusBarHidden")))(controller, "prefersStatusBarHidden");
+}
+
+void update_status_bar(void* controller, void* view) {
+    const int64_t style = status_bar_style(controller);
+    Json state = tree_leaf("statusbar", {{"style", json_text(style == kStatusBarLightContent ? "light" : style == kStatusBarDarkContent ? "dark"
+                                                                                                                                        : "default")},
+                                         {"hidden", number(status_bar_hidden(controller) ? 1 : 0)},
+                                         {"bg", json_text(color_text(property_get_object(view, "backgroundColor")))}});
+    const std::string text = json_write(state);
+    if (text == g_last_status_bar) return;
+    g_last_status_bar = text;
+    engine_emit("statusbar", text);
+}
 
 constexpr int64_t kFlexibleLeft = 1, kFlexibleWidth = 2, kFlexibleRight = 4, kFlexibleTop = 8, kFlexibleHeight = 16, kFlexibleBottom = 32;
 
@@ -168,6 +264,10 @@ void* system_color(void*, const char*) { return make_color(red / 255.0, green / 
 
 }  // namespace
 
+void uikit_autoresize_children(void* view, double delta_width, double delta_height) {
+    if (delta_width != 0 || delta_height != 0) autoresize_children(view, delta_width, delta_height);
+}
+
 const void* uikit_color_method_for_selector(const std::string& selector) {
     static const std::unordered_map<std::string_view, const void*> table = {
         {"colorWithRed:green:blue:alpha:", reinterpret_cast<const void*>(color_with_rgba)},
@@ -220,7 +320,8 @@ Rect4 window_size_rect() {
 void uikit_render_if_changed() {
     void* window = key_window();
     if (window == nullptr) return;
-    void* controller = visible_controller(property_get_object(window, "rootViewController"));
+    void* root = property_get_object(window, "rootViewController");
+    void* controller = top_controller(root);
     if (controller == nullptr) return;
     void* view = property_get_object(controller, "view");
     if (view == nullptr) return;
@@ -233,10 +334,21 @@ void uikit_render_if_changed() {
     property_set_rect(view, "bounds", bounds);
     property_set_rect(view, "center", center);
     uikit_solve_layout(view, screen.width, screen.height, 0);
-    const std::string tree = json_write(array_of({describe_view(view, 0, 0)}));
+    update_status_bar(controller, view);
+    g_actions.clear();
+    std::vector<Json> nodes = {describe_view(view, 0, 0)};
+    if (void* alert = presented_alert(root)) nodes.push_back(describe_alert(alert, root));
+    const std::string tree = json_write(array_of(std::move(nodes)));
     if (tree == g_last_tree) return;
     g_last_tree = tree;
     engine_emit("tree", tree);
+}
+
+void uikit_run_action(int action) {
+    if (action < 0 || static_cast<size_t>(action) >= g_actions.size()) return;
+    // Copied, as an action may redraw and replace the list it lives in.
+    const std::function<void()> run = g_actions[static_cast<size_t>(action)];
+    run();
 }
 
 }  // namespace uikit

@@ -51,6 +51,10 @@ bool window_is_visible();
 void* key_window();
 Rect4 window_size_rect();
 void uikit_render_if_changed();
+void uikit_run_action(int action);
+void uikit_dismiss_presented(void* controller);
+void uikit_run_alert_action(void* action);
+void uikit_autoresize_children(void* view, double delta_width, double delta_height);
 
 void property_set_rect(void* object, const std::string& key, const double* values);
 void property_get_rect(void* object, const std::string& key, double* out);

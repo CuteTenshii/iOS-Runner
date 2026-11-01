@@ -21,6 +21,8 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.inputmethod.EditorInfo
@@ -46,6 +48,7 @@ import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 
 /** Hosts the guest app in the isolated :engine process and draws the view tree it reports. */
 class GuestActivity : Activity() {
@@ -114,6 +117,7 @@ class GuestActivity : Activity() {
                 draw()
             }
             "open" -> openExternal(payload)
+            "statusbar" -> applyStatusBar(JSONObject(payload))
             "webnew" -> createWebView(JSONObject(payload))
             "webload" -> JSONObject(payload).let { webViews[it.getInt("id")]?.loadUrl(it.getString("url")) }
             "webjs" -> runScript(JSONObject(payload))
@@ -383,6 +387,22 @@ class GuestActivity : Activity() {
         }
     }
 
+    /** Follows what the app asks of the status bar; the bars show the root's background through its insets. */
+    private fun applyStatusBar(state: JSONObject) {
+        val bg = state.optString("bg")
+        val background = if (bg.isEmpty()) themeColor(android.R.attr.colorBackground) else Color.parseColor(bg)
+        root.setBackgroundColor(background)
+        val darkIcons = when (state.optString("style")) {
+            "dark" -> true
+            "light" -> false
+            else -> Color.luminance(background) > HALF_LUMINANCE
+        }
+        val controller = window.insetsController ?: return
+        val lightBars = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        controller.setSystemBarsAppearance(if (darkIcons) lightBars else 0, lightBars)
+        if (state.optInt("hidden") != 0) controller.hide(WindowInsets.Type.statusBars()) else controller.show(WindowInsets.Type.statusBars())
+    }
+
     private fun screenSizeInPoints(): String {
         val density = resources.displayMetrics.density
         return JSONObject().put("w", (root.width / density).toDouble()).put("h", (root.height / density).toDouble()).toString()
@@ -394,6 +414,8 @@ class GuestActivity : Activity() {
         val bg = node.optString("bg")
         if (bg.isNotEmpty()) frame.setBackgroundColor(Color.parseColor(bg))
         if (node.optInt("hidden") != 0) frame.visibility = View.GONE
+        val action = node.optInt("a", -1)
+        if (action >= 0) frame.setOnClickListener { nativeAction(action) }
         val text = node.optString("text")
         if (text.isNotEmpty()) {
             frame.addView(TextView(this).apply {
@@ -416,9 +438,17 @@ class GuestActivity : Activity() {
         return frame
     }
 
-    private fun uiViewParams(node: JSONObject) = FrameLayout.LayoutParams(dp(node.optDouble("w").toInt()), dp(node.optDouble("h").toInt())).apply {
-        leftMargin = dp(node.optDouble("x").toInt())
-        topMargin = dp(node.optDouble("y").toInt())
+    // Points to pixels by rounding each edge, so neighbouring views still meet and nothing falls short of the screen.
+    private fun uiViewParams(node: JSONObject): FrameLayout.LayoutParams {
+        val density = resources.displayMetrics.density
+        val left = (node.optDouble("x") * density).roundToInt()
+        val top = (node.optDouble("y") * density).roundToInt()
+        val right = ((node.optDouble("x") + node.optDouble("w")) * density).roundToInt()
+        val bottom = ((node.optDouble("y") + node.optDouble("h")) * density).roundToInt()
+        return FrameLayout.LayoutParams(right - left, bottom - top).apply {
+            leftMargin = left
+            topMargin = top
+        }
     }
 
     private fun buildChildren(node: JSONObject, parent: ViewGroup, path: String) {
@@ -940,6 +970,7 @@ class GuestActivity : Activity() {
         private const val COOKIE_PREFERENCES = "guest_cookies"
         private const val COOKIE_HOSTS = "hosts"
         private const val HIDDEN_WEB_WIDTH_DP = 360
+        private const val HALF_LUMINANCE = 0.5f
         private const val UI_TEXT_ALIGN_CENTER = 1
         private const val UI_TEXT_ALIGN_RIGHT = 2
         private const val HIDDEN_WEB_HEIGHT_DP = 640

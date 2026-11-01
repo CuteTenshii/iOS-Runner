@@ -201,6 +201,18 @@ void* view_margins_guide(void* self, const char*) { return get_or_create(self, "
 void* tab_bar_item(void* self, const char*) { return get_or_create(self, "tabBarItem", "UITabBarItem"); }
 void* navigation_item(void* self, const char*) { return get_or_create(self, "navigationItem", "UINavigationItem"); }
 
+// Controllers here always fill the screen, and setup code commonly copies this size in viewDidLoad.
+void size_to_screen(void* view) {
+    const Rect4 screen = window_size_rect();
+    double previous[4];
+    property_get_rect(view, "bounds", previous);
+    uikit_autoresize_children(view, screen.width - previous[2], screen.height - previous[3]);
+    const double bounds[4] = {0, 0, screen.width, screen.height};
+    const double center[4] = {screen.width / 2, screen.height / 2, 0, 0};
+    property_set_rect(view, "bounds", bounds);
+    property_set_rect(view, "center", center);
+}
+
 void load_view_of(void* controller) {
     if (property_get_object(controller, "view") != nullptr) return;
     void* name = property_get_object(controller, "nibName");
@@ -214,7 +226,9 @@ void load_view_of(void* controller) {
         void* view = new_named("UIView");
         property_set_object(controller, "view", view);
     }
-    property_set_object(property_get_object(controller, "view"), "viewController", controller);
+    void* view = property_get_object(controller, "view");
+    property_set_object(view, "viewController", controller);
+    size_to_screen(view);
     send_if_responds(controller, "viewDidLoad");
 }
 
@@ -382,10 +396,29 @@ void tab_set_selected_index(void* self, const char*, int64_t index) {
     }
 }
 
+void* alert_make(void*, const char*, void* title, void* message, int64_t style) {
+    void* alert = objc_framework_object("UIAlertController");
+    property_set_object(alert, "title", title);
+    property_set_object(alert, "message", message);
+    property_set_word(alert, "preferredStyle", style);
+    return alert;
+}
+
+void* alert_action_make(void*, const char*, void* title, int64_t style, void* handler) {
+    void* action = objc_framework_object("UIAlertAction");
+    property_set_object(action, "title", title);
+    property_set_word(action, "style", style);
+    if (handler != nullptr) property_set_object(action, "handler", foundation::darwin_block_copy(handler));
+    return action;
+}
+
+void alert_add_action(void* self, const char*, void* action) { array_property(self, "actions")->items->push_back(object_retain(action)); }
+
 void present_controller(void* self, const char*, void* controller, bool, void* completion) {
     property_set_object(self, "presentedViewController", controller);
     property_set_object(controller, "presentingViewController", self);
-    appear(controller);
+    // An alert is drawn by the host as a dialog, and has no view of its own to load.
+    if (!object_is_kind(controller, "UIAlertController")) appear(controller);
     run_block_now(completion);
 }
 
@@ -496,6 +529,18 @@ void set_autolayout_flag(void* self, const char*, bool value) { property_set_wor
 
 }  // namespace
 
+void uikit_dismiss_presented(void* controller) {
+    void* presenter = property_get_object(controller, "presentingViewController");
+    if (presenter != nullptr) property_set_object(presenter, "presentedViewController", nullptr);
+}
+
+void uikit_run_alert_action(void* action) {
+    void* handler = property_get_object(action, "handler");
+    if (handler == nullptr) return;
+    using Invoke = void (*)(void*, void*);
+    reinterpret_cast<Invoke>(static_cast<void**>(handler)[kBlockInvokeWord])(handler, action);
+}
+
 std::string storyboard_directory(void* storyboard) {
     const auto found = storyboards().find(storyboard);
     return found == storyboards().end() ? std::string() : found->second.directory;
@@ -566,6 +611,9 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"initWithRootViewController:", reinterpret_cast<const void*>(nav_init_root)},
         {"selectedViewController", reinterpret_cast<const void*>(tab_selected)},
         {"setSelectedIndex:", reinterpret_cast<const void*>(tab_set_selected_index)},
+        {"alertControllerWithTitle:message:preferredStyle:", reinterpret_cast<const void*>(alert_make)},
+        {"actionWithTitle:style:handler:", reinterpret_cast<const void*>(alert_action_make)},
+        {"addAction:", reinterpret_cast<const void*>(alert_add_action)},
         {"presentViewController:animated:completion:", reinterpret_cast<const void*>(present_controller)},
         {"dismissViewControllerAnimated:completion:", reinterpret_cast<const void*>(dismiss_controller)},
         {"makeKeyAndVisible", reinterpret_cast<const void*>(window_make_visible)},

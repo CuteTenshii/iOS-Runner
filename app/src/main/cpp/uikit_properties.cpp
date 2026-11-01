@@ -215,6 +215,7 @@ std::vector<void*> object_array_items(void* array) {
 
 bool object_is_kind(void* object, const char* framework_class) {
     static const std::map<std::string, std::string> kParents = {
+        {"UIAlertController", "UIViewController"},
         {"UITabBarController", "UIViewController"},
         {"UINavigationController", "UIViewController"},
         {"UITableViewController", "UIViewController"},

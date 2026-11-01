@@ -502,6 +502,10 @@ SWIFTCC void keyed_encode_generic(const void* value, const void* key, void* cont
     encode_value(type, value, new_member(*self, key, container_type), error);
 }
 
+SWIFTCC void keyed_encode_generic_if_present(const void* value, const void* key, void* container_type, void* type, void* witnesses, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
+    if (witnesses_of(type)->get_enum_tag_single_payload(value, 1, type) == 0) keyed_encode_generic(value, key, container_type, type, witnesses, self, error);
+}
+
 SWIFTCC void keyed_encode_optional_string(SwiftString value, const void* key, void* container_type, SWIFT_CONTEXT ContainerBox** self, SWIFT_ERROR void** error) {
     if (value.object != 0) keyed_encode_string(value, key, container_type, self, error);
 }
@@ -590,6 +594,7 @@ void* codable_symbol(std::string_view name) {
         {"$ss22KeyedEncodingContainerV6encode_6forKeyySi_xtKF", reinterpret_cast<void*>(keyed_encode_int)},
         {"$ss22KeyedEncodingContainerV6encode_6forKeyySb_xtKF", reinterpret_cast<void*>(keyed_encode_bool)},
         {"$ss22KeyedEncodingContainerV6encode_6forKeyyqd___xtKSERd__lF", reinterpret_cast<void*>(keyed_encode_generic)},
+        {"$ss22KeyedEncodingContainerV15encodeIfPresent_6forKeyyqd__Sg_xtKSERd__lF", reinterpret_cast<void*>(keyed_encode_generic_if_present)},
         {"$ss22KeyedEncodingContainerV15encodeIfPresent_6forKeyySSSg_xtKF", reinterpret_cast<void*>(keyed_encode_optional_string)},
         {"$ss22KeyedEncodingContainerV15encodeIfPresent_6forKeyySiSg_xtKF", reinterpret_cast<void*>(keyed_encode_optional_int)},
         {"$sSYsSeRzSS8RawValueSYRtzrlE4fromxs7Decoder_p_tKcfC", reinterpret_cast<void*>(raw_representable_init)},
