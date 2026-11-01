@@ -57,6 +57,7 @@ std::string color_text(void* color) {
 }
 
 std::string text_of(void* view) {
+    if (void* title = property_get_object(view, "buttonTitle")) return nsstring_text(title);
     void* text = property_get_object(view, "text");
     if (text != nullptr && objc_framework_class_name(*static_cast<void**>(text)) == "NSString") return nsstring_text(text);
     void* attributed = property_get_object(view, "attributedText");

@@ -203,6 +203,16 @@ void* view_layer(void* self, const char*) { return get_or_create(self, "layer", 
 void* trait_collection(void* self, const char*) { return get_or_create(self, "traitCollection", "UITraitCollection"); }
 void* view_safe_area_guide(void* self, const char*) { return get_or_create(self, "safeAreaLayoutGuide", "UILayoutGuide"); }
 void* view_margins_guide(void* self, const char*) { return get_or_create(self, "layoutMarginsGuide", "UILayoutGuide"); }
+void* button_with_type(void*, const char*, int64_t) { return new_named("UIButton"); }
+void* button_title_label(void* self, const char*) { return get_or_create(self, "titleLabel", "UILabel"); }
+
+// Buttons here have one look, so the states they're given all set it.
+void button_set_title(void* self, const char*, void* title, uint64_t) { property_set_object(self, "buttonTitle", title); }
+void* button_title(void* self, const char*, uint64_t) { return property_get_object(self, "buttonTitle"); }
+void* button_current_title(void* self, const char*) { return property_get_object(self, "buttonTitle"); }
+void button_set_title_color(void* self, const char*, void* color, uint64_t) { property_set_object(self, "textColor", color); }
+void button_set_image(void* self, const char*, void* image, uint64_t) { property_set_object(self, "buttonImage", image); }
+
 void* tab_bar_item(void* self, const char*) { return get_or_create(self, "tabBarItem", "UITabBarItem"); }
 void* navigation_item(void* self, const char*) { return get_or_create(self, "navigationItem", "UINavigationItem"); }
 
@@ -686,6 +696,15 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"tabBarItem", reinterpret_cast<const void*>(tab_bar_item)},
         {"navigationItem", reinterpret_cast<const void*>(navigation_item)},
         {"topViewController", reinterpret_cast<const void*>(nav_top)},
+        {"buttonWithType:", reinterpret_cast<const void*>(button_with_type)},
+        {"titleLabel", reinterpret_cast<const void*>(button_title_label)},
+        {"setTitle:forState:", reinterpret_cast<const void*>(button_set_title)},
+        {"titleForState:", reinterpret_cast<const void*>(button_title)},
+        {"currentTitle", reinterpret_cast<const void*>(button_current_title)},
+        {"setTitleColor:forState:", reinterpret_cast<const void*>(button_set_title_color)},
+        {"setImage:forState:", reinterpret_cast<const void*>(button_set_image)},
+        {"collectionView", reinterpret_cast<const void*>(controller_view)},
+        {"tableView", reinterpret_cast<const void*>(controller_view)},
         {"visibleViewController", reinterpret_cast<const void*>(nav_top)},
         {"setViewControllers:animated:", reinterpret_cast<const void*>(nav_set_controllers)},
         {"pushViewController:animated:", reinterpret_cast<const void*>(nav_push)},
