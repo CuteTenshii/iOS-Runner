@@ -234,7 +234,7 @@ void load_view_of(void* controller) {
     void* storyboard = property_get_object(controller, "storyboard");
     if (name != nullptr && storyboard != nullptr) {
         const std::string path = storyboard_directory(storyboard) + "/" + nsstring_text(name) + ".nib";
-        nib_instantiate(path, controller, storyboard);
+        nib_instantiate(path, controller, storyboard, property_get_object(controller, "externalObjectsTableForViewLoading"));
     }
     if (property_get_object(controller, "view") == nullptr && objc_responds(controller, "loadView")) send0(controller, "loadView");
     if (property_get_object(controller, "view") == nullptr) {
@@ -290,6 +290,18 @@ void* font_for_style(void*, const char*, void* style) {
     };
     const auto found = kSizes.find(nsstring_text(style));
     return make_font(found != kSizes.end() ? found->second : kBodyFontSize);
+}
+
+// Labels and buttons have a font from the start, which apps read to derive others.
+void* view_font(void* self, const char*) {
+    constexpr double kDefaultFontSize = 17;
+    void* font = property_get_object(self, "font");
+    if (font == nullptr) {
+        font = new_named("UIFont");
+        property_set_floats(font, "fontPointSize", kDefaultFontSize, 0);
+        property_set_object(self, "font", font);
+    }
+    return font;
 }
 
 double font_point_size(void* self, const char*) { return property_get_float(self, "fontPointSize"); }
@@ -667,6 +679,7 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"addConstraints:", reinterpret_cast<const void*>(view_add_constraints)},
         {"addArrangedSubview:", reinterpret_cast<const void*>(stack_add_arranged)},
         {"arrangedSubviews", reinterpret_cast<const void*>(stack_arranged)},
+        {"font", reinterpret_cast<const void*>(view_font)},
         {"systemFontOfSize:", reinterpret_cast<const void*>(font_of_size)},
         {"boldSystemFontOfSize:", reinterpret_cast<const void*>(font_of_size)},
         {"italicSystemFontOfSize:", reinterpret_cast<const void*>(font_of_size)},

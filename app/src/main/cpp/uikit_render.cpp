@@ -99,6 +99,7 @@ Json describe_view(void* view, double parent_x, double parent_y, const std::func
         members.emplace_back("a", number(id));
     }
     if (select) members.emplace_back("a", number(add_action(select)));
+    if (void* action = property_get_object(view, "primaryAction")) members.emplace_back("a", number(add_action([action] { run_primary_action(action); })));
     std::vector<Json> children;
     if (list_is_view(view)) {
         ListLayout layout = list_layout(view, width);

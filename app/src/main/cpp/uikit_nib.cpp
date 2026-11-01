@@ -59,6 +59,7 @@ struct NibArchive {
     std::vector<NibObject> objects;
     void* owner = nullptr;
     void* storyboard = nullptr;
+    void* externals = nullptr;
     std::string directory;
     std::vector<void*> created;
 };
@@ -266,6 +267,13 @@ void* build_object(NibArchive& archive, uint32_t index) {
             object.instance = archive.owner;
         else if (proxied == "UIStoryboardPlaceholder")
             object.instance = archive.storyboard;
+        else if (archive.externals != nullptr) {
+            // A nib stores a dictionary as its keys and values in turn.
+            const auto& pairs = *static_cast<NSArrayObject*>(archive.externals)->items;
+            for (size_t i = 0; i + 1 < pairs.size(); i += 2) {
+                if (nsstring_text(pairs[i]) == proxied) object.instance = pairs[i + 1];
+            }
+        }
     } else {
         std::string class_name = name;
         if (name == "UIClassSwapper") {
@@ -366,10 +374,10 @@ void run_connections(NibArchive& archive, uint32_t root) {
 }  // namespace
 
 namespace {
-std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard);
+std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard, void* externals);
 }
 
-std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard) {
+std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard, void* externals) {
     // A nib built for several OS versions is a directory of archives.
     const std::string file_path = std::filesystem::is_directory(path) ? path + "/objects-13.0+.nib" : path;
     std::ifstream file(file_path, std::ios::binary);
@@ -378,7 +386,7 @@ std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* s
         return {};
     }
     const std::string data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    return instantiate_archive(data, path, owner, storyboard);
+    return instantiate_archive(data, path, owner, storyboard, externals);
 }
 
 std::vector<void*> nib_instantiate_object(void* nib, void* owner) {
@@ -388,11 +396,11 @@ std::vector<void*> nib_instantiate_object(void* nib, void* owner) {
         engine_log("UIKIT: a UINib has no contents");
         return {};
     }
-    return instantiate_archive(embedded->second, "an embedded nib", owner, property_get_object(nib, "storyboard"));
+    return instantiate_archive(embedded->second, "an embedded nib", owner, property_get_object(nib, "storyboard"), property_get_object(nib, "externals"));
 }
 
 namespace {
-std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard) {
+std::vector<void*> instantiate_archive(const std::string& data, const std::string& path, void* owner, void* storyboard, void* externals) {
     // Decoders of guest objects may outlive this call, so an archive is kept for the life of the process.
     auto* archive = new NibArchive;
     if (!parse_archive(data, *archive) || archive->objects.empty()) {
@@ -401,6 +409,7 @@ std::vector<void*> instantiate_archive(const std::string& data, const std::strin
     }
     archive->owner = owner;
     archive->storyboard = storyboard;
+    archive->externals = externals;
     const NibValue* top = value_named(archive->objects[0], "UINibTopLevelObjectsKey");
     std::vector<void*> top_objects;
     if (top != nullptr) {

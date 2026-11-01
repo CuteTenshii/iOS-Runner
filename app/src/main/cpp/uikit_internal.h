@@ -25,7 +25,8 @@ struct Rect4 {
 };
 
 // A nib's objects, built and connected; returns its top-level objects other than proxies.
-std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard);
+// `externals` resolves the proxies a storyboard's nib uses for objects in other nibs.
+std::vector<void*> nib_instantiate(const std::string& path, void* owner, void* storyboard, void* externals = nullptr);
 const void* nib_init_with_coder();
 void register_nib_classes();
 void register_view_classes();
@@ -88,6 +89,7 @@ void* index_path_at(int64_t section, int64_t item);
 int64_t index_path_section(void* path);
 int64_t index_path_item(void* path);
 bool list_is_view(void* view);
+void run_primary_action(void* action);
 // Asks a collection or table view's data source for its cells and places them.
 ListLayout list_layout(void* view, double width);
 

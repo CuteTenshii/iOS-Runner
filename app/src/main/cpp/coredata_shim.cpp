@@ -376,6 +376,14 @@ struct FetchRequest {
     void* sort_descriptors;
 };
 
+void* fetch_request_copy(FetchRequest* self, const char*) {
+    auto* copy = static_cast<FetchRequest*>(objc_framework_object("NSFetchRequest"));
+    copy->entity = new std::string(*self->entity);
+    copy->predicate = self->predicate != nullptr ? rt_swift_retain(self->predicate) : nullptr;
+    copy->sort_descriptors = self->sort_descriptors != nullptr ? rt_swift_retain(self->sort_descriptors) : nullptr;
+    return copy;
+}
+
 void* fetch_request_init(void* self, const char*, void* name) {
     static_cast<FetchRequest*>(self)->entity = new std::string(foundation_object_text(name));
     return self;
@@ -1003,6 +1011,7 @@ void coredata_register_classes() {
     objc_register_method("-[NSFetchRequest setRelationshipKeyPathsForPrefetching:]", reinterpret_cast<const void*>(ignore_argument));
     objc_register_fallback("NSManagedObject", managed_accessor);
     objc_register_method("-[NSManagedObject fetchRequest]", reinterpret_cast<const void*>(managed_fetch_request));
+    objc_register_method("-[NSFetchRequest copy]", reinterpret_cast<const void*>(fetch_request_copy));
     objc_register_method("-[NSFetchRequest initWithEntityName:]", reinterpret_cast<const void*>(fetch_request_init));
     objc_register_method("-[NSCompoundPredicate initWithType:subpredicates:]", reinterpret_cast<const void*>(predicate_init_compound));
     objc_register_method("-[NSCompoundPredicate subpredicates]", reinterpret_cast<const void*>(predicate_subpredicates));

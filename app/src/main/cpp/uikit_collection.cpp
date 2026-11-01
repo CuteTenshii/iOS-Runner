@@ -95,11 +95,21 @@ bool is_table(void* view) { return object_is_kind(view, "UITableView"); }
 void load_prototypes(void* view, ListState& state) {
     if (state.loaded_prototypes) return;
     state.loaded_prototypes = true;
-    void* dictionary = property_get_object(view, is_table(view) ? "tableViewCellNibDict" : "collectionViewCellNibDict");
+    const bool table = is_table(view);
+    void* dictionary = property_get_object(view, table ? "tableViewCellPrototypeNibs" : "collectionViewCellNibDict");
     if (dictionary == nullptr) return;
+    void* externals = property_get_object(view, table ? "tableViewCellPrototypeNibExternalObjects" : "collectionViewCellPrototypeNibExternalObjects");
+    const auto no_externals = std::vector<void*>{};
+    const auto& external_pairs = externals != nullptr ? *static_cast<NSArrayObject*>(externals)->items : no_externals;
     // A nib stores a dictionary as its keys and values in turn.
     const auto& pairs = *static_cast<NSArrayObject*>(dictionary)->items;
-    for (size_t i = 0; i + 1 < pairs.size(); i += 2) state.cell_nibs[nsstring_text(pairs[i])] = pairs[i + 1];
+    for (size_t i = 0; i + 1 < pairs.size(); i += 2) {
+        const std::string identifier = nsstring_text(pairs[i]);
+        state.cell_nibs[identifier] = pairs[i + 1];
+        for (size_t j = 0; j + 1 < external_pairs.size(); j += 2) {
+            if (nsstring_text(external_pairs[j]) == identifier) property_set_object(pairs[i + 1], "externals", external_pairs[j + 1]);
+        }
+    }
 }
 
 void* make_from_class(void* cls, bool table, const std::string& identifier) {
@@ -215,7 +225,10 @@ std::vector<int64_t> ask_counts(void* view, void* source) {
 }
 
 void rebuild_cells(void* view, ListState& state, void* source, std::vector<int64_t> counts) {
-    for (const Cell& cell : state.cells) state.pool[cell.reuse_identifier].push_back(cell.view);
+    // Cells from a static table have no identifier and belong to their row for good.
+    for (const Cell& cell : state.cells) {
+        if (!cell.reuse_identifier.empty()) state.pool[cell.reuse_identifier].push_back(cell.view);
+    }
     state.cells.clear();
     state.stale = false;
     state.source = source;
@@ -320,6 +333,82 @@ void* nib_instantiate_message(void* self, const char*, void* owner, void*) {
     return array;
 }
 
+using ActionHandler = SWIFTCC void (*)(void* action, SWIFT_CONTEXT void* context);
+
+SWIFTCC void* action_init(SwiftString title, void* image, void*, uint64_t, uint64_t, uint64_t, uint64_t, ActionHandler handler, void* context) {
+    void* action = object_retain(objc_framework_object("UIAction"));
+    property_set_object(action, "title", new_nsstring(swift_string_to_utf8(title)));
+    property_set_object(action, "image", image);
+    property_set_word(action, "handlerFunction", reinterpret_cast<int64_t>(handler));
+    property_set_word(action, "handlerContext", reinterpret_cast<int64_t>(context));
+    return action;
+}
+
+SWIFTCC void* menu_init(SwiftString title, void* image, void*, uint64_t, void* children) {
+    void* menu = object_retain(objc_framework_object("UIMenu"));
+    property_set_object(menu, "title", new_nsstring(swift_string_to_utf8(title)));
+    property_set_object(menu, "image", image);
+    property_set_object(menu, "children", children);
+    return menu;
+}
+
+SWIFTCC void* bar_item_system_init(int64_t, void* action, void* menu) {
+    void* item = object_retain(objc_framework_object("UIBarButtonItem"));
+    property_set_object(item, "primaryAction", action);
+    property_set_object(item, "menu", menu);
+    return item;
+}
+
+SWIFTCC void* bar_item_title_init(SwiftString title, void* image, void* action, void* menu) {
+    void* item = bar_item_system_init(0, action, menu);
+    if (title.object != 0) property_set_object(item, "title", new_nsstring(swift_string_to_utf8(title)));
+    property_set_object(item, "image", image);
+    return item;
+}
+
+// UITableViewController's own answers, which come from a static table's sections in its nib.
+std::vector<void*> static_sections(void* controller) {
+    void* source = property_get_object(controller, "staticDataSource");
+    return source != nullptr ? object_array_items(property_get_object(source, "tableSections")) : std::vector<void*>{};
+}
+
+std::vector<void*> static_rows(void* controller, int64_t section) {
+    const std::vector<void*> sections = static_sections(controller);
+    if (section < 0 || static_cast<size_t>(section) >= sections.size()) return {};
+    return object_array_items(property_get_object(sections[static_cast<size_t>(section)], "tableSectionRows"));
+}
+
+void* static_row(void* controller, void* path) {
+    const std::vector<void*> rows = static_rows(controller, path_section(path));
+    const auto item = static_cast<size_t>(path_item(path));
+    return item < rows.size() ? rows[item] : nullptr;
+}
+
+int64_t controller_section_count(void* self, const char*, void*) {
+    if (property_get_object(self, "staticDataSource") == nullptr) return 1;
+    return static_cast<int64_t>(static_sections(self).size());
+}
+int64_t controller_row_count(void* self, const char*, void*, int64_t section) { return static_cast<int64_t>(static_rows(self, section).size()); }
+void* controller_cell(void* self, const char*, void*, void* path) {
+    void* row = static_row(self, path);
+    return row != nullptr ? property_get_object(row, "tableRowCell") : nullptr;
+}
+double controller_row_height(void* self, const char*, void*, void* path) {
+    void* row = static_row(self, path);
+    return row != nullptr ? property_get_float(row, "tableRowHeight") : 0;
+}
+void* controller_header_title(void* self, const char*, void*, int64_t section) {
+    const std::vector<void*> sections = static_sections(self);
+    if (section < 0 || static_cast<size_t>(section) >= sections.size()) return nullptr;
+    return property_get_object(sections[static_cast<size_t>(section)], "tableSectionHeaderTitle");
+}
+
+SWIFTCC void* button_init(int64_t, void* action) {
+    void* button = object_retain(objc_framework_object("UIButton"));
+    property_set_object(button, "primaryAction", action);
+    return button;
+}
+
 void* list_configuration_box() { return objc_framework_object("UICollectionLayoutListConfiguration"); }
 SWIFTCC void list_configuration_init(SWIFT_OUT void** out, uint64_t) { *out = list_configuration_box(); }
 // The host draws its own lists, so a list's looks are accepted and not kept.
@@ -411,7 +500,17 @@ const void* uikit_collection_method_for_selector(const std::string& selector) {
     return found == table.end() ? nullptr : found->second;
 }
 
+void run_primary_action(void* action) {
+    const auto handler = reinterpret_cast<ActionHandler>(property_get_word(action, "handlerFunction"));
+    if (handler != nullptr) handler(action, reinterpret_cast<void*>(property_get_word(action, "handlerContext")));
+}
+
 void register_collection_classes() {
+    objc_register_method("-[UITableViewController numberOfSectionsInTableView:]", reinterpret_cast<const void*>(controller_section_count));
+    objc_register_method("-[UITableViewController tableView:numberOfRowsInSection:]", reinterpret_cast<const void*>(controller_row_count));
+    objc_register_method("-[UITableViewController tableView:cellForRowAtIndexPath:]", reinterpret_cast<const void*>(controller_cell));
+    objc_register_method("-[UITableViewController tableView:heightForRowAtIndexPath:]", reinterpret_cast<const void*>(controller_row_height));
+    objc_register_method("-[UITableViewController tableView:titleForHeaderInSection:]", reinterpret_cast<const void*>(controller_header_title));
     objc_register_method("+[NSIndexPath indexPathForItem:inSection:]", reinterpret_cast<const void*>(index_path_for));
     objc_register_method("+[NSIndexPath indexPathForRow:inSection:]", reinterpret_cast<const void*>(index_path_for));
     objc_register_method("-[NSIndexPath section]", reinterpret_cast<const void*>(message_path_section));
@@ -432,6 +531,11 @@ void add_collection_symbols(SymbolMap& table) {
         {"$s10Foundation9IndexPathV5UIKitE3rowSivg", reinterpret_cast<void*>(swift_index_path_item)},
         {"$s10Foundation9IndexPathV5UIKitE7sectionSivg", reinterpret_cast<void*>(swift_index_path_section)},
         {"$s10Foundation9IndexPathV2eeoiySbAC_ACtFZ", reinterpret_cast<void*>(swift_index_path_equal)},
+        {"$sSo8UIActionC5UIKitE5title5image10identifier20discoverabilityTitle10attributes5state7handlerABSS_So7UIImageCSgSo0A10IdentifieraSgSSSgSo23UIMenuElementAttributesVSo0mN5StateVyABctcfC", reinterpret_cast<void*>(action_init)},
+        {"$sSo6UIMenuC5UIKitE5title5image10identifier7options8childrenABSS_So7UIImageCSgSo0A10IdentifieraSgSo0A7OptionsVSaySo0A7ElementCGtcfC", reinterpret_cast<void*>(menu_init)},
+        {"$sSo15UIBarButtonItemC5UIKitE06systemC013primaryAction4menuABSo0ab6SystemC0V_So8UIActionCSgSo6UIMenuCSgtcfC", reinterpret_cast<void*>(bar_item_system_init)},
+        {"$sSo15UIBarButtonItemC5UIKitE5title5image13primaryAction4menuABSSSg_So7UIImageCSgSo8UIActionCSgSo6UIMenuCSgtcfC", reinterpret_cast<void*>(bar_item_title_init)},
+        {"$sSo8UIButtonC5UIKitE4type13primaryActionABSo0A4TypeV_So8UIActionCSgtcfC", reinterpret_cast<void*>(button_init)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV10appearanceA2C10AppearanceO_tcfC", reinterpret_cast<void*>(list_configuration_init)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV15showsSeparatorsSbvs", reinterpret_cast<void*>(list_configuration_ignore)},
         {"$s5UIKit35UICollectionLayoutListConfigurationV15backgroundColorSo7UIColorCSgvs", reinterpret_cast<void*>(list_configuration_ignore)},
