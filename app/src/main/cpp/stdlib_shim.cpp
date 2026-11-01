@@ -160,7 +160,9 @@ SWIFTCC bool native_dictionary_ensure_unique(bool is_unique, int64_t capacity, v
     void** generics = arguments_of(type);
     void* key_type = generics[0];
     void* value_type = generics[1];
-    void* hashable = generics[2];
+    // Metadata resolved from a mangled name holds only the two types, so the conformance has to be looked up.
+    static const void* const hashable_protocol = unresolved_symbol_named("_$sSHMp");
+    void** hashable = hashable_protocol != nullptr ? static_cast<void**>(swift_runtime_find_conformance(key_type, hashable_protocol)) : nullptr;
     void* arguments[] = {key_type, value_type, hashable};
     void* metadata = storage_class_metadata("_$ss18_DictionaryStorageCMn", arguments, 3);
     const int scale = grow ? scale_for_capacity(capacity) : old_header->scale;

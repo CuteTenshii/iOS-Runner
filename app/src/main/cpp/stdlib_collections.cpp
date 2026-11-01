@@ -39,6 +39,14 @@ void init_hashed_header(char* raw, void* metadata, int scale, int32_t age, int64
     header->seed = has_seed ? seed : reinterpret_cast<int64_t>(raw);
 }
 
+// Guest code searches the bitmap for a free bucket inline, and it's the set bits past the last bucket that stop it.
+void mark_buckets_past_end(char* bitmap, int scale) {
+    constexpr int kScaleFillingOneWord = 6;
+    if (scale >= kScaleFillingOneWord) return;
+    const uint64_t past_end = ~0ULL << (1ULL << scale);
+    memcpy(bitmap, &past_end, sizeof past_end);
+}
+
 void* allocate_set(void* metadata, int scale, int32_t age, int64_t seed, bool has_seed) {
     void* element = arguments_of(metadata)[0];
     const auto* witnesses = witnesses_of(element);
@@ -46,6 +54,7 @@ void* allocate_set(void* metadata, int scale, int32_t age, int64_t seed, bool ha
     const size_t elements_at = align_up(kSetBitmapOffset + bitmap_bytes(scale), alignment_mask(witnesses));
     auto* raw = static_cast<char*>(calloc(1, elements_at + buckets * witnesses->stride));
     init_hashed_header(raw, metadata, scale, age, seed, has_seed);
+    mark_buckets_past_end(raw + kSetBitmapOffset, scale);
     void* elements = raw + elements_at;
     memcpy(raw + kSetElementsOffset, &elements, sizeof elements);
     return raw;
@@ -61,6 +70,7 @@ void* allocate_dictionary(void* metadata, int scale, int32_t age, int64_t seed, 
     const size_t values_at = align_up(keys_at + buckets * key_witnesses->stride, alignment_mask(value_witnesses));
     auto* raw = static_cast<char*>(calloc(1, values_at + buckets * value_witnesses->stride));
     init_hashed_header(raw, metadata, scale, age, seed, has_seed);
+    mark_buckets_past_end(raw + kDictionaryBitmapOffset, scale);
     void* keys = raw + keys_at;
     void* values = raw + values_at;
     memcpy(raw + kDictionaryKeysOffset, &keys, sizeof keys);
