@@ -530,9 +530,12 @@ class GuestActivity : Activity() {
         if (state.optInt("hidden") != 0) controller.hide(WindowInsets.Type.statusBars()) else controller.show(WindowInsets.Type.statusBars())
     }
 
+    // What the root's padding for the system bars leaves, which is where the tree gets drawn.
     private fun screenSizeInPoints(): String {
         val density = resources.displayMetrics.density
-        return JSONObject().put("w", (root.width / density).toDouble()).put("h", (root.height / density).toDouble()).toString()
+        val width = root.width - root.paddingLeft - root.paddingRight
+        val height = root.height - root.paddingTop - root.paddingBottom
+        return JSONObject().put("w", (width / density).toDouble()).put("h", (height / density).toDouble()).toString()
     }
 
     /** A UIKit view: placed where the engine's layout says, in points, so it never reflows on this side. */
@@ -561,9 +564,72 @@ class GuestActivity : Activity() {
             }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         val children = node.optJSONArray("c") ?: return frame
-        forEachChild(children) { child -> frame.addView(buildUiView(child), uiViewParams(child)) }
+        forEachChild(children) { child ->
+            val view = when (child.optString("k")) {
+                "uitabbar" -> buildUiTabBar(child)
+                "uinavbar" -> buildUiNavigationBar(child)
+                else -> buildUiView(child)
+            }
+            frame.addView(view, uiViewParams(child))
+        }
         return frame
     }
+
+    private fun buildUiTabBar(node: JSONObject): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(themeColor(android.R.attr.colorBackground))
+            elevation = BAR_ELEVATION_DP * resources.displayMetrics.density
+        }
+        forEachChild(node.getJSONArray("c")) { tab ->
+            bar.addView(TextView(this).apply {
+                text = tab.optString("t")
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                textSize = TAB_TEXT_SP
+                val selected = tab.optInt("on") != 0
+                setTextColor(themeColor(if (selected) android.R.attr.colorAccent else android.R.attr.textColorSecondary))
+                setTypeface(typeface, if (selected) Typeface.BOLD else Typeface.NORMAL)
+                isSelected = selected
+                contentDescription = text
+                background = selectableBackground()
+                setOnClickListener { nativeAction(tab.getInt("a")) }
+            }, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+        }
+        return bar
+    }
+
+    private fun buildUiNavigationBar(node: JSONObject): View {
+        val density = resources.displayMetrics.density
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(themeColor(android.R.attr.colorBackground))
+            elevation = BAR_ELEVATION_DP * density
+        }
+        val back = node.optInt("back", -1)
+        if (back >= 0) {
+            bar.addView(ImageButton(this).apply {
+                setImageResource(R.drawable.ic_back)
+                imageTintList = ColorStateList.valueOf(themeColor(android.R.attr.textColorPrimary))
+                contentDescription = getString(R.string.navigate_back)
+                background = selectableBackground()
+                setOnClickListener { nativeAction(back) }
+            }, LinearLayout.LayoutParams((BAR_ICON_TARGET_DP * density).roundToInt(), MATCH_PARENT))
+        }
+        bar.addView(TextView(this).apply {
+            text = node.optString("t")
+            textSize = NAV_TITLE_SP
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(themeColor(android.R.attr.textColorPrimary))
+            setPadding((BAR_TITLE_INSET_DP * density).roundToInt(), 0, (BAR_TITLE_INSET_DP * density).roundToInt(), 0)
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        return bar
+    }
+
 
     // Points to pixels by rounding each edge, so neighbouring views still meet and nothing falls short of the screen.
     private fun uiViewParams(node: JSONObject): FrameLayout.LayoutParams {
@@ -1165,10 +1231,16 @@ class GuestActivity : Activity() {
             "keychain" -> current?.keychain?.call(JSONObject(argument))?.toString().orEmpty()
             "screen-size" -> current?.screenSizeInPoints().orEmpty()
             "can-open-url" -> current?.canOpenUrl(argument).toString()
+            "dark-mode" -> current?.isDarkMode().toString()
             else -> ""
         }
 
         private const val TAG = "iOSRunner"
+        private const val BAR_ELEVATION_DP = 4f
+        private const val BAR_ICON_TARGET_DP = 56f
+        private const val BAR_TITLE_INSET_DP = 16f
+        private const val TAB_TEXT_SP = 13f
+        private const val NAV_TITLE_SP = 20f
         private const val REQUEST_PICK_FILES = 7001
         private const val FALLBACK_FILE_NAME = "file"
 
@@ -1193,4 +1265,3 @@ class GuestActivity : Activity() {
         private external fun nativeAction(action: Int)
     }
 }
-            "dark-mode" -> current?.isDarkMode().toString()

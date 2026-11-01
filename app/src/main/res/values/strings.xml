@@ -15,5 +15,6 @@
     <string name="status_exited">The app has closed.</string>
     <string name="run_again">Run again</string>
     <string name="close">Close</string>
+    <string name="navigate_back">Back</string>
     <string name="no_browser">No app on this phone can open %1$s</string>
 </resources>

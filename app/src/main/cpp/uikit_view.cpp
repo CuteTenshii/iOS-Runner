@@ -331,6 +331,7 @@ void* controller_tab_bar(void* self, const char*) { return ancestor_of_kind(self
 
 void appear(void* controller) {
     if (controller == nullptr) return;
+    property_set_word(controller, "isOnScreen", 1);
     load_view_of(controller);
     send_bool(controller, "viewWillAppear:", false);
     send_if_responds(controller, "viewWillLayoutSubviews");
@@ -340,6 +341,7 @@ void appear(void* controller) {
 
 void disappear(void* controller) {
     if (controller == nullptr) return;
+    property_set_word(controller, "isOnScreen", 0);
     send_bool(controller, "viewWillDisappear:", false);
     send_bool(controller, "viewDidDisappear:", false);
 }
@@ -694,8 +696,6 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"navigationController", reinterpret_cast<const void*>(controller_navigation)},
         {"tabBarController", reinterpret_cast<const void*>(controller_tab_bar)},
         {"tabBarItem", reinterpret_cast<const void*>(tab_bar_item)},
-        {"navigationItem", reinterpret_cast<const void*>(navigation_item)},
-        {"topViewController", reinterpret_cast<const void*>(nav_top)},
         {"buttonWithType:", reinterpret_cast<const void*>(button_with_type)},
         {"titleLabel", reinterpret_cast<const void*>(button_title_label)},
         {"setTitle:forState:", reinterpret_cast<const void*>(button_set_title)},
@@ -705,6 +705,8 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"setImage:forState:", reinterpret_cast<const void*>(button_set_image)},
         {"collectionView", reinterpret_cast<const void*>(controller_view)},
         {"tableView", reinterpret_cast<const void*>(controller_view)},
+        {"navigationItem", reinterpret_cast<const void*>(navigation_item)},
+        {"topViewController", reinterpret_cast<const void*>(nav_top)},
         {"visibleViewController", reinterpret_cast<const void*>(nav_top)},
         {"setViewControllers:animated:", reinterpret_cast<const void*>(nav_set_controllers)},
         {"pushViewController:animated:", reinterpret_cast<const void*>(nav_push)},
@@ -738,3 +740,29 @@ void register_view_classes() {
 }
 
 }  // namespace uikit
+
+// A container's child first appears when the container draws it.
+void uikit::show_contained_controller(void* controller) {
+    if (uikit::property_get_word(controller, "isOnScreen") == 0) uikit::appear(controller);
+}
+
+// A tab in another storyboard is a placeholder until it's needed; only the tab bar knows its item if the target has none.
+void uikit::resolve_tab_placeholders(void* controller) {
+    constexpr char kPlaceholderClass[] = "UIStoryboardViewControllerPlaceholder";
+    auto* tabs = uikit::array_property(controller, "viewControllers")->items;
+    void* bar = uikit::property_get_object(controller, "tabBar");
+    const std::vector<void*> bar_items = bar != nullptr ? object_array_items(uikit::property_get_object(bar, "items")) : std::vector<void*>{};
+    for (size_t i = 0; i < tabs->size(); ++i) {
+        void* tab = (*tabs)[i];
+        if (objc_framework_root_of(tab) != kPlaceholderClass) continue;
+        void* identifier = uikit::property_get_object(tab, "storyboardIdentifier");
+        void* storyboard = uikit::property_get_object(controller, "storyboard");
+        void* resolved = identifier != nullptr && storyboard != nullptr ? uikit::controller_from(storyboard, foundation::nsstring_text(identifier)) : nullptr;
+        if (resolved == nullptr) continue;
+        (*tabs)[i] = uikit::object_retain(resolved);
+        uikit::property_set_object(resolved, "parentViewController", controller);
+        void* own_item = uikit::property_get_object(resolved, "tabBarItem");
+        const bool has_title = own_item != nullptr && uikit::property_get_object(own_item, "title") != nullptr;
+        if (!has_title && i < bar_items.size()) uikit::property_set_object(resolved, "tabBarItem", bar_items[i]);
+    }
+}

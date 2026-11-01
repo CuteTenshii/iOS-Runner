@@ -67,6 +67,8 @@ std::string text_of(void* view) {
 
 int add_action(std::function<void()> action);
 
+void describe_container(void* controller, double width, double height, std::vector<Json>& children);
+
 Json describe_view(void* view, double parent_x, double parent_y) {
     double bounds[4], center[4];
     property_get_rect(view, "bounds", bounds);
@@ -101,6 +103,7 @@ Json describe_view(void* view, double parent_x, double parent_y) {
     if (subviews != nullptr) {
         for (void* child : *subviews->items) children.push_back(describe_view(child, parent_x + x, parent_y + y));
     }
+    describe_container(property_get_object(view, "viewController"), width, height, children);
     members.emplace_back("c", array_of(std::move(children)));
     return object_of(std::move(members));
 }
@@ -128,6 +131,61 @@ Json tree_leaf(const char* kind, std::vector<std::pair<std::string, Json>> membe
 std::string text_property(void* object, const char* key) {
     void* value = property_get_object(object, key);
     return value != nullptr ? nsstring_text(value) : std::string();
+}
+
+constexpr double kTabBarHeight = 56, kNavigationBarHeight = 56;
+
+// Fits a contained controller's view to the space its container leaves it, and describes it.
+Json describe_contained(void* controller, double top, double width, double height) {
+    show_contained_controller(controller);
+    void* view = property_get_object(controller, "view");
+    const double bounds[4] = {0, 0, width, height};
+    const double center[4] = {width / 2, top + height / 2, 0, 0};
+    property_set_rect(view, "bounds", bounds);
+    property_set_rect(view, "center", center);
+    uikit_solve_layout(view, width, height, 0);
+    return describe_view(view, 0, top);
+}
+
+std::string controller_title(void* controller) {
+    void* item = property_get_object(controller, "navigationItem");
+    std::string title = item != nullptr ? text_property(item, "title") : std::string();
+    return title.empty() ? text_property(controller, "title") : title;
+}
+
+void describe_tab_controller(void* controller, double width, double height, std::vector<Json>& children) {
+    resolve_tab_placeholders(controller);
+    const auto items = object_array_items(property_get_object(controller, "viewControllers"));
+    if (items.empty()) return;
+    const auto selected = static_cast<size_t>(property_get_word(controller, "selectedIndex"));
+    children.push_back(describe_contained(items[selected < items.size() ? selected : 0], 0, width, height - kTabBarHeight));
+    std::vector<Json> tabs;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const int id = add_action([controller, i] { objc_send(controller, "setSelectedIndex:", reinterpret_cast<void*>(i)); });
+        void* tab_item = property_get_object(items[i], "tabBarItem");
+        tabs.push_back(tree_leaf("uitab", {{"a", number(id)}, {"t", json_text(tab_item != nullptr ? text_property(tab_item, "title") : std::string())}, {"on", number(i == selected ? 1 : 0)}}));
+    }
+    children.push_back(tree_leaf("uitabbar", {{"x", number(0)}, {"y", number(height - kTabBarHeight)}, {"w", number(width)}, {"h", number(kTabBarHeight)}, {"c", array_of(std::move(tabs))}}));
+}
+
+void describe_navigation_controller(void* controller, double width, double height, std::vector<Json>& children) {
+    const auto items = object_array_items(property_get_object(controller, "viewControllers"));
+    if (items.empty()) return;
+    void* top = items.back();
+    children.push_back(describe_contained(top, kNavigationBarHeight, width, height - kNavigationBarHeight));
+    std::vector<std::pair<std::string, Json>> bar = {{"x", number(0)}, {"y", number(0)}, {"w", number(width)}, {"h", number(kNavigationBarHeight)}, {"t", json_text(controller_title(top))}};
+    if (items.size() > 1) {
+        bar.emplace_back("back", number(add_action([controller] { objc_send(controller, "popViewControllerAnimated:", reinterpret_cast<void*>(uintptr_t{1})); })));
+    }
+    children.push_back(tree_leaf("uinavbar", std::move(bar)));
+}
+
+void describe_container(void* controller, double width, double height, std::vector<Json>& children) {
+    if (controller == nullptr) return;
+    if (object_is_kind(controller, "UITabBarController"))
+        describe_tab_controller(controller, width, height, children);
+    else if (object_is_kind(controller, "UINavigationController"))
+        describe_navigation_controller(controller, width, height, children);
 }
 
 // The screen an action or redraw concerns, down through containers and presented controllers.
@@ -256,6 +314,14 @@ void* color_with_alpha(void* self, const char*, double alpha) {
     return make_color(property_get_float(self, "red"), property_get_float(self, "green"), property_get_float(self, "blue"), alpha);
 }
 
+void* color_named(void*, const char*, void* name) {
+    AssetColor color;
+    if (!asset_color(nsstring_text(name), engine_host_query("dark-mode", "") == "true", color)) return nullptr;
+    return make_color(color.red, color.green, color.blue, color.alpha);
+}
+
+void* color_named_in_bundle(void* self, const char* selector, void* name, void*, void*) { return color_named(self, selector, name); }
+
 struct NamedColor {
     double red, green, blue, alpha;
 };
@@ -273,6 +339,8 @@ void uikit_autoresize_children(void* view, double delta_width, double delta_heig
 const void* uikit_color_method_for_selector(const std::string& selector) {
     static const std::unordered_map<std::string_view, const void*> table = {
         {"colorWithRed:green:blue:alpha:", reinterpret_cast<const void*>(color_with_rgba)},
+        {"colorNamed:", reinterpret_cast<const void*>(color_named)},
+        {"colorNamed:inBundle:compatibleWithTraitCollection:", reinterpret_cast<const void*>(color_named_in_bundle)},
         {"colorWithWhite:alpha:", reinterpret_cast<const void*>(color_with_white)},
         {"initWithRed:green:blue:alpha:", reinterpret_cast<const void*>(color_init_rgba)},
         {"colorWithAlphaComponent:", reinterpret_cast<const void*>(color_with_alpha)},
@@ -315,14 +383,6 @@ Rect4 window_size_rect() {
             width = w->kind == Json::Kind::Integer ? static_cast<double>(w->integer) : w->number;
             height = h->kind == Json::Kind::Integer ? static_cast<double>(h->integer) : h->number;
         }
-void* color_named(void*, const char*, void* name) {
-    AssetColor color;
-    if (!asset_color(nsstring_text(name), engine_host_query("dark-mode", "") == "true", color)) return nullptr;
-    return make_color(color.red, color.green, color.blue, color.alpha);
-}
-
-void* color_named_in_bundle(void* self, const char* selector, void* name, void*, void*) { return color_named(self, selector, name); }
-
     }
     return {0, 0, width, height};
 }
@@ -340,8 +400,6 @@ void uikit_render_if_changed() {
     property_get_rect(view, "bounds", previous);
     if (previous[2] != screen.width || previous[3] != screen.height) autoresize_children(view, screen.width - previous[2], screen.height - previous[3]);
     const double bounds[4] = {0, 0, screen.width, screen.height};
-        {"colorNamed:", reinterpret_cast<const void*>(color_named)},
-        {"colorNamed:inBundle:compatibleWithTraitCollection:", reinterpret_cast<const void*>(color_named_in_bundle)},
     const double center[4] = {screen.width / 2, screen.height / 2, 0, 0};
     property_set_rect(view, "bounds", bounds);
     property_set_rect(view, "center", center);
