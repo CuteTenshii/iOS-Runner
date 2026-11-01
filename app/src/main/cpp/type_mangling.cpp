@@ -498,25 +498,10 @@ private:
             substitute(Node{});
             return;
         }
-        // The same, spelled with words from earlier identifiers: letters for words, literals between them, 0 to end.
+        // The same, spelled with words from earlier identifiers.
         if (code == '0') {
-            for (;;) {
-                while (cursor_ < end_ && isalpha(static_cast<unsigned char>(*cursor_))) {
-                    const bool last_word = isupper(static_cast<unsigned char>(*cursor_)) != 0;
-                    ++cursor_;
-                    if (last_word) break;
-                }
-                if (cursor_ < end_ && *cursor_ == '0') {
-                    ++cursor_;
-                    break;
-                }
-                if (cursor_ >= end_ || isdigit(static_cast<unsigned char>(*cursor_)) == 0) {
-                    fail("malformed word-substituted identifier");
-                    return;
-                }
-                cursor_ += read_natural();
-            }
-            substitute(Node{});
+            skip_word_substituted_identifier();
+            if (failure_.empty()) substitute(Node{});
             return;
         }
         switch (code) {
@@ -625,15 +610,52 @@ private:
         }
     }
 
+    // After its leading 0: lowercase letters are earlier words, an uppercase one the last word, and literals sit
+    // between them. A literal after the last word ends it, and otherwise a 0 does. Only the extent matters here.
+    void skip_word_substituted_identifier() {
+        bool more_words = true;
+        while (more_words) {
+            while (more_words && cursor_ < end_ && isalpha(static_cast<unsigned char>(*cursor_))) {
+                if (isupper(static_cast<unsigned char>(*cursor_)) != 0) more_words = false;
+                ++cursor_;
+            }
+            if (cursor_ < end_ && *cursor_ == '0') {
+                ++cursor_;
+                return;
+            }
+            if (cursor_ >= end_ || isdigit(static_cast<unsigned char>(*cursor_)) == 0) {
+                fail("malformed word-substituted identifier");
+                return;
+            }
+            const uint64_t length = read_natural();
+            if (static_cast<uint64_t>(end_ - cursor_) < length) {
+                fail("truncated identifier");
+                return;
+            }
+            cursor_ += length;
+        }
+    }
+
     // An imported C or Objective-C type named inline: classes and protocols are references, enums are tag words.
     void imported_type() {
-        const uint64_t length = read_natural();
-        if (static_cast<uint64_t>(end_ - cursor_) < length + 1) {
+        std::string name;
+        if (cursor_ < end_ && *cursor_ == '0') {
+            ++cursor_;
+            skip_word_substituted_identifier();
+            if (!failure_.empty()) return;
+        } else {
+            const uint64_t length = read_natural();
+            if (static_cast<uint64_t>(end_ - cursor_) < length + 1) {
+                fail("truncated imported type");
+                return;
+            }
+            name.assign(cursor_, length);
+            cursor_ += length;
+        }
+        if (cursor_ >= end_) {
             fail("truncated imported type");
             return;
         }
-        const std::string name(cursor_, length);
-        cursor_ += length;
         const char kind = *cursor_++;
         Node node;
         if (kind == 'C' || kind == 'a') {

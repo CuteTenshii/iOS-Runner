@@ -53,6 +53,22 @@ extern "C" MetadataResponse rt_foreign_access(size_t, void* first, void* second,
     const std::string_view name(symbol);
     if (name == "$sSqMa") return {optional_of(static_cast<Metadata*>(first)), 0};
     if (name == "$s10Foundation4DateVMa") return {pod_type("Date", 8), 0};
+    // The same metadata a mangled name resolves to, since these are recognized by identity.
+    if (name == "$sSaMa") {
+        Metadata* array = bridge_type("$Array" + pointer_key(first), {first});
+        g_array_elements[array] = first;
+        return {array, 0};
+    }
+    if (name == "$sShMa") {
+        Metadata* set = bridge_type("$Set" + pointer_key(first), {first});
+        g_set_elements[set] = first;
+        return {set, 0};
+    }
+    if (name == "$sSDMa") {
+        Metadata* dictionary = bridge_type("$Dictionary" + pointer_key(first) + pointer_key(second), {first, second});
+        g_dictionary_values[dictionary] = second;
+        return {dictionary, 0};
+    }
     const size_t arity = accessor_generic_arity(name);
     std::vector<void*> arguments;
     if (arity > 0) arguments.push_back(first);
