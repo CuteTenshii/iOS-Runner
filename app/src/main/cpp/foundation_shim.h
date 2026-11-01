@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <string_view>
 
 void* foundation_symbol(std::string_view name);
@@ -67,3 +68,6 @@ bool foundation_parse_iso8601(const std::string& text, double& seconds);
 
 // The message of an error made by these shims, which has no Swift type behind it.
 SwiftString foundation_error_message(void* error);
+
+// A new NSArray holding these objects.
+void* foundation_new_array(const std::vector<void*>& items);

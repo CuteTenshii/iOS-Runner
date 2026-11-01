@@ -9,6 +9,12 @@ FoundationData foundation_make_data(const std::string& bytes) {
     return {data.range, data.storage};
 }
 
+void* foundation_new_array(const std::vector<void*>& items) {
+    auto* array = static_cast<NSArrayObject*>(new_nsarray());
+    for (void* item : items) array->items->push_back(rt_swift_retain(item));
+    return array;
+}
+
 void* foundation_make_error(const std::string& message, int64_t code) { return make_error(message, code); }
 
 int foundation_web_view_id(const void* object) {

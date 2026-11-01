@@ -19,6 +19,8 @@
 #include "swiftui_shim.h"
 #include "type_system.h"
 
+#include <pthread.h>
+
 namespace {
 // Swift keeps flags and discriminators in the top byte of bridged references.
 constexpr size_t kForeignWitnessTableWords = 32;
@@ -156,18 +158,36 @@ void* rt_swift_initStackObject(void* metadata, void* raw) {
     return object;
 }
 
+// Swift promotes short-lived objects to the stack but still tears them down the usual way, so there's nothing to free.
+bool is_on_current_stack(const void* object) {
+    static thread_local uintptr_t low = 0, high = 0;
+    if (high == 0) {
+        pthread_attr_t attributes;
+        void* base = nullptr;
+        size_t size = 0;
+        if (pthread_getattr_np(pthread_self(), &attributes) == 0) {
+            pthread_attr_getstack(&attributes, &base, &size);
+            pthread_attr_destroy(&attributes);
+        }
+        low = reinterpret_cast<uintptr_t>(base);
+        high = low + size;
+    }
+    const auto address = reinterpret_cast<uintptr_t>(object);
+    return address >= low && address < high;
+}
+
 void rt_swift_deallocObject(void* object, size_t, size_t) {
 #ifdef IOSRUNNER_TRACE_HEAP
     engine_log("HEAP deallocObject %p", object);
 #endif
-    free(object);
+    if (!is_on_current_stack(object)) free(object);
 }
 
 void rt_swift_deallocClassInstance(void* object, size_t, size_t) {
 #ifdef IOSRUNNER_TRACE_HEAP
     engine_log("HEAP deallocClassInstance %p", object);
 #endif
-    free(object);
+    if (!is_on_current_stack(object)) free(object);
 }
 void* rt_swift_setDeallocating(void* object) { return object; }
 

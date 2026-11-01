@@ -505,6 +505,43 @@ struct AsyncRecord {
 AsyncRecord g_perform_record;
 AsyncRecord g_background_record;
 
+// Nothing tracks unsaved changes per context, so these report none and readers fall back to fetching.
+void* context_empty_set(void*, const char*) { return foundation_new_array({}); }
+
+// A fetched results controller: one section holding the request's results, refetched on demand.
+constexpr size_t kControllerRequestWord = 2, kControllerDelegateWord = 3;
+
+std::unordered_map<void*, std::vector<void*>>& controller_results() {
+    static std::unordered_map<void*, std::vector<void*>> results;
+    return results;
+}
+
+void* results_controller_init(void* self, const char*, void* request, void*, void*, void*) {
+    static_cast<void**>(self)[kControllerRequestWord] = rt_swift_retain(request);
+    return self;
+}
+
+bool results_controller_fetch(void* self, const char*, void**) {
+    controller_results()[self] = run_request(static_cast<FetchRequest*>(static_cast<void**>(self)[kControllerRequestWord]));
+    return true;
+}
+
+void* results_controller_objects(void* self, const char*) { return foundation_new_array(controller_results()[self]); }
+void* results_controller_request(void* self, const char*) { return static_cast<void**>(self)[kControllerRequestWord]; }
+void results_controller_set_delegate(void* self, const char*, void* delegate) { static_cast<void**>(self)[kControllerDelegateWord] = delegate; }
+void* results_controller_delegate(void* self, const char*) { return static_cast<void**>(self)[kControllerDelegateWord]; }
+
+void* results_controller_sections(void* self, const char*) {
+    static_cast<void>(self);
+    auto** section = static_cast<void**>(objc_framework_object("_NSDefaultSectionInfo"));
+    section[kControllerRequestWord] = self;
+    return foundation_new_array({section});
+}
+
+int64_t section_count(void* self, const char*) { return static_cast<int64_t>(controller_results()[static_cast<void**>(self)[kControllerRequestWord]].size()); }
+void* section_objects(void* self, const char*) { return foundation_new_array(controller_results()[static_cast<void**>(self)[kControllerRequestWord]]); }
+void* section_name(void*, const char*) { return nullptr; }
+
 void* merged_model(void*, const char*, void*) { return objc_framework_object("NSManagedObjectModel"); }
 
 void* managed_value_for_key(void* self, const char*, void* key) { return managed_get(self, foundation_object_text(key).c_str()); }
@@ -568,6 +605,18 @@ void* coredata_symbol(std::string_view name) {
 }
 
 void coredata_register_classes() {
+    for (const char* selector : {"-[NSManagedObjectContext registeredObjects]", "-[NSManagedObjectContext insertedObjects]", "-[NSManagedObjectContext updatedObjects]", "-[NSManagedObjectContext deletedObjects]"}) objc_register_method(selector, reinterpret_cast<const void*>(context_empty_set));
+    objc_register_method("-[NSFetchedResultsController initWithFetchRequest:managedObjectContext:sectionNameKeyPath:cacheName:]", reinterpret_cast<const void*>(results_controller_init));
+    objc_register_method("-[NSFetchedResultsController performFetch:]", reinterpret_cast<const void*>(results_controller_fetch));
+    objc_register_method("-[NSFetchedResultsController fetchedObjects]", reinterpret_cast<const void*>(results_controller_objects));
+    objc_register_method("-[NSFetchedResultsController fetchRequest]", reinterpret_cast<const void*>(results_controller_request));
+    objc_register_method("-[NSFetchedResultsController sections]", reinterpret_cast<const void*>(results_controller_sections));
+    objc_register_method("-[NSFetchedResultsController setDelegate:]", reinterpret_cast<const void*>(results_controller_set_delegate));
+    objc_register_method("-[NSFetchedResultsController delegate]", reinterpret_cast<const void*>(results_controller_delegate));
+    objc_register_method("-[_NSDefaultSectionInfo numberOfObjects]", reinterpret_cast<const void*>(section_count));
+    objc_register_method("-[_NSDefaultSectionInfo objects]", reinterpret_cast<const void*>(section_objects));
+    objc_register_method("-[_NSDefaultSectionInfo name]", reinterpret_cast<const void*>(section_name));
+    objc_register_method("-[_NSDefaultSectionInfo indexTitle]", reinterpret_cast<const void*>(section_name));
     objc_register_method("-[NSMergePolicy initWithMergeType:]", reinterpret_cast<const void*>(return_self_word));
     objc_register_method("-[NSManagedObjectContext initWithConcurrencyType:]", reinterpret_cast<const void*>(return_self_word));
     objc_register_method("-[NSManagedObjectContext setParentContext:]", reinterpret_cast<const void*>(ignore_argument));

@@ -477,6 +477,63 @@ SWIFTCC void* components_query_items(SWIFT_CONTEXT ComponentsBox** self) {
     return storage;
 }
 
+SWIFTCC void components_empty(SWIFT_OUT ComponentsBox** out) { *out = new_components(); }
+
+struct ComponentsPort {
+    int64_t value;
+    uint64_t is_nil;
+};
+
+SWIFTCC ComponentsPort components_port(SWIFT_CONTEXT ComponentsBox** self) {
+    if ((*self)->authority == nullptr) return {0, 1};
+    const std::string& authority = *(*self)->authority;
+    const size_t colon = authority.rfind(':');
+    if (colon == std::string::npos || colon + 1 == authority.size() || authority.find('@', colon) != std::string::npos) return {0, 1};
+    return {strtoll(authority.c_str() + colon + 1, nullptr, 10), 0};
+}
+
+SWIFTCC SwiftString components_query(SWIFT_CONTEXT ComponentsBox** self) {
+    if ((*self)->query == nullptr) return {0, 0};
+    return swift_string_from_utf8(percent_decoded(*(*self)->query));
+}
+
+// A copy, for the same reason as components_set_query_items.
+ComponentsBox* copied_components(const ComponentsBox* old) {
+    auto* box = new_components();
+    box->scheme = copied(old->scheme);
+    box->authority = copied(old->authority);
+    *box->path = *old->path;
+    box->query = copied(old->query);
+    box->fragment = copied(old->fragment);
+    return box;
+}
+
+void replace_components(ComponentsBox** self, ComponentsBox* box) {
+    ComponentsBox* old = *self;
+    *self = box;
+    rt_swift_release(old);
+}
+
+SWIFTCC void components_set_scheme(SwiftString value, SWIFT_CONTEXT ComponentsBox** self) {
+    auto* box = copied_components(*self);
+    delete box->scheme;
+    box->scheme = value.object != 0 ? new std::string(swift_string_to_utf8(value)) : nullptr;
+    replace_components(self, box);
+}
+
+SWIFTCC void components_set_host(SwiftString value, SWIFT_CONTEXT ComponentsBox** self) {
+    auto* box = copied_components(*self);
+    const ComponentsPort port = components_port(self);
+    delete box->authority;
+    box->authority = nullptr;
+    if (value.object != 0) {
+        std::string authority = swift_string_to_utf8(value);
+        if (!port.is_nil) authority += ":" + std::to_string(port.value);
+        box->authority = new std::string(authority);
+    }
+    replace_components(self, box);
+}
+
 // A new box each time, since URLComponents is a value and a copy may share the old one.
 SWIFTCC void components_set_query_items(void* items, SWIFT_CONTEXT ComponentsBox** self) {
     ComponentsBox* old = *self;
@@ -627,6 +684,11 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$s10Foundation12URLQueryItemV5valueSSSgvg", reinterpret_cast<void*>(query_item_value)},
         {"$s10Foundation13URLComponentsV3url23resolvingAgainstBaseURLACSgAA0G0Vh_SbtcfC", reinterpret_cast<void*>(components_from_url)},
         {"$s10Foundation13URLComponentsV6stringACSgSSh_tcfC", reinterpret_cast<void*>(components_from_string)},
+        {"$s10Foundation13URLComponentsVACycfC", reinterpret_cast<void*>(components_empty)},
+        {"$s10Foundation13URLComponentsV4portSiSgvg", reinterpret_cast<void*>(components_port)},
+        {"$s10Foundation13URLComponentsV5querySSSgvg", reinterpret_cast<void*>(components_query)},
+        {"$s10Foundation13URLComponentsV6schemeSSSgvs", reinterpret_cast<void*>(components_set_scheme)},
+        {"$s10Foundation13URLComponentsV4hostSSSgvs", reinterpret_cast<void*>(components_set_host)},
         {"$s10Foundation13URLComponentsV3urlAA3URLVSgvg", reinterpret_cast<void*>(components_url)},
         {"$s10Foundation13URLComponentsV6schemeSSSgvg", reinterpret_cast<void*>(components_scheme)},
         {"$s10Foundation13URLComponentsV4hostSSSgvg", reinterpret_cast<void*>(components_host)},
