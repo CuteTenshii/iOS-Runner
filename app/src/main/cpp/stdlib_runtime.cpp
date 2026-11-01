@@ -338,6 +338,26 @@ static std::string error_description(void* error) {
     return swift_string_to_utf8(out);
 }
 
+// A metatype prints as its type's unqualified name, which apps use to name nibs and reuse identifiers.
+constexpr uint64_t kMetatypeKind = 0x304;
+
+static std::string described_type_name(const void* described) {
+    constexpr uint64_t kLastNonClassKind = 0x7ff;
+    constexpr size_t kDescriptorOffset = 8, kDescriptorNameOffset = 8;
+    const uint64_t kind = *static_cast<const uint64_t*>(described);
+    if (kind > kLastNonClassKind) {
+        const std::string name = objc_class_name(described);
+        const size_t dot = name.rfind('.');
+        return dot == std::string::npos ? name : name.substr(dot + 1);
+    }
+    const char* descriptor;
+    memcpy(&descriptor, static_cast<const char*>(described) + kDescriptorOffset, sizeof descriptor);
+    const char* field = descriptor + kDescriptorNameOffset;
+    int32_t relative;
+    memcpy(&relative, field, sizeof relative);
+    return field + relative;
+}
+
 // _print_unlocked into a DefaultStringInterpolation, which is a String at runtime.
 SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) {
     std::string text;
@@ -349,6 +369,8 @@ SWIFTCC void print_unlocked(const void* value, SwiftString* stream, void* type) 
         text = *static_cast<const uint8_t*>(value) != 0 ? "true" : "false";
     else if (type == error_existential_type())
         text = error_description(*static_cast<void* const*>(value));
+    else if (*static_cast<const uint64_t*>(type) == kMetatypeKind)
+        text = described_type_name(*static_cast<void* const*>(value));
     else
         text = enum_case_name(value, type);
     if (text.empty() && type != type_system_symbol("$sSSN")) text = "(value)";
@@ -417,6 +439,8 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
     if (is_text_box_type(foreign_type_name(type))) {
         return foundation_url_text(*static_cast<void* const*>(left)) == foundation_url_text(*static_cast<void* const*>(right));
     }
+    // Index paths are interned, so one position is always the same object.
+    if (const char* name = foreign_type_name(type); name != nullptr && strcmp(name, "_$s10Foundation9IndexPathVMn") == 0) return *static_cast<void* const*>(left) == *static_cast<void* const*>(right);
     // Framework values with no references, such as enum tags, are equal when their bytes are.
     if (const auto* witnesses = witnesses_of(type); foreign_type_name(type) != nullptr && (witnesses->flags & kFlagNonPod) == 0) return memcmp(left, right, witnesses->size) == 0;
     using Equal = SWIFTCC bool (*)(const void*, const void*, void*, void*, SWIFT_CONTEXT void*);
@@ -616,9 +640,17 @@ constexpr size_t kSuperclassOffset = 8;
 
 // Walks a class's ancestry; a framework superclass is a guard address that can't be read, only compared.
 bool class_inherits(const void* cls, const void* target) {
+    const char* imported = imported_class_name(target);
+    if (imported != nullptr) {
+        if (const void* named = objc_class_named(imported)) target = named;
+    }
     while (cls != nullptr) {
         if (cls == target) return true;
-        if (unresolved_symbol_at(reinterpret_cast<uintptr_t>(cls)) != nullptr) return false;
+        // Framework classes have one address per image and another for the instances made here, so they match by name.
+        if (const std::string framework = objc_framework_class_name(cls); !framework.empty()) {
+            const std::string wanted = imported != nullptr ? imported : objc_framework_class_name(target);
+            return !wanted.empty() && uikit_class_inherits(framework, wanted);
+        }
         memcpy(&cls, static_cast<const char*>(cls) + kSuperclassOffset, sizeof cls);
     }
     return false;
@@ -640,10 +672,6 @@ void* dynamic_cast_class_unconditional(void* object, const void* target, const c
     return result;
 }
 
-    const char* imported = imported_class_name(target);
-    if (imported != nullptr) {
-        if (const void* named = objc_class_named(imported)) target = named;
-    }
 const void* dynamic_cast_metatype(const void* type, const void* target) { return class_inherits(type, target) ? type : nullptr; }
 
 void* identity_cast(void* object) { return object; }

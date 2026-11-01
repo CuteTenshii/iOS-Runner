@@ -13,6 +13,7 @@ SWIFTCC SwiftString integer_description(SWIFT_CONTEXT const Integer* self) {
 }
 
 SWIFTCC bool native_dictionary_ensure_unique(bool is_unique, int64_t capacity, void* type, SWIFT_CONTEXT char** self);
+SWIFTCC void native_dictionary_unchecked_remove(void* key_out, void* value_out, int64_t removed, bool is_unique, void* type, SWIFT_CONTEXT char** self);
 
 // As Date prints: UTC, whatever the device's time zone.
 SWIFTCC SwiftString date_description(SWIFT_CONTEXT const double* self) {
@@ -26,6 +27,7 @@ SWIFTCC SwiftString date_description(SWIFT_CONTEXT const double* self) {
 
 static SymbolTable all_stdlib_symbols() {
     SymbolTable all = {
+        {"$ss17_NativeDictionaryV15uncheckedRemove2at8isUniquex3key_q_5valuets10_HashTableV6BucketV_SbtF", reinterpret_cast<void*>(native_dictionary_unchecked_remove)},
         {"$ss17_NativeDictionaryV12ensureUnique02isD08capacityS2b_SitF", reinterpret_cast<void*>(native_dictionary_ensure_unique)},
         {"$sSD17dictionaryLiteralSDyxq_Gx_q_td_tcfC", reinterpret_cast<void*>(dictionary_literal)},
         {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
@@ -115,6 +117,44 @@ int64_t hash_for_bucket(const void* key, int64_t seed, void* key_type, void* has
     }
     static const auto thunk = reinterpret_cast<RawHashThunk>(resolve_symbol("$sSH13_rawHashValue4seedS2i_tFTj"));
     return thunk(seed, key_type, hashable, key);
+}
+
+// Moves the entry out, then closes the gap as linear probing requires: later entries whose ideal bucket doesn't
+// lie past the hole shift back into it, so that lookups never stop early.
+SWIFTCC void native_dictionary_unchecked_remove(void* key_out, void* value_out, int64_t removed, bool is_unique, void* type, SWIFT_CONTEXT char** self) {
+    if (!is_unique) {
+        auto* shared = reinterpret_cast<HashedHeader*>(*self);
+        native_dictionary_ensure_unique(false, shared->capacity, type, self);
+    }
+    char* raw = *self;
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    void* key_type = arguments_of(header->metadata)[0];
+    void* value_type = arguments_of(header->metadata)[1];
+    void* hashable = key_type == type_system_symbol("$sSSN") ? nullptr : static_cast<void*>(arguments_of(header->metadata)[2]);
+    const size_t key_stride = witnesses_of(key_type)->stride;
+    const size_t value_stride = witnesses_of(value_type)->stride;
+    char* keys;
+    char* values;
+    memcpy(&keys, raw + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
+    auto* bitmap = reinterpret_cast<uint64_t*>(raw + kDictionaryBitmapOffset);
+    const uint64_t mask = (1ULL << header->scale) - 1;
+    const auto occupied = [&](uint64_t bucket) { return ((bitmap[bucket / kWordBits] >> (bucket % kWordBits)) & 1) != 0; };
+
+    auto hole = static_cast<uint64_t>(removed);
+    memcpy(key_out, keys + hole * key_stride, witnesses_of(key_type)->size);
+    memcpy(value_out, values + hole * value_stride, witnesses_of(value_type)->size);
+    for (uint64_t candidate = (hole + 1) & mask; occupied(candidate) && candidate != static_cast<uint64_t>(removed); candidate = (candidate + 1) & mask) {
+        const auto ideal = static_cast<uint64_t>(hash_for_bucket(keys + candidate * key_stride, header->seed, key_type, hashable)) & mask;
+        const bool moves = hole < candidate ? (ideal <= hole || ideal > candidate) : (ideal <= hole && ideal > candidate);
+        if (!moves) continue;
+        memcpy(keys + hole * key_stride, keys + candidate * key_stride, key_stride);
+        memcpy(values + hole * value_stride, values + candidate * value_stride, value_stride);
+        hole = candidate;
+    }
+    bitmap[hole / kWordBits] &= ~(1ULL << (hole % kWordBits));
+    --header->count;
+    ++header->age;
 }
 
 // Takes the array, as a variadic literal hands over its only reference.
