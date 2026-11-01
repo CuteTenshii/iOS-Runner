@@ -84,6 +84,7 @@ extern "C" void rt_resume_task(const void* function, void* async_context, void* 
 struct ContinuationContext {
     void* parent;
     const void* resume;
+    uint64_t flags;
     uint64_t state;
     void* error;
     void* normal_result;
@@ -101,7 +102,7 @@ void continuation_resume(char* task);
 void* continuation_init(ContinuationContext* context, size_t) {
     context->state = 0;
     context->error = nullptr;
-    context->normal_result = nullptr;
+    // The caller has already stored normal_result, which is where the resume writes its value.
     auto* task = static_cast<char*>(calloc(1, kContinuationTaskBytes));
     memcpy(task + kTaskResumeContextOffset, &context, sizeof context);
     memcpy(task + kTaskResumeContextOffset + sizeof(void*), &g_current_task, sizeof g_current_task);
@@ -586,15 +587,15 @@ __asm__(
     // Awaiting a continuation not resumed yet returns to whoever is running this task; a resume passes its error in x20.
     ".globl rt_continuation_await\n"
     "rt_continuation_await:\n"
-    "  ldr x9, [x0, #16]\n"
+    "  ldr x9, [x0, #24]\n"
     "  cmp x9, #2\n"
     "  b.eq 1f\n"
     "  mov x9, #1\n"
-    "  str x9, [x0, #16]\n"
+    "  str x9, [x0, #24]\n"
     "  ret\n"
     "1:\n"
     "  mov x22, x0\n"
-    "  ldr x20, [x0, #24]\n"
+    "  ldr x20, [x0, #32]\n"
     "  ldr x1, [x0, #8]\n"
     "  br x1\n"
     // x22 is the finished task's own context, whose parent word holds the state; a thrown error arrives in x20.
