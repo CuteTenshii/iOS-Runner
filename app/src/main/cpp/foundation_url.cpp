@@ -730,7 +730,16 @@ bool file_manager_move(void*, const char*, void* from, void* to, void** error) {
     return false;
 }
 
+// The app's data containers live inside its bundle directory here, unlike on iOS, where a bundle holds only the app.
+bool is_data_container(const std::string& path) {
+    const std::string& bundle = engine_bundle_dir();
+    if (path.rfind(bundle + "/", 0) != 0) return false;
+    const std::string rest = path.substr(bundle.size() + 1);
+    return rest.find('/') == std::string::npos && !rest.empty() && rest[0] == '.';
+}
+
 bool copy_recursively(const std::string& from, const std::string& to) {
+    if (to == from || is_data_container(from)) return true;
     struct stat info{};
     if (stat(from.c_str(), &info) != 0) return false;
     if (S_ISDIR(info.st_mode)) {
@@ -740,7 +749,11 @@ bool copy_recursively(const std::string& from, const std::string& to) {
         bool copied = true;
         while (const dirent* entry = readdir(directory)) {
             const std::string name = entry->d_name;
-            if (name != "." && name != "..") copied = copy_recursively(from + "/" + name, to + "/" + name) && copied;
+            if (name == "." || name == "..") continue;
+            const std::string child = from + "/" + name;
+            // Copying a directory into itself would never end, as each copy adds more to copy.
+            if (to == child || to.rfind(child + "/", 0) == 0) continue;
+            copied = copy_recursively(child, to + "/" + name) && copied;
         }
         closedir(directory);
         return copied;
