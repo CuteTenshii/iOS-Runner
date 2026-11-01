@@ -314,6 +314,16 @@ SWIFTCC void fast_iterator_next(SWIFT_OUT AnyValue* out, SWIFT_CONTEXT FastItera
     out->type = *static_cast<void**>(object);
 }
 
+// To an NSSet, which is an NSArray underneath; Strings become NSStrings, and everything else here is a reference.
+SWIFTCC void* set_bridge_to_objc(void* storage, void* type, void*) {
+    const bool strings = type == type_system_symbol("$sSSN");
+    std::vector<void*> items;
+    visit_set_elements(storage, [&](void* element) {
+        items.push_back(strings ? new_nsstring(swift_string_to_utf8(*static_cast<SwiftString*>(element))) : *static_cast<void**>(element));
+    });
+    return foundation_new_array(items);
+}
+
 std::vector<void*> objects_in_set(void* object) {
     if (object == nullptr || static_cast<HeapObject*>(object)->metadata != g_nsarray_class) return {};
     return *static_cast<NSArrayObject*>(object)->items;
@@ -778,6 +788,7 @@ void add_foundation_date_symbols(SymbolTable& table) {
         {"$s10Foundation11FormatStylePA2A09ByteCountbC0VRszrlE04byteE05style12allowedUnits13spellsOutZero014includesActualdE0A2E0C0O_AE0I0VS2btFZ", reinterpret_cast<void*>(byte_count_style)},
         {"$sSz10FoundationE9formattedy12FormatOutputQyd__qd__AA0C5StyleRd__Sz0C5InputRpd__lF", reinterpret_cast<void*>(integer_formatted_byte_count)},
         {"$sSo12NSOrderedSetC10FoundationE12makeIteratorAC017NSFastEnumerationE0VyF", reinterpret_cast<void*>(fast_iterator_make)},
+        {"$sSh10FoundationE19_bridgeToObjectiveCSo5NSSetCyF", reinterpret_cast<void*>(set_bridge_to_objc)},
         {"$sSo5NSSetC10FoundationE12makeIteratorAC017NSFastEnumerationD0VyF", reinterpret_cast<void*>(fast_iterator_make)},
         {"$sSo7NSArrayC10FoundationE12makeIteratorAC017NSFastEnumerationD0VyF", reinterpret_cast<void*>(fast_iterator_make)},
         {"$s10Foundation25NSFastEnumerationIteratorV4nextypSgyF", reinterpret_cast<void*>(fast_iterator_next)},

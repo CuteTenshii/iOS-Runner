@@ -16,6 +16,9 @@ void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>
 // A Set of these object references; `hashable` is the element type's conformance.
 void* set_from_objects(const std::vector<void*>& objects, void* type, void* hashable);
 
+// Calls `visit` with the address of each element of a native Set.
+void visit_set_elements(void* storage, const std::function<void(void*)>& visit);
+
 void* make_string_dictionary(void* value_type, const std::vector<std::pair<std::string, const void*>>& entries);
 
 // Calls `visit` with each key and a pointer to its value.

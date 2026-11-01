@@ -12,8 +12,11 @@ SWIFTCC SwiftString integer_description(SWIFT_CONTEXT const Integer* self) {
     return swift_string_from_utf8(std::to_string(static_cast<std::conditional_t<std::is_signed_v<Integer>, int64_t, uint64_t>>(*self)));
 }
 
+SWIFTCC bool native_dictionary_ensure_unique(bool is_unique, int64_t capacity, void* type, SWIFT_CONTEXT char** self);
+
 static SymbolTable all_stdlib_symbols() {
     SymbolTable all = {
+        {"$ss17_NativeDictionaryV12ensureUnique02isD08capacityS2b_SitF", reinterpret_cast<void*>(native_dictionary_ensure_unique)},
         {"$sSD17dictionaryLiteralSDyxq_Gx_q_td_tcfC", reinterpret_cast<void*>(dictionary_literal)},
         {"$s2os12OSSignpostIDV3logACSo03OS_a1_D0C_tcfC", reinterpret_cast<void*>(+[](void*) -> uint64_t { return 0; })},
         {"$s2os12OSSignpostIDV3log6objectACSo03OS_a1_D0C_yXltcfC", reinterpret_cast<void*>(+[](void*, void*) -> uint64_t { return 0; })},
@@ -135,6 +138,56 @@ SWIFTCC void* dictionary_literal(void* elements, void* key_type, void* value_typ
     using Release = void (*)(void*);
     reinterpret_cast<Release>(resolve_symbol("swift_release"))(elements);
     return raw;
+}
+
+// Grows or unshares the storage in place, returning whether its buckets moved, in which case callers must find theirs again.
+SWIFTCC bool native_dictionary_ensure_unique(bool is_unique, int64_t capacity, void* type, SWIFT_CONTEXT char** self) {
+    auto* old_raw = *self;
+    auto* old_header = reinterpret_cast<HashedHeader*>(old_raw);
+    const bool grow = capacity > old_header->capacity;
+    if (!grow && is_unique) return false;
+    void** generics = arguments_of(type);
+    void* key_type = generics[0];
+    void* value_type = generics[1];
+    void* hashable = generics[2];
+    void* arguments[] = {key_type, value_type, hashable};
+    void* metadata = storage_class_metadata("_$ss18_DictionaryStorageCMn", arguments, 3);
+    const int scale = grow ? scale_for_capacity(capacity) : old_header->scale;
+    auto* raw = static_cast<char*>(allocate_dictionary(metadata, scale, old_header->age, old_header->seed, !grow));
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    char* keys;
+    char* values;
+    memcpy(&keys, raw + kDictionaryKeysOffset, sizeof keys);
+    memcpy(&values, raw + kDictionaryValuesOffset, sizeof values);
+    auto* bitmap = reinterpret_cast<uint64_t*>(raw + kDictionaryBitmapOffset);
+    const uint64_t mask = (1ULL << header->scale) - 1;
+    const auto* key_witnesses = witnesses_of(key_type);
+    const auto* value_witnesses = witnesses_of(value_type);
+    if (old_header->count > 0) {
+        char* old_keys;
+        char* old_values;
+        memcpy(&old_keys, old_raw + kDictionaryKeysOffset, sizeof old_keys);
+        memcpy(&old_values, old_raw + kDictionaryValuesOffset, sizeof old_values);
+        const auto* old_bitmap = reinterpret_cast<const uint64_t*>(old_raw + kDictionaryBitmapOffset);
+        const uint64_t old_buckets = 1ULL << old_header->scale;
+        for (uint64_t i = 0; i < old_buckets; ++i) {
+            if (!((old_bitmap[i / kWordBits] >> (i % kWordBits)) & 1)) continue;
+            const char* key = old_keys + i * key_witnesses->stride;
+            uint64_t bucket = i;
+            if (grow) {
+                bucket = static_cast<uint64_t>(hash_for_bucket(key, header->seed, key_type, hashable)) & mask;
+                while ((bitmap[bucket / kWordBits] >> (bucket % kWordBits)) & 1) bucket = (bucket + 1) & mask;
+            }
+            bitmap[bucket / kWordBits] |= 1ULL << (bucket % kWordBits);
+            key_witnesses->initialize_with_copy(keys + bucket * key_witnesses->stride, const_cast<char*>(key), key_type);
+            value_witnesses->initialize_with_copy(values + bucket * value_witnesses->stride, old_values + i * value_witnesses->stride, value_type);
+        }
+    }
+    header->count = old_header->count;
+    *self = raw;
+    using Release = void (*)(void*);
+    reinterpret_cast<Release>(resolve_symbol("swift_release"))(old_raw);
+    return grow;
 }
 
 void* make_string_bool_dictionary(const std::vector<std::pair<std::string, bool>>& entries) {

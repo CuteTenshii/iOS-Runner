@@ -1,3 +1,8 @@
+#include <dirent.h>
+
+#include <fstream>
+#include <iterator>
+
 #include "concurrency_shim.h"
 #include "engine.h"
 #include "foundation_internal.h"
@@ -74,37 +79,62 @@ void connect_scene() {
     }
 }
 
-// Every app installed on iOS has a signed profile, and some refuse to start without one. Signing isn't implemented,
-// so a bundle gets this stand-in: it names no certificates and proves nothing, it only lets the app read a profile.
+// Every app installed on iOS has a signed profile, and some refuse to start without one. Signing isn't implemented, so
+// a bundle gets one with values of the right form. It names no certificates and proves nothing.
+constexpr const char* kProfileTeam = "RUNNER0000";
+
+// Stable per bundle, in the form of a version 4 UUID.
+std::string profile_uuid(const std::string& identifier) {
+    uint64_t high = std::hash<std::string>{}(identifier);
+    uint64_t low = std::hash<std::string>{}(identifier + "#profile");
+    high = (high & 0xffffffffffff0fffULL) | 0x4000ULL;
+    low = (low & 0x3fffffffffffffffULL) | 0x8000000000000000ULL;
+    char text[37];
+    snprintf(text, sizeof text, "%08X-%04X-%04X-%04X-%012llX", static_cast<uint32_t>(high >> 32), static_cast<uint32_t>((high >> 16) & 0xffff), static_cast<uint32_t>(high & 0xffff), static_cast<uint32_t>(low >> 48), static_cast<unsigned long long>(low & 0xffffffffffffULL));
+    return text;
+}
+
+// A profile of ours can be replaced when this format changes; a real one never is.
+bool has_real_profile(const std::string& path) {
+    std::ifstream existing(path, std::ios::binary);
+    if (!existing) return false;
+    const std::string contents((std::istreambuf_iterator<char>(existing)), std::istreambuf_iterator<char>());
+    return contents.find(kProfileTeam) == std::string::npos;
+}
+
 void write_placeholder_profile(const std::string& bundle) {
     const std::string path = bundle + "/embedded.mobileprovision";
-    if (access(path.c_str(), F_OK) == 0) return;
+    if (has_real_profile(path)) return;
     PlistValue info;
     plist_read_file(bundle + "/Info.plist", info);
     const std::string identifier = info.string_at("CFBundleIdentifier");
-    std::ofstream file(path, std::ios::trunc);
-    // A real profile's plist sits inside a signature blob, and parsers expect something before it.
-    file << "iOSRunner placeholder, not signed\n";
+    std::string name = info.string_at("CFBundleName");
+    if (name.empty()) name = identifier;
+    const std::string team = kProfileTeam;
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    // A real profile's plist sits inside a CMS envelope, which opens with a DER sequence; parsers look past it.
+    file.write("\x30\x80", 2);
     file << R"(<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>AppIDName</key><string>iOSRunner</string>
-<key>ApplicationIdentifierPrefix</key><array><string>RUNNER0000</string></array>
+<key>AppIDName</key><string>)" << name << R"(</string>
+<key>ApplicationIdentifierPrefix</key><array><string>)" << team << R"(</string></array>
 <key>CreationDate</key><date>2020-01-01T00:00:00Z</date>
+<key>Platform</key><array><string>iOS</string></array>
+<key>IsXcodeManaged</key><false/>
 <key>DeveloperCertificates</key><array></array>
 <key>Entitlements</key><dict>
-<key>application-identifier</key><string>RUNNER0000.)"
-         << identifier << R"(</string>
-<key>com.apple.developer.team-identifier</key><string>RUNNER0000</string>
+<key>application-identifier</key><string>)" << team << "." << identifier << R"(</string>
+<key>com.apple.developer.team-identifier</key><string>)" << team << R"(</string>
 <key>get-task-allow</key><true/>
+<key>keychain-access-groups</key><array><string>)" << team << R"(.*</string></array>
 </dict>
 <key>ExpirationDate</key><date>2100-01-01T00:00:00Z</date>
-<key>IsXcodeManaged</key><false/>
-<key>Name</key><string>iOSRunner placeholder profile</string>
+<key>Name</key><string>)" << name << R"(</string>
 <key>ProvisionedDevices</key><array></array>
-<key>TeamIdentifier</key><array><string>RUNNER0000</string></array>
-<key>TeamName</key><string>iOSRunner</string>
-<key>TimeToLive</key><integer>365</integer>
-<key>UUID</key><string>00000000-0000-4000-8000-000000000000</string>
+<key>TeamIdentifier</key><array><string>)" << team << R"(</string></array>
+<key>TeamName</key><string>)" << team << R"(</string>
+<key>TimeToLive</key><integer>29200</integer>
+<key>UUID</key><string>)" << profile_uuid(identifier) << R"(</string>
 <key>Version</key><integer>1</integer>
 </dict></plist>
 )";

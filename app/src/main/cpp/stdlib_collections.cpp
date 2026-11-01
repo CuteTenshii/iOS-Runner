@@ -272,3 +272,14 @@ void add_stdlib_collections_symbols(SymbolTable& table) {
 }  // namespace stdlib
 
 void* set_from_objects(const std::vector<void*>& objects, void* type, void* hashable) { return stdlib::build_object_set(objects, type, hashable); }
+
+void visit_set_elements(void* storage, const std::function<void(void*)>& visit) {
+    using namespace stdlib;
+    auto* raw = static_cast<char*>(storage);
+    auto* header = reinterpret_cast<HashedHeader*>(raw);
+    if (header->count == 0) return;
+    char* elements;
+    memcpy(&elements, raw + kSetElementsOffset, sizeof elements);
+    const size_t stride = witnesses_of(arguments_of(header->metadata)[0])->stride;
+    for_each_occupied(raw + kSetBitmapOffset, header->scale, [&](size_t bucket) { visit(elements + bucket * stride); });
+}
