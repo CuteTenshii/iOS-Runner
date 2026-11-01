@@ -168,6 +168,11 @@ void animate_simple(void*, const char*, void* animations, void* completion, doub
 
 void animate_only(void*, const char*, void* animations, double) { run_block_now(animations); }
 
+void transition_with_view(void*, const char*, void*, uint64_t, void* animations, void* completion, double) {
+    run_block_now(animations);
+    finish_block(completion);
+}
+
 void animate_options(void*, const char*, uint64_t, void* animations, void* completion, double, double) {
     run_block_now(animations);
     finish_block(completion);
@@ -590,6 +595,7 @@ const void* uikit_method_for_selector(const std::string& selector) {
         {"setTranslatesAutoresizingMaskIntoConstraints:", reinterpret_cast<const void*>(set_autolayout_flag)},
         {"animateWithDuration:animations:completion:", reinterpret_cast<const void*>(animate_simple)},
         {"animateWithDuration:animations:", reinterpret_cast<const void*>(animate_only)},
+        {"transitionWithView:duration:options:animations:completion:", reinterpret_cast<const void*>(transition_with_view)},
         {"animateWithDuration:delay:options:animations:completion:", reinterpret_cast<const void*>(animate_options)},
         {"animateWithDuration:delay:usingSpringWithDamping:initialSpringVelocity:options:animations:completion:", reinterpret_cast<const void*>(animate_spring)},
         {"performWithoutAnimation:", reinterpret_cast<const void*>(perform_without_animation)},
