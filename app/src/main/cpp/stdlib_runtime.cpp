@@ -793,6 +793,19 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"swift_dynamicCastObjCProtocolUnconditional", reinterpret_cast<void*>(identity_cast)},
         {"swift_getDynamicType", reinterpret_cast<void*>(dynamic_type_of)},
         {"swift_isUniquelyReferenced_native", reinterpret_cast<void*>(is_uniquely_referenced)},
+        {"swift_isUniquelyReferencedNonObjC_nonNull_bridgeObject", reinterpret_cast<void*>(+[](uint64_t bits, uint32_t) { return is_uniquely_referenced(reinterpret_cast<void*>(bits & kBridgePointerMask)); })},
+        {"swift_getInitializedObjCClass", reinterpret_cast<void*>(+[](void* cls) { return cls; })},
+        {"swift_isClassType", reinterpret_cast<void*>(+[](const uint64_t* type) {
+            constexpr uint64_t kLargestMetadataKind = 0x7ff;
+            return type[0] == 0 || type[0] > kLargestMetadataKind;
+        })},
+        {"swift_stdlib_isStackAllocationSafe", reinterpret_cast<void*>(+[](size_t, size_t) { return true; })},
+        {"swift_dynamicCastUnknownClass", reinterpret_cast<void*>(dynamic_cast_class)},
+        {"swift_dynamicCastUnknownClassUnconditional", reinterpret_cast<void*>(dynamic_cast_class_unconditional)},
+        {"swift_willThrowTypedImpl", reinterpret_cast<void*>(+[](void*, void*, void*) {})},
+        {"swift_deallocPartialClassInstance", reinterpret_cast<void*>(+[](void* object, void*, size_t, size_t) { free(object); })},
+        {"swift_coroFrameAlloc", reinterpret_cast<void*>(+[](size_t size, uint64_t) { return malloc(size); })},
+        {"swift_conformsToProtocol", reinterpret_cast<void*>(+[](void* type, const void* protocol) { return swift_runtime_find_conformance(type, protocol); })},
         {"swift_isUniquelyReferencedNonObjC_nonNull", reinterpret_cast<void*>(is_uniquely_referenced)},
         {"swift_release_n", reinterpret_cast<void*>(release_n)},
         {"swift_unknownObjectRelease_n", reinterpret_cast<void*>(release_n)},

@@ -820,6 +820,7 @@ void* concurrency_symbol(std::string_view name) {
         {"swift_asyncLet_finish", reinterpret_cast<void*>(rt_async_let_wait)},
         {"swift_continuation_init", reinterpret_cast<void*>(continuation_init)},
         {"swift_continuation_await", reinterpret_cast<void*>(rt_continuation_await)},
+        {"swift_task_isCancelled", reinterpret_cast<void*>(+[](const void* task) { return g_cancelled_tasks.count(task) != 0; })},
         {"swift_continuation_resume", reinterpret_cast<void*>(continuation_resume)},
         {"swift_task_create", reinterpret_cast<void*>(task_create)},
         {"$sScC12continuation8functionScCyxq_GSccyxq_G_SStcfC", reinterpret_cast<void*>(checked_continuation_init)},
