@@ -76,6 +76,9 @@ void* foundation_new_array(const std::vector<void*>& items);
 
 // A new NSDictionary-like object holding this parsed value, as bridged property lists are.
 void* foundation_new_json_object(Json value);
+
+// iOS purges an app's tmp between launches and apps rely on it, as nothing else would ever clear their copies.
+void foundation_clear_temporary_directory();
 bool json_from_plist_bytes(const std::string& bytes, Json& out);
 bool json_from_object(void* object, Json& out);
 // A null key type means an array, and a null element type means a collection that can't be converted.

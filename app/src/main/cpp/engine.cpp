@@ -1,6 +1,7 @@
 #include "engine.h"
 
 #include "darwin_shim.h"
+#include "foundation_shim.h"
 #include "objc_runtime.h"
 
 #include <dlfcn.h>
@@ -380,6 +381,8 @@ void engine_close_actions() {
 int run_app_bundle(const std::string& bundle_dir, const std::string& executable, const std::string& log_path) {
     g_bundle_dir = bundle_dir;
     if (!log_path.empty()) g_log_fd = open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0600);
+
+    foundation_clear_temporary_directory();
 
     GuestArguments arguments{bundle_dir, executable};
     pthread_attr_t attributes;

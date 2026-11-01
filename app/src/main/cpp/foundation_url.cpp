@@ -1128,3 +1128,5 @@ void register_foundation_url_classes() {
 }
 
 }  // namespace foundation
+
+void foundation_clear_temporary_directory() { foundation::remove_recursively(engine_bundle_dir() + "/.tmp"); }
