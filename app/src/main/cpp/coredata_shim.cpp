@@ -689,7 +689,7 @@ void* coredata_symbol(std::string_view name) {
     }
     if (name == "$sSo22NSManagedObjectContextC8CoreDataE14performAndWaityxxyKXEKlF") return reinterpret_cast<void*>(context_perform_and_wait);
     static void* merge_policy = objc_framework_object("NSMergePolicy");
-    if (name == "NSMergeByPropertyObjectTrumpMergePolicy") return &merge_policy;
+    if (name == "NSMergeByPropertyObjectTrumpMergePolicy" || name == "NSOverwriteMergePolicy") return &merge_policy;
     if (name == "$sSo16NSSortDescriptorC10FoundationE7keyPath9ascendingABs03KeyE0Cyxq_G_Sbtcr0_lufC") return reinterpret_cast<void*>(sort_descriptor_init);
     if (name == "$sSo11NSPredicateC10FoundationE6format_ABSSh_s7CVarArg_pdtcfC") return reinterpret_cast<void*>(predicate_init);
     if (name == "$sSo22NSManagedObjectContextC8CoreDataE5fetchySayxGSo14NSFetchRequestCyxGKSo0gH6ResultRzlF") return reinterpret_cast<void*>(context_fetch);

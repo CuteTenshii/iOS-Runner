@@ -166,23 +166,125 @@ void destroy_url_request(void* raw) {
 
 const HeapMetadata kUrlRequestMetadata = {destroy_url_request, nullptr, 0};
 
-SWIFTCC void url_request_init(SWIFT_OUT URLRequestBox** out, URLBox** url, uint64_t, double) {
+URLRequestBox* new_url_request(const std::string& url, uint64_t cache_policy, double timeout) {
     auto* box = static_cast<URLRequestBox*>(calloc(1, sizeof(URLRequestBox)));
     box->metadata = const_cast<uint64_t*>(&kUrlRequestMetadata.kind);
     new (&box->references) std::atomic<uint64_t>(1);
-    box->url = new std::string(*(*url)->text);
+    box->url = new std::string(url);
     box->method = new std::string("GET");
     box->headers = new std::string();
     box->body = new std::string();
-    *out = box;
+    box->cache_policy = cache_policy;
+    box->timeout = timeout;
+    return box;
 }
 
-SWIFTCC void url_request_set_method(SwiftString method, SWIFT_CONTEXT URLRequestBox** self) {
-    if (method.object != 0) *(*self)->method = swift_string_to_utf8(method);
+SWIFTCC void url_request_init(SWIFT_OUT URLRequestBox** out, URLBox** url, uint64_t cache_policy, double timeout) { *out = new_url_request(*(*url)->text, cache_policy, timeout); }
+
+// URLRequest is a value type: a copy has to stop sharing the box before it changes.
+URLRequestBox* unique_request(URLRequestBox** self) {
+    URLRequestBox* box = *self;
+    if (box->references.load(std::memory_order_relaxed) == 1) return box;
+    URLRequestBox* copy = new_url_request(*box->url, box->cache_policy, box->timeout);
+    *copy->method = *box->method;
+    *copy->headers = *box->headers;
+    *copy->body = *box->body;
+    copy->has_body = box->has_body;
+    rt_swift_release(box);
+    *self = copy;
+    return copy;
 }
+
+std::string lowercased(std::string text) {
+    for (char& c : text) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+// Headers are kept as "Field: value" lines, the form the host's HTTP client reads.
+std::vector<std::pair<std::string, std::string>> parsed_headers(const std::string& text) {
+    std::vector<std::pair<std::string, std::string>> fields;
+    size_t start = 0;
+    while (start < text.size()) {
+        const size_t end = text.find('\n', start);
+        const std::string line = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        const size_t colon = line.find(": ");
+        if (colon != std::string::npos) fields.emplace_back(line.substr(0, colon), line.substr(colon + 2));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return fields;
+}
+
+std::string joined_headers(const std::vector<std::pair<std::string, std::string>>& fields) {
+    std::string text;
+    for (const auto& [field, value] : fields) text += field + ": " + value + "\n";
+    return text;
+}
+
+SWIFTCC void url_request_set_method(SwiftString method, SWIFT_CONTEXT URLRequestBox** self) { *unique_request(self)->method = method.object != 0 ? swift_string_to_utf8(method) : "GET"; }
+SWIFTCC SwiftString url_request_get_method(SWIFT_CONTEXT URLRequestBox** self) { return swift_string_from_utf8(*(*self)->method); }
 
 SWIFTCC void url_request_set_header(SwiftString value, SwiftString field, SWIFT_CONTEXT URLRequestBox** self) {
-    if (value.object != 0) *(*self)->headers += swift_string_to_utf8(field) + ": " + swift_string_to_utf8(value) + "\n";
+    URLRequestBox* box = unique_request(self);
+    const std::string name = swift_string_to_utf8(field);
+    auto fields = parsed_headers(*box->headers);
+    const auto same = std::find_if(fields.begin(), fields.end(), [&](const auto& entry) { return lowercased(entry.first) == lowercased(name); });
+    if (value.object == 0) {
+        if (same != fields.end()) fields.erase(same);
+    } else if (same != fields.end()) {
+        same->second = swift_string_to_utf8(value);
+    } else {
+        fields.emplace_back(name, swift_string_to_utf8(value));
+    }
+    *box->headers = joined_headers(fields);
+}
+
+SWIFTCC SwiftString url_request_get_header(SwiftString field, SWIFT_CONTEXT URLRequestBox** self) {
+    const std::string name = lowercased(swift_string_to_utf8(field));
+    for (const auto& [key, value] : parsed_headers(*(*self)->headers)) {
+        if (lowercased(key) == name) return swift_string_from_utf8(value);
+    }
+    return {0, 0};
+}
+
+SWIFTCC void* url_request_get_all_headers(SWIFT_CONTEXT URLRequestBox** self) {
+    const auto fields = parsed_headers(*(*self)->headers);
+    if (fields.empty()) return nullptr;
+    std::vector<SwiftString> values;
+    values.reserve(fields.size());
+    std::vector<std::pair<std::string, const void*>> entries;
+    for (const auto& [key, value] : fields) {
+        values.push_back(swift_string_from_utf8(value));
+        entries.emplace_back(key, &values.back());
+    }
+    return make_string_dictionary(type_system_symbol("$sSSN"), entries);
+}
+
+SWIFTCC void url_request_set_all_headers(void* dictionary, SWIFT_CONTEXT URLRequestBox** self) {
+    URLRequestBox* box = unique_request(self);
+    box->headers->clear();
+    if (dictionary == nullptr) return;
+    std::vector<std::pair<std::string, std::string>> fields;
+    visit_string_dictionary(dictionary, [&](const std::string& key, void* value) { fields.emplace_back(key, swift_string_to_utf8(*static_cast<SwiftString*>(value))); });
+    *box->headers = joined_headers(fields);
+    rt_swift_bridgeObjectRelease(dictionary);
+}
+
+SWIFTCC uint64_t url_request_get_cache_policy(SWIFT_CONTEXT URLRequestBox** self) { return (*self)->cache_policy; }
+SWIFTCC void url_request_set_cache_policy(uint64_t policy, SWIFT_CONTEXT URLRequestBox** self) { unique_request(self)->cache_policy = policy; }
+SWIFTCC double url_request_get_timeout(SWIFT_CONTEXT URLRequestBox** self) { return (*self)->timeout; }
+SWIFTCC void url_request_set_timeout(double timeout, SWIFT_CONTEXT URLRequestBox** self) { unique_request(self)->timeout = timeout; }
+SWIFTCC bool url_request_allows_cellular(SWIFT_CONTEXT URLRequestBox**) { return true; }
+
+SWIFTCC void url_request_bridge_from_objc(SWIFT_OUT URLRequestBox** out, void* object) {
+    const auto found = bridged_requests().find(object);
+    if (found != bridged_requests().end()) {
+        rt_swift_retain(found->second);
+        *out = found->second;
+        return;
+    }
+    constexpr double kDefaultTimeoutSeconds = 60;
+    *out = new_url_request(nsstring_text(object), 0, kDefaultTimeoutSeconds);
 }
 
 std::string data_bytes(uint64_t range, uint64_t storage) {
@@ -221,7 +323,18 @@ SWIFTCC void data_replace_subrange(int64_t lower, int64_t upper, const char* rep
     store_data(self, bytes);
 }
 
-SWIFTCC void url_request_set_body(uint64_t range, uint64_t storage, SWIFT_CONTEXT URLRequestBox** self) { *(*self)->body = data_bytes(range, storage); }
+SWIFTCC void url_request_set_body(uint64_t range, uint64_t storage, SWIFT_CONTEXT URLRequestBox** self) {
+    constexpr uint64_t kOptionalDataNil = 0xf000000000000000ULL;
+    URLRequestBox* box = unique_request(self);
+    box->has_body = storage != kOptionalDataNil;
+    *box->body = box->has_body ? data_bytes(range, storage) : std::string();
+}
+
+SWIFTCC DataValue url_request_get_body(SWIFT_CONTEXT URLRequestBox** self) {
+    constexpr uint64_t kOptionalDataNil = 0xf000000000000000ULL;
+    if (!(*self)->has_body) return {0, kOptionalDataNil};
+    return make_data(*(*self)->body);
+}
 
 SWIFTCC void url_request_get_url(SWIFT_OUT URLBox** out, SWIFT_CONTEXT URLRequestBox** self) { *out = new_url(*(*self)->url); }
 
@@ -573,6 +686,17 @@ void add_foundation_request_symbols(SymbolTable& table) {
         {"$sSo12NSURLSessionC10FoundationE4data4from8delegateAC4DataV_So13NSURLResponseCtAC3URLV_So0A12TaskDelegate_pSgtYaKF", reinterpret_cast<void*>(rt_url_session_data_url)},
         {"$s10Foundation10URLRequestV3url11cachePolicy15timeoutIntervalAcA3URLV_So017NSURLRequestCacheE0VSdtcfC", reinterpret_cast<void*>(url_request_init)},
         {"$s10Foundation10URLRequestV10httpMethodSSSgvs", reinterpret_cast<void*>(url_request_set_method)},
+        {"$s10Foundation10URLRequestV10httpMethodSSSgvg", reinterpret_cast<void*>(url_request_get_method)},
+        {"$s10Foundation10URLRequestV11cachePolicySo017NSURLRequestCacheD0Vvg", reinterpret_cast<void*>(url_request_get_cache_policy)},
+        {"$s10Foundation10URLRequestV11cachePolicySo017NSURLRequestCacheD0Vvs", reinterpret_cast<void*>(url_request_set_cache_policy)},
+        {"$s10Foundation10URLRequestV15timeoutIntervalSdvg", reinterpret_cast<void*>(url_request_get_timeout)},
+        {"$s10Foundation10URLRequestV15timeoutIntervalSdvs", reinterpret_cast<void*>(url_request_set_timeout)},
+        {"$s10Foundation10URLRequestV19allHTTPHeaderFieldsSDyS2SGSgvg", reinterpret_cast<void*>(url_request_get_all_headers)},
+        {"$s10Foundation10URLRequestV19allHTTPHeaderFieldsSDyS2SGSgvs", reinterpret_cast<void*>(url_request_set_all_headers)},
+        {"$s10Foundation10URLRequestV20allowsCellularAccessSbvg", reinterpret_cast<void*>(url_request_allows_cellular)},
+        {"$s10Foundation10URLRequestV36_unconditionallyBridgeFromObjectiveCyACSo12NSURLRequestCSgFZ", reinterpret_cast<void*>(url_request_bridge_from_objc)},
+        {"$s10Foundation10URLRequestV5value18forHTTPHeaderFieldSSSgSS_tF", reinterpret_cast<void*>(url_request_get_header)},
+        {"$s10Foundation10URLRequestV8httpBodyAA4DataVSgvg", reinterpret_cast<void*>(url_request_get_body)},
         {"$s10Foundation10URLRequestV8setValue_18forHTTPHeaderFieldySSSg_SStF", reinterpret_cast<void*>(url_request_set_header)},
         {"$s10Foundation10URLRequestV8httpBodyAA4DataVSgvs", reinterpret_cast<void*>(url_request_set_body)},
         {"$s10Foundation10URLRequestV3urlAA3URLVSgvg", reinterpret_cast<void*>(url_request_get_url)},

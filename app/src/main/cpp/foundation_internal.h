@@ -235,6 +235,9 @@ struct URLRequestBox {
     std::string* method;
     std::string* headers;
     std::string* body;
+    uint64_t cache_policy;
+    double timeout;
+    bool has_body;
 };
 
 std::string data_bytes(uint64_t range, uint64_t storage);
