@@ -555,7 +555,8 @@ void ignore_nothing(void*, const char*) {}
 
 // Every context shares the one store, and all the guest's work is on one thread, so blocks just run.
 void context_perform(void*, const char*, void* block) { invoke_plain_block(block); }
-void* container_background_context(void*, const char*) { return view_context(); }
+// The "new" prefix means the caller owns the result, even though every context is the same one here.
+void* container_background_context(void*, const char*) { return rt_swift_retain(view_context()); }
 
 void container_background_task(void*, const char*, void* block) {
     using Invoke = void (*)(void*, void*);
@@ -718,6 +719,7 @@ void coredata_register_classes() {
     objc_register_method("-[NSManagedObjectContext objectWithID:]", reinterpret_cast<const void*>(context_object_with_id));
     objc_register_method("-[NSManagedObjectContext refreshAllObjects]", reinterpret_cast<const void*>(ignore_nothing));
     objc_register_method("-[NSManagedObjectContext reset]", reinterpret_cast<const void*>(ignore_nothing));
+    objc_register_method("-[NSManagedObjectContext processPendingChanges]", reinterpret_cast<const void*>(ignore_nothing));
     objc_register_method("-[NSPersistentContainer initWithName:managedObjectModel:]", reinterpret_cast<const void*>(return_self_two_arguments));
     objc_register_method("-[NSPersistentContainer newBackgroundContext]", reinterpret_cast<const void*>(container_background_context));
     objc_register_method("-[NSPersistentContainer performBackgroundTask:]", reinterpret_cast<const void*>(container_background_task));
