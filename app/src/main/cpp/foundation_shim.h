@@ -73,6 +73,7 @@ SwiftString foundation_error_message(void* error);
 
 // A new NSArray holding these objects.
 void* foundation_new_array(const std::vector<void*>& items);
+void* foundation_file_url_object(const std::string& path);
 
 // A new NSDictionary-like object holding this parsed value, as bridged property lists are.
 void* foundation_new_json_object(Json value);

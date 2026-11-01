@@ -419,6 +419,48 @@ void* alert_action_make(void*, const char*, void* title, int64_t style, void* ha
 
 void alert_add_action(void* self, const char*, void* action) { array_property(self, "actions")->items->push_back(object_retain(action)); }
 
+void send_to_delegate(void* delegate, const char* selector, void* controller, void* argument) {
+    if (delegate == nullptr || !objc_responds(delegate, selector)) return;
+    using Send = void (*)(void*, const char*, void*, void*);
+    reinterpret_cast<Send>(const_cast<void*>(objc_method_for(delegate, selector)))(delegate, selector, controller, argument);
+}
+
+// A document picker is Android's file picker. Apps expect a path they can read, so chosen files are copied in first.
+void present_document_picker(void* presenter, void* controller) {
+    object_retain(controller);
+    const int id = engine_host_register(
+        [presenter, controller](const std::string& payload) {
+            property_set_object(presenter, "presentedViewController", nullptr);
+            void* delegate = property_get_object(controller, "delegate");
+            Json reply;
+            std::vector<void*> urls;
+            if (json_parse(payload, reply)) {
+                if (const Json* paths = reply.member("paths")) {
+                    for (const Json& path : paths->items) urls.push_back(foundation_file_url_object(path.text));
+                }
+            }
+            if (urls.empty()) {
+                send_to_delegate(delegate, "documentPickerWasCancelled:", controller, nullptr);
+                return;
+            }
+            send_to_delegate(delegate, "documentPicker:didPickDocumentsAtURLs:", controller, foundation_new_array(urls));
+        },
+        false);
+    Json identifier;
+    identifier.kind = Json::Kind::Integer;
+    identifier.integer = id;
+    Json multiple;
+    multiple.kind = Json::Kind::Bool;
+    multiple.flag = property_get_word(controller, "allowsMultipleSelection") != 0;
+    Json spec;
+    spec.kind = Json::Kind::Object;
+    spec.members = {{"id", identifier},
+                    {"types", json_text(foundation::nsstring_text(property_get_object(controller, "pickerMimeTypes")))},
+                    {"multiple", multiple},
+                    {"directory", json_text(engine_bundle_dir() + "/.tmp/Inbox")}};
+    engine_emit("pick-files", json_write(spec));
+}
+
 // SFSafariViewController is a Chrome Custom Tab: the host shows it, and says when the user has come back.
 void present_custom_tab(void* presenter, void* controller) {
     const int id = engine_host_register(
@@ -446,6 +488,11 @@ void present_custom_tab(void* presenter, void* controller) {
 void present_controller(void* self, const char*, void* controller, bool, void* completion) {
     property_set_object(self, "presentedViewController", controller);
     property_set_object(controller, "presentingViewController", self);
+    if (object_is_kind(controller, "UIDocumentPickerViewController")) {
+        present_document_picker(self, controller);
+        run_block_now(completion);
+        return;
+    }
     if (object_is_kind(controller, "SFSafariViewController")) {
         present_custom_tab(self, controller);
         run_block_now(completion);

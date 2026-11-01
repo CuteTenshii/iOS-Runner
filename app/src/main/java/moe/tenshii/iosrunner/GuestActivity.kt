@@ -5,6 +5,9 @@ import android.app.AlertDialog
 import android.app.Dialog
 import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.browser.customtabs.CustomTabsIntent
+import android.provider.OpenableColumns
+import android.util.Log
+import java.util.UUID
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.DialogInterface
@@ -66,6 +69,7 @@ class GuestActivity : Activity() {
     private val pendingScripts: MutableSet<Int> = Collections.newSetFromMap(ConcurrentHashMap())
     private val mainThread = Handler(Looper.getMainLooper())
     private var customTabId: Int? = null
+    private var pendingPick: JSONObject? = null
     private var customTabShown = false
     private var keychain: Keychain? = null
     private val devices by lazy { DeviceServices(this, mainThread, ::nativeHostReply) }
@@ -141,6 +145,7 @@ class GuestActivity : Activity() {
             "open" -> openExternal(payload)
             "open-url" -> JSONObject(payload).let { nativeHostReply(it.getInt("id"), JSONObject().put("opened", openUrl(it.getString("url"))).toString()) }
             "custom-tab" -> openCustomTab(JSONObject(payload))
+            "pick-files" -> pickFiles(JSONObject(payload))
             "statusbar" -> applyStatusBar(JSONObject(payload))
             "webnew" -> createWebView(JSONObject(payload))
             "webload" -> JSONObject(payload).let { webViews[it.getInt("id")]?.loadUrl(it.getString("url")) }
@@ -261,6 +266,64 @@ class GuestActivity : Activity() {
         } catch (_: ActivityNotFoundException) {
             nativeHostReply(id, JSONObject().put("opened", false).toString())
         }
+    }
+
+    private fun pickFiles(spec: JSONObject) {
+        val types = spec.getString("types").split(',').filter { it.isNotEmpty() }
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, spec.optBoolean("multiple"))
+        if (types.isEmpty() || "*/*" in types) {
+            intent.type = "*/*"
+        } else {
+            intent.type = types.singleOrNull() ?: "*/*"
+            if (types.size > 1) intent.putExtra(Intent.EXTRA_MIME_TYPES, types.toTypedArray())
+        }
+        pendingPick = spec
+        try {
+            startActivityForResult(intent, REQUEST_PICK_FILES)
+        } catch (_: ActivityNotFoundException) {
+            pendingPick = null
+            nativeHostReply(spec.getInt("id"), "{}")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_PICK_FILES) return
+        val spec = pendingPick ?: return
+        pendingPick = null
+        val uris = if (resultCode == RESULT_OK) pickedUris(data) else emptyList()
+        // Providers can be remote, so a copy may take a while.
+        Thread {
+            val paths = JSONArray()
+            uris.forEach { uri -> copyIntoInbox(uri, File(spec.getString("directory")))?.let { paths.put(it.path) } }
+            nativeHostReply(spec.getInt("id"), JSONObject().put("paths", paths).toString())
+        }.start()
+    }
+
+    private fun pickedUris(data: Intent?): List<Uri> {
+        val clip = data?.clipData
+        if (clip != null) return List(clip.itemCount) { clip.getItemAt(it).uri }
+        return listOfNotNull(data?.data)
+    }
+
+    // Each copy gets its own directory, so the file keeps its name without replacing an earlier pick.
+    private fun copyIntoInbox(uri: Uri, inbox: File): File? = try {
+        val directory = File(inbox, UUID.randomUUID().toString()).apply { mkdirs() }
+        val target = File(directory, displayName(uri))
+        contentResolver.openInputStream(uri)?.use { input -> target.outputStream().use { input.copyTo(it) } }
+        target
+    } catch (error: IOException) {
+        Log.w(TAG, "could not copy a picked file", error)
+        null
+    }
+
+    // A provider chooses this name, so only its last path component is used.
+    private fun displayName(uri: Uri): String {
+        val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        return File(name ?: uri.lastPathSegment ?: FALLBACK_FILE_NAME).name.ifEmpty { FALLBACK_FILE_NAME }
     }
 
     private fun showToastless(text: String) {
@@ -1098,6 +1161,10 @@ class GuestActivity : Activity() {
             "can-open-url" -> current?.canOpenUrl(argument).toString()
             else -> ""
         }
+
+        private const val TAG = "iOSRunner"
+        private const val REQUEST_PICK_FILES = 7001
+        private const val FALLBACK_FILE_NAME = "file"
 
         @JvmStatic
         private external fun nativeHostReply(id: Int, payload: String)

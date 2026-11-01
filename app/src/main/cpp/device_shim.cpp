@@ -319,6 +319,109 @@ SWIFTCC bool path_uses_interface(const uint64_t* type, SWIFT_CONTEXT const uint6
 
 namespace {
 
+// UTType is one reference to its identity; what Android needs from it is a MIME type for the file picker.
+struct TypeBox {
+    HeapObject header;
+    std::string* identifier;
+    std::string* mime;
+    bool declared;
+};
+
+void destroy_type_box(void* raw) {
+    auto* box = static_cast<TypeBox*>(raw);
+    delete box->identifier;
+    delete box->mime;
+    free(box);
+}
+
+const HeapMetadata kTypeBoxMetadata = {destroy_type_box, nullptr, 0};
+
+TypeBox* new_type(const std::string& identifier, const std::string& mime, bool declared) {
+    auto* box = static_cast<TypeBox*>(calloc(1, sizeof(TypeBox)));
+    box->header.metadata = const_cast<uint64_t*>(&kTypeBoxMetadata.kind);
+    box->header.references = 1;
+    box->identifier = new std::string(identifier);
+    box->mime = new std::string(mime);
+    box->declared = declared;
+    return box;
+}
+
+struct KnownType {
+    const char* identifier;
+    const char* extension;
+    const char* mime;
+};
+
+// Providers label files like plists inconsistently, so anything without a dependable MIME type offers every file.
+constexpr KnownType kKnownTypes[] = {
+    {"public.data", "", "*/*"},
+    {"public.folder", "", "*/*"},
+    {"public.text", "", "text/*"},
+    {"public.plain-text", "txt", "text/plain"},
+    {"public.json", "json", "application/json"},
+    {"public.xml", "xml", "text/xml"},
+    {"com.apple.property-list", "plist", "*/*"},
+};
+
+TypeBox* type_for_identifier(const std::string& identifier) {
+    for (const KnownType& known : kKnownTypes) {
+        if (identifier == known.identifier) return new_type(known.identifier, known.mime, true);
+    }
+    return nullptr;
+}
+
+TypeBox* type_for_extension(const std::string& extension) {
+    for (const KnownType& known : kKnownTypes) {
+        if (extension == known.extension) return new_type(known.identifier, known.mime, true);
+    }
+    return new_type("dyn." + extension, "*/*", false);
+}
+
+template <int kIndex>
+SWIFTCC void known_type(SWIFT_OUT TypeBox** out) {
+    const KnownType& known = kKnownTypes[kIndex];
+    *out = new_type(known.identifier, known.mime, true);
+}
+
+// A tag class only has one value that matters here, and retain and release skip small words.
+constexpr uint64_t kTagClassFilenameExtension = 1;
+
+SWIFTCC void tag_class_filename_extension(SWIFT_OUT uint64_t* out) { *out = kTagClassFilenameExtension; }
+
+void* type_metadata() {
+    void* none = nullptr;
+    return storage_class_metadata("_$s22UniformTypeIdentifiers6UTTypeVMn", &none, 0);
+}
+
+SWIFTCC void* types_for_tag(SwiftString tag, const uint64_t*, void*) {
+    char* elements;
+    void* storage = make_array_storage(type_metadata(), 1, &elements);
+    TypeBox* type = type_for_extension(swift_string_to_utf8(tag));
+    memcpy(elements, &type, sizeof type);
+    return storage;
+}
+
+SWIFTCC void type_from_extension(SWIFT_OUT TypeBox** out, SwiftString extension, void*) { *out = type_for_extension(swift_string_to_utf8(extension)); }
+SWIFTCC void type_from_identifier(SWIFT_OUT TypeBox** out, SwiftString identifier) { *out = type_for_identifier(swift_string_to_utf8(identifier)); }
+SWIFTCC SwiftString type_identifier(SWIFT_CONTEXT TypeBox** self) { return swift_string_from_utf8(*(*self)->identifier); }
+SWIFTCC bool type_is_declared(SWIFT_CONTEXT TypeBox** self) { return (*self)->declared; }
+
+void* picker_init(void* self, const char*, void* types) {
+    std::string mimes;
+    for (void* type : object_array_items(types)) {
+        const std::string& mime = *static_cast<TypeBox*>(type)->mime;
+        if (mimes.find(mime) != std::string::npos) continue;
+        if (!mimes.empty()) mimes += ',';
+        mimes += mime;
+    }
+    property_set_object(self, "pickerMimeTypes", foundation::new_nsstring(mimes));
+    return self;
+}
+
+}  // namespace
+
+namespace {
+
 // Android has no home screen widgets of an iOS app's to refresh, so reloading them does nothing.
 struct WidgetCenterMetadataResponse {
     void* metadata;
@@ -349,6 +452,18 @@ SWIFTCC void widget_center_reload(SWIFT_CONTEXT void*) {}
 void* device_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
         {"$s9WidgetKit0A6CenterCMa", reinterpret_cast<void*>(widget_center_access)},
+        {"$s22UniformTypeIdentifiers6UTTypeV4dataACvgZ", reinterpret_cast<void*>(known_type<0>)},
+        {"$s22UniformTypeIdentifiers6UTTypeV6folderACvgZ", reinterpret_cast<void*>(known_type<1>)},
+        {"$s22UniformTypeIdentifiers6UTTypeV4textACvgZ", reinterpret_cast<void*>(known_type<2>)},
+        {"$s22UniformTypeIdentifiers6UTTypeV9plainTextACvgZ", reinterpret_cast<void*>(known_type<3>)},
+        {"$s22UniformTypeIdentifiers6UTTypeV4jsonACvgZ", reinterpret_cast<void*>(known_type<4>)},
+        {"$s22UniformTypeIdentifiers6UTTypeV3xmlACvgZ", reinterpret_cast<void*>(known_type<5>)},
+        {"$s22UniformTypeIdentifiers10UTTagClassV17filenameExtensionACvgZ", reinterpret_cast<void*>(tag_class_filename_extension)},
+        {"$s22UniformTypeIdentifiers6UTTypeV5types3tag0F5Class12conformingToSayACGSS_AA05UTTagG0VACSgtFZ", reinterpret_cast<void*>(types_for_tag)},
+        {"$s22UniformTypeIdentifiers6UTTypeV17filenameExtension12conformingToACSgSS_ACtcfC", reinterpret_cast<void*>(type_from_extension)},
+        {"$s22UniformTypeIdentifiers6UTTypeVyACSgSScfC", reinterpret_cast<void*>(type_from_identifier)},
+        {"$s22UniformTypeIdentifiers6UTTypeV10identifierSSvg", reinterpret_cast<void*>(type_identifier)},
+        {"$s22UniformTypeIdentifiers6UTTypeV10isDeclaredSbvg", reinterpret_cast<void*>(type_is_declared)},
         {"$s9WidgetKit0A6CenterC6sharedACvgZ", reinterpret_cast<void*>(widget_center_shared)},
         {"$s9WidgetKit0A6CenterC18reloadAllTimelinesyyFTj", reinterpret_cast<void*>(widget_center_reload)},
         {"$s7Network13NWPathMonitorCACycfc", reinterpret_cast<void*>(monitor_init)},
@@ -396,6 +511,8 @@ void* safari_init_with_url(void* self, const char*, void* url) {
 }  // namespace
 
 void register_device_classes() {
+    objc_register_method("-[UIDocumentPickerViewController initForOpeningContentTypes:]", reinterpret_cast<const void*>(picker_init));
+    objc_register_method("-[UIDocumentPickerViewController initForOpeningContentTypes:asCopy:]", reinterpret_cast<const void*>(picker_init));
     objc_register_method("-[UIApplication openURL:options:completionHandler:]", reinterpret_cast<const void*>(application_open_url_completion));
     objc_register_method("-[UIApplication openURL:]", reinterpret_cast<const void*>(application_open_url));
     objc_register_method("-[UIApplication canOpenURL:]", reinterpret_cast<const void*>(application_can_open_url));

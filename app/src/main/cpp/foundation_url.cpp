@@ -731,6 +731,17 @@ bool file_manager_move(void*, const char*, void* from, void* to, void** error) {
 }
 
 // The app's data containers live inside its bundle directory here, unlike on iOS, where a bundle holds only the app.
+// String(contentsOf:): an unreadable file is an error, as it is there.
+SWIFTCC SwiftString string_contents_of_url(URLBox** url, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+    constexpr int64_t kCocoaFileReadNoSuchFile = 260;
+    std::ifstream file(url_path(*(*url)->text), std::ios::binary);
+    if (!file) {
+        *error = make_error("The file couldn't be opened because there is no such file.", kCocoaFileReadNoSuchFile);
+        return {0, 0};
+    }
+    return swift_string_from_utf8(std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()));
+}
+
 bool is_data_container(const std::string& path) {
     const std::string& bundle = engine_bundle_dir();
     if (path.rfind(bundle + "/", 0) != 0) return false;
@@ -977,6 +988,7 @@ void add_foundation_url_symbols(SymbolTable& table) {
         {"$s10Foundation3URLV9appending4path13directoryHintACx_AC09DirectoryF0OtSyRzlF", reinterpret_cast<void*>(url_appending_path)},
         {"$s10Foundation3URLV25deletingLastPathComponentACyF", reinterpret_cast<void*>(url_deleting_last_component)},
         {"$s10Foundation3URLV19_bridgeToObjectiveCSo5NSURLCyF", reinterpret_cast<void*>(url_bridge_to_objc)},
+        {"$sSS10FoundationE10contentsOfSSAA3URLVh_tKcfC", reinterpret_cast<void*>(string_contents_of_url)},
         {"$s10Foundation3URLV36_unconditionallyBridgeFromObjectiveCyACSo5NSURLCSgFZ", reinterpret_cast<void*>(url_bridge_from_objc)},
         {"$sSS10FoundationE17LocalizationValueV13stringLiteralACSS_tcfC", reinterpret_cast<void*>(localization_value_literal)},
         {"$sSS10FoundationE17LocalizationValueV19StringInterpolationV15literalCapacity18interpolationCountAESi_SitcfC", reinterpret_cast<void*>(localization_interpolation_init)},
@@ -1130,3 +1142,5 @@ void register_foundation_url_classes() {
 }  // namespace foundation
 
 void foundation_clear_temporary_directory() { foundation::remove_recursively(engine_bundle_dir() + "/.tmp"); }
+
+void* foundation_file_url_object(const std::string& path) { return foundation::new_nsurl(foundation::file_url_text(path)); }
