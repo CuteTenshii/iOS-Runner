@@ -680,7 +680,13 @@ SWIFTCC void string_append_sequence(const void* sequence, void* type, void*, SWI
 
 // Hashable's dispatch thunk: framework values hash by what they hold, and the app's types by their own witness.
 SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_CONTEXT const void* self) {
-    if (type == type_system_symbol("$sSSN")) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(swift_string_to_utf8(*static_cast<const SwiftString*>(self))));
+    // Through Hasher, as dictionaries and guest specializations hash their String keys.
+    if (type == type_system_symbol("$sSSN")) {
+        HasherState hasher;
+        hasher_seed(&hasher, seed);
+        string_hash_into(&hasher, *static_cast<const SwiftString*>(self));
+        return hasher_finalize(&hasher);
+    }
     const char* name = foreign_type_name(type);
     if (is_text_box_type(name)) return seed ^ static_cast<int64_t>(std::hash<std::string>{}(foundation_url_text(*static_cast<void* const*>(self))));
     if (const auto* witnesses = witnesses_of(type); name != nullptr || (witnesses->flags & kFlagNonPod) == 0) {
