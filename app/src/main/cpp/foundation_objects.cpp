@@ -774,6 +774,15 @@ void register_foundation_objects_classes() {
     objc_register_method("+[NSUserDefaults standardUserDefaults]", reinterpret_cast<const void*>(defaults_standard));
     objc_register_method("-[NSUserDefaults stringForKey:]", reinterpret_cast<const void*>(defaults_string_for_key));
     objc_register_method("-[NSUserDefaults objectForKey:]", reinterpret_cast<const void*>(defaults_object_for_key));
+    // A collection is kept as JSON, which holds either kind; each getter only answers for its own.
+    objc_register_method("-[NSUserDefaults arrayForKey:]", reinterpret_cast<const void*>(+[](void* self, const char* selector, void* key) -> void* {
+        void* object = defaults_string_array_for_key(self, selector, key);
+        return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_bridged_collection_class ? object : nullptr;
+    }));
+    objc_register_method("-[NSUserDefaults dictionaryForKey:]", reinterpret_cast<const void*>(+[](void* self, const char* selector, void* key) -> void* {
+        void* object = defaults_string_array_for_key(self, selector, key);
+        return object != nullptr && static_cast<HeapObject*>(object)->metadata == g_json_value_class ? object : nullptr;
+    }));
     objc_register_method("-[NSUserDefaults stringArrayForKey:]", reinterpret_cast<const void*>(defaults_string_array_for_key));
     objc_register_method("-[NSUserDefaults boolForKey:]", reinterpret_cast<const void*>(defaults_bool_for_key));
     objc_register_method("-[NSUserDefaults integerForKey:]", reinterpret_cast<const void*>(defaults_integer_for_key));

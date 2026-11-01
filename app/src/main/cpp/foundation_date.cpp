@@ -837,9 +837,24 @@ void add_foundation_date_symbols(SymbolTable& table) {
 
 void register_foundation_date_classes() {
     objc_register_method("-[NSOrderedSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("-[NSMutableOrderedSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("+[NSMutableOrderedSet orderedSetWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    objc_register_method("-[NSMutableSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
     objc_register_method("+[NSOrderedSet orderedSetWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
     objc_register_method("-[NSSet initWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
     objc_register_method("+[NSSet setWithArray:]", reinterpret_cast<const void*>(unique_collection_from_array));
+    // Mutable ordered sets and sets are NSArrays too.
+    objc_register_method("-[NSArray addObject:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* object) {
+        auto& items = array_items_of(self);
+        if (std::find(items.begin(), items.end(), object) == items.end()) items.push_back(rt_swift_retain(object));
+    }));
+    objc_register_method("-[NSArray removeObject:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* object) {
+        auto& items = array_items_of(self);
+        const auto found = std::find(items.begin(), items.end(), object);
+        if (found == items.end()) return;
+        items.erase(found);
+        rt_swift_release(object);
+    }));
     objc_register_method("-[NSArray count]", reinterpret_cast<const void*>(array_count));
     objc_register_method("-[NSArray objectAtIndex:]", reinterpret_cast<const void*>(array_object_at));
     objc_register_method("-[NSArray objectAtIndexedSubscript:]", reinterpret_cast<const void*>(array_object_at));

@@ -489,11 +489,22 @@ SWIFTCC DataValue data_bridge_from_objc(NSDataObject* object) {
 void* strings_object_from_json(const std::string& json) {
     Json parsed;
     json_parse(json, parsed);
+    if (parsed.kind == Json::Kind::Object) return new_json_object(parsed);
+    const bool all_strings = std::all_of(parsed.items.begin(), parsed.items.end(), [](const Json& item) { return item.kind == Json::Kind::String; });
+    if (!all_strings) {
+        AnyValue any;
+        json_to_any(parsed, &any);
+        auto* object = static_cast<BridgedCollection*>(collection_bridge_to_objc(reinterpret_cast<void*>(any.buffer[0])));
+        object->element_type = any_type();
+        rt_swift_bridgeObjectRelease(reinterpret_cast<void*>(any.buffer[0]));
+        return object;
+    }
     void* element = type_system_symbol("$sSSN");
     char* elements;
     void* storage = make_array_storage(element, parsed.items.size(), &elements);
     for (size_t i = 0; i < parsed.items.size(); ++i) reinterpret_cast<SwiftString*>(elements)[i] = swift_string_from_utf8(parsed.items[i].text);
-    void* object = collection_bridge_to_objc(storage);
+    auto* object = static_cast<BridgedCollection*>(collection_bridge_to_objc(storage));
+    object->element_type = element;
     rt_swift_bridgeObjectRelease(storage);
     return object;
 }
