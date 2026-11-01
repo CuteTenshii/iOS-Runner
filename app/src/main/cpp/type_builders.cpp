@@ -411,6 +411,17 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
     // Frozen as finished or failure(F), which is the same shape as an Optional of F.
     if (symbol == "_$s7Combine11SubscribersO10CompletionOMn" && !arguments.empty()) return optional_of(static_cast<Metadata*>(arguments[0]));
+    // Represented as the String it wraps, so dictionaries keyed by it hash and compare as strings.
+    if (symbol == "_$ss17CodingUserInfoKeyVMn") return static_cast<Metadata*>(type_system_symbol("$sSSN"));
+    // JSONDecoder's strategy: a custom closure's two words, then the case, which the setter doesn't need.
+    if (symbol == "_$s10Foundation11JSONDecoderC20DateDecodingStrategyOMn") {
+        Metadata* strategy = named_type(symbol, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 3 * kPointerSize, kPointerSize, 0);
+        auto* witnesses = witnesses_of(strategy);
+        witnesses->get_enum_tag = +[](const void* value, void*) { return static_cast<const uint32_t*>(value)[4]; };
+        witnesses->destructive_project_enum_data = +[](void*, void*) {};
+        witnesses->destructive_inject_enum_tag = +[](void* value, uint32_t tag, void*) { static_cast<uint64_t*>(value)[2] = tag; };
+        return strategy;
+    }
     if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
     if (symbol == "_$ss15ContinuousClockV7InstantVMn") return named_type("ContinuousClock.Instant", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 16, 8, 0);
     if (symbol == "_$sScPMn") return pod_type("TaskPriority", 1);

@@ -24,6 +24,8 @@
 
 extern "C" void rt_swift_bridgeObjectRelease(void*);
 
+extern "C" void* rt_swift_bridgeObjectRetain(void*);
+
 namespace {
 constexpr size_t kAnyBufferWords = 3;
 constexpr uint64_t kBridgeObjectAddressMask = 0x00FFFFFFFFFFFFF8ULL;
@@ -117,6 +119,19 @@ bool json_seconds(const Json& node, double& seconds) {
     return true;
 }
 
+// One plain object serves every coder, and only JSONEncoder's formatting is honoured.
+struct CoderObject {
+    void* metadata;
+    uint64_t references;
+    uint64_t output_formatting;
+    void* user_info;
+    const void* custom_date_function;
+    void* custom_date_context;
+};
+
+// What the decode in progress was configured with, for the containers it passes through.
+CoderObject* g_current_decoder = nullptr;
+
 // The value type comes from the caller, as a dictionary's storage doesn't always record it.
 void visit_typed_dictionary(void* storage, void* value_type, const std::function<void(const std::string&, void*)>& visit) {
     constexpr size_t kCountOffset = 16;
@@ -185,6 +200,14 @@ void decode_value(void* type, Json* node, void* out, void** error) {
             return;
         }
         if (strcmp(name, "_$s10Foundation4DateVMn") == 0) {
+            if (g_current_decoder != nullptr && g_current_decoder->custom_date_function != nullptr) {
+                using DateClosure = SWIFTCC void (*)(SWIFT_OUT double*, const void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+                CoderExistential coder = coder_for(node);
+                double decoded = 0;
+                reinterpret_cast<DateClosure>(const_cast<void*>(g_current_decoder->custom_date_function))(&decoded, &coder, g_current_decoder->custom_date_context, error);
+                if (*error == nullptr) memcpy(out, &decoded, sizeof decoded);
+                return;
+            }
             double seconds = 0;
             if (node->kind == Json::Kind::String ? !foundation_parse_iso8601(node->text, seconds) : !json_seconds(*node, seconds)) {
                 *error = decoding_error("expected a date");
@@ -352,13 +375,6 @@ void encode_value(void* type, const void* value, Json& out, void** error) {
     encode(&coder, type, table, value, error);
 }
 
-// One plain object serves every coder, and only JSONEncoder's formatting is honoured.
-struct CoderObject {
-    void* metadata;
-    uint64_t references;
-    uint64_t output_formatting;
-};
-
 constexpr uint64_t kFormattingPretty = 1, kFormattingSortedKeys = 2, kFormattingWithoutEscapingSlashes = 8;
 
 void* coder_class_metadata() {
@@ -373,7 +389,11 @@ struct MetadataResponse {
 
 SWIFTCC MetadataResponse coder_access(size_t) { return {coder_class_metadata(), 0}; }
 SWIFTCC void* coder_init(SWIFT_CONTEXT void* self) {
-    static_cast<CoderObject*>(self)->output_formatting = 0;
+    auto* coder = static_cast<CoderObject*>(self);
+    coder->output_formatting = 0;
+    coder->user_info = resolve_symbol("_swiftEmptyDictionarySingleton");
+    coder->custom_date_function = nullptr;
+    coder->custom_date_context = nullptr;
     return self;
 }
 
@@ -382,14 +402,17 @@ SWIFTCC void formatting_sorted_keys(SWIFT_OUT uint64_t* out) { *out = kFormattin
 SWIFTCC void formatting_without_escaping_slashes(SWIFT_OUT uint64_t* out) { *out = kFormattingWithoutEscapingSlashes; }
 SWIFTCC void encoder_set_formatting(const uint64_t* value, SWIFT_CONTEXT void* self) { static_cast<CoderObject*>(self)->output_formatting = *value; }
 
-SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+SWIFTCC void json_decoder_decode(SWIFT_OUT void* out, void*, uint64_t range, uint64_t storage, void* type, void*, SWIFT_CONTEXT void* self, SWIFT_ERROR void** error) {
     auto* root = new Json;
     if (!json_parse(foundation_data_bytes({range, storage}), *root)) {
         delete root;
         *error = decoding_error("it isn't valid JSON");
         return;
     }
+    CoderObject* const outer = g_current_decoder;
+    g_current_decoder = static_cast<CoderObject*>(self);
     decode_value(type, root, out, error);
+    g_current_decoder = outer;
     delete root;
 }
 
@@ -440,6 +463,30 @@ SWIFTCC FoundationData plist_encoder_encode(const void* value, void* type, void*
     if (*error != nullptr) return foundation_make_data("");
     return foundation_make_data(plist_bytes_from_json(root));
 }
+
+SWIFTCC void coder_ignore_flag(bool, SWIFT_CONTEXT void*) {}
+
+SWIFTCC void* coder_get_user_info(SWIFT_CONTEXT void* self) { return rt_swift_bridgeObjectRetain(static_cast<CoderObject*>(self)->user_info); }
+
+struct UserInfoYield {
+    void (*resume)(void*, bool) SWIFTCC;
+    void** value;
+};
+
+SWIFTCC void user_info_modify_finish(void*, bool) {}
+
+// A yield-once coroutine: the app edits the dictionary where it's stored.
+SWIFTCC UserInfoYield coder_modify_user_info(void*, SWIFT_CONTEXT void* self) { return {user_info_modify_finish, &static_cast<CoderObject*>(self)->user_info}; }
+
+// The enum arrives with its closure in the first two words, which is the only case that needs keeping.
+SWIFTCC void decoder_set_date_strategy(void** strategy, SWIFT_CONTEXT void* self) {
+    auto* coder = static_cast<CoderObject*>(self);
+    coder->custom_date_function = strategy[0];
+    coder->custom_date_context = strategy[1] != nullptr ? rt_swift_retain(strategy[1]) : nullptr;
+}
+
+// Same representation as the String it wraps, so dictionaries keyed by it hash and compare as strings.
+SWIFTCC void coding_user_info_key_init(SWIFT_OUT SwiftString* out, SwiftString raw_value) { *out = raw_value; }
 
 SWIFTCC void decoder_container(SWIFT_OUT ContainerBox** out, void*, void*, void* key_witnesses, void*, void*, SWIFT_CONTEXT Json** self, SWIFT_ERROR void** error) {
     if ((*self)->kind != Json::Kind::Object) {
@@ -555,7 +602,7 @@ SWIFTCC void decoder_unkeyed_container(SWIFT_OUT CoderExistential* out, void*, v
 }
 
 SWIFTCC void* coding_path_empty(void*, void*, SWIFT_CONTEXT void*) { return resolve_symbol("_swiftEmptyArrayStorage"); }
-SWIFTCC void* decoder_user_info(void*, void*, SWIFT_CONTEXT void*) { return resolve_symbol("_swiftEmptyDictionarySingleton"); }
+SWIFTCC void* decoder_user_info(void*, void*, SWIFT_CONTEXT void*) { return g_current_decoder != nullptr ? rt_swift_bridgeObjectRetain(g_current_decoder->user_info) : resolve_symbol("_swiftEmptyDictionarySingleton"); }
 
 SWIFTCC bool value_decode_nil(void*, void*, SWIFT_CONTEXT Json** self) { return (*self)->kind == Json::Kind::Null; }
 
@@ -722,6 +769,13 @@ void* codable_symbol(std::string_view name) {
         {"$s10Foundation11JSONEncoderC16OutputFormattingV10sortedKeysAEvgZ", reinterpret_cast<void*>(formatting_sorted_keys)},
         {"$s10Foundation11JSONEncoderC16OutputFormattingV22withoutEscapingSlashesAEvgZ", reinterpret_cast<void*>(formatting_without_escaping_slashes)},
         {"$s10Foundation11JSONEncoderC16outputFormattingAC06OutputD0VvsTj", reinterpret_cast<void*>(encoder_set_formatting)},
+        {"$s10Foundation11JSONDecoderC11allowsJSON5SbvsTj", reinterpret_cast<void*>(coder_ignore_flag)},
+        {"$s10Foundation11JSONDecoderC8userInfoSDys010CodingUserD3KeyVypGvgTj", reinterpret_cast<void*>(coder_get_user_info)},
+        {"$s10Foundation11JSONDecoderC8userInfoSDys010CodingUserD3KeyVypGvMTj", reinterpret_cast<void*>(coder_modify_user_info)},
+        {"$s10Foundation11JSONEncoderC8userInfoSDys010CodingUserD3KeyVypGvgTj", reinterpret_cast<void*>(coder_get_user_info)},
+        {"$s10Foundation11JSONEncoderC8userInfoSDys010CodingUserD3KeyVypGvMTj", reinterpret_cast<void*>(coder_modify_user_info)},
+        {"$s10Foundation11JSONDecoderC20dateDecodingStrategyAC04DatedE0OvsTj", reinterpret_cast<void*>(decoder_set_date_strategy)},
+        {"$ss17CodingUserInfoKeyV8rawValueABSgSS_tcfC", reinterpret_cast<void*>(coding_user_info_key_init)},
         {"$s10Foundation19PropertyListDecoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListEncoderCMa", reinterpret_cast<void*>(coder_access)},
         {"$s10Foundation19PropertyListDecoderCACycfc", reinterpret_cast<void*>(coder_init)},
