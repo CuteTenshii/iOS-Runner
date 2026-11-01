@@ -267,6 +267,7 @@ constexpr FrozenField kSecondArgument = {0, 0, 1, false};
 const std::unordered_map<std::string_view, std::vector<FrozenField>>& frozen_layouts() {
     static const std::unordered_map<std::string_view, std::vector<FrozenField>> table = {
         {"_$s10Foundation11JSONEncoderC16OutputFormattingVMn", {kWord}},
+        {"_$sSo9NSRunLoopC10FoundationE17SchedulerTimeTypeV6StrideVMn", {kWord}},
         {"_$s7SwiftUI15ModifiedContentVMn", {kFirstArgument, kSecondArgument}},
         {"_$s7SwiftUI7BindingVMn", {kWord, kReference, kFirstArgument}},
         {"_$s7SwiftUI4TextVMn", {kWord, kReference, kWord, kReference}},
@@ -407,6 +408,8 @@ Metadata* frozen_layout_type(const std::string& key, const std::string& symbol, 
     if (symbol == "_$sScCMn") return named_type(key, kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, kPointerSize, kPointerSize, 0, arguments);
     // Payload-free framework enums are plain tag words; a reference's layout would read small tags as Optional.none.
     if (symbol == "_$s7SwiftUI11ColorSchemeOMn" || symbol == "_$s7SwiftUI8EditModeOMn" || symbol == "_$s7SwiftUI22UserInterfaceSizeClassOMn" || symbol == "_$s7SwiftUI10ProminenceOMn") return pod_type(symbol, 8);
+    // Frozen as finished or failure(F), which is the same shape as an Optional of F.
+    if (symbol == "_$s7Combine11SubscribersO10CompletionOMn" && !arguments.empty()) return optional_of(static_cast<Metadata*>(arguments[0]));
     if (symbol == "_$ss15ContinuousClockVMn") return pod_type("ContinuousClock", 0);
     if (symbol == "_$ss15ContinuousClockV7InstantVMn") return named_type("ContinuousClock.Instant", kKindStruct, new Layout{LayoutKind::Pod, {}, nullptr}, 16, 8, 0);
     if (symbol == "_$sScPMn") return pod_type("TaskPriority", 1);

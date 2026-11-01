@@ -13,3 +13,4 @@ int64_t dispatch_next_deadline();
 
 // Queues a function for the guest thread, to run outside whatever guest code is executing now.
 void dispatch_enqueue(void (*function)(void*), void* context);
+void dispatch_enqueue_after(int64_t delay_nanoseconds, void (*function)(void*), void* context);
