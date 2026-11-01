@@ -317,8 +317,40 @@ SWIFTCC bool path_uses_interface(const uint64_t* type, SWIFT_CONTEXT const uint6
 
 }  // namespace
 
+namespace {
+
+// Android has no home screen widgets of an iOS app's to refresh, so reloading them does nothing.
+struct WidgetCenterMetadataResponse {
+    void* metadata;
+    size_t state;
+};
+
+void* widget_center_metadata() {
+    static void* block[12] = {};
+    return sized_class_metadata(block, reinterpret_cast<void*>(free), 16);
+}
+
+SWIFTCC WidgetCenterMetadataResponse widget_center_access(size_t) { return {widget_center_metadata(), 0}; }
+
+SWIFTCC void* widget_center_shared() {
+    static auto* const center = [] {
+        auto* object = static_cast<void**>(calloc(2, sizeof(void*)));
+        object[0] = widget_center_metadata();
+        object[1] = reinterpret_cast<void*>(uintptr_t{1});
+        return object;
+    }();
+    return rt_swift_retain(center);
+}
+
+SWIFTCC void widget_center_reload(SWIFT_CONTEXT void*) {}
+
+}  // namespace
+
 void* device_symbol(std::string_view name) {
     static const std::unordered_map<std::string_view, void*> table = {
+        {"$s9WidgetKit0A6CenterCMa", reinterpret_cast<void*>(widget_center_access)},
+        {"$s9WidgetKit0A6CenterC6sharedACvgZ", reinterpret_cast<void*>(widget_center_shared)},
+        {"$s9WidgetKit0A6CenterC18reloadAllTimelinesyyFTj", reinterpret_cast<void*>(widget_center_reload)},
         {"$s7Network13NWPathMonitorCACycfc", reinterpret_cast<void*>(monitor_init)},
         {"$s7Network13NWPathMonitorC17pathUpdateHandleryAA0B0VcSgvs", reinterpret_cast<void*>(monitor_set_handler)},
         {"$s7Network13NWPathMonitorC5start5queueySo012OS_dispatch_E0C_tF", reinterpret_cast<void*>(monitor_start)},
