@@ -427,6 +427,56 @@ SWIFTCC bool equatable_equal(const void* left, const void* right, void* type, vo
     return equal(left, right, type, table, type);
 }
 
+using CompactMapClosure = SWIFTCC void (*)(SWIFT_OUT void*, const void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+
+// Sequence.compactMap for what apps call it on through generic code: arrays and sets.
+SWIFTCC void* sequence_compact_map(const void* transform, void* context, void* sequence_type, void* result_type, void*, SWIFT_CONTEXT const uint64_t* self, SWIFT_ERROR void** error) {
+    const auto* witnesses = witnesses_of(result_type);
+    std::vector<void*> results;
+    const auto visit = [&](const void* element) {
+        if (*error != nullptr) return;
+        // Room for the Optional's tag byte, for payloads without extra inhabitants.
+        void* mapped = calloc(1, witnesses->size + sizeof(void*));
+        reinterpret_cast<CompactMapClosure>(const_cast<void*>(transform))(mapped, element, context, error);
+        if (*error == nullptr && witnesses->get_enum_tag_single_payload(mapped, 1, result_type) == 0)
+            results.push_back(mapped);
+        else
+            free(mapped);
+    };
+    void* storage = reinterpret_cast<void*>(*self & kBridgePointerMask);
+    if (void* element = array_element_type(sequence_type)) {
+        char* elements;
+        const size_t count = array_storage_contents(storage, element, &elements);
+        for (size_t i = 0; i < count; ++i) visit(elements + i * witnesses_of(element)->stride);
+    } else if (set_element_type(sequence_type) != nullptr) {
+        visit_set_elements(storage, visit);
+    } else {
+        engine_log("STOP: compactMap on a sequence that is neither an array nor a set");
+        abort();
+    }
+    char* out;
+    void* array = make_array_storage(result_type, *error == nullptr ? results.size() : 0, &out);
+    for (size_t i = 0; i < results.size(); ++i) {
+        if (*error == nullptr) witnesses->initialize_with_take(out + i * witnesses->stride, results[i], result_type);
+        free(results[i]);
+    }
+    return array;
+}
+
+// Collection.first for what apps call it on through generic code: arrays.
+SWIFTCC void collection_first(SWIFT_OUT void* out, void* collection_type, void*, SWIFT_CONTEXT const uint64_t* self) {
+    void* element = array_element_type(collection_type);
+    if (element == nullptr) {
+        engine_log("STOP: Collection.first on something other than an array");
+        abort();
+    }
+    char* elements;
+    const size_t count = array_storage_contents(reinterpret_cast<void*>(*self & kBridgePointerMask), element, &elements);
+    const auto* witnesses = witnesses_of(element);
+    if (count != 0) witnesses->initialize_with_copy(out, elements, element);
+    witnesses->store_enum_tag_single_payload(out, count != 0 ? 0 : 1, 1, element);
+}
+
 // A framework OptionSet is its raw value, whatever the type's witness table says.
 SWIFTCC void option_set_init(SWIFT_OUT void* out, const void* raw, void* type, void*) { memcpy(out, raw, witnesses_of(type)->size); }
 
@@ -770,6 +820,8 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"$sSo13os_log_type_ta0A0E7defaultABvgZ", reinterpret_cast<void*>(log_type_getter<0x00>)},
         {"$sSo13os_log_type_ta0A0E5faultABvgZ", reinterpret_cast<void*>(log_type_getter<0x11>)},
         {"$sSS6append10contentsOfyx_tSTRzSJ7ElementRtzlF", reinterpret_cast<void*>(string_append_sequence)},
+        {"$sSTsE10compactMapySayqd__Gqd__Sg7ElementQzKXEKlF", reinterpret_cast<void*>(sequence_compact_map)},
+        {"$sSlsE5first7ElementQzSgvg", reinterpret_cast<void*>(collection_first)},
         {"$sSH13_rawHashValue4seedS2i_tFTj", reinterpret_cast<void*>(hashable_raw_value)},
         {"$sSH4hash4intoys6HasherVz_tFTj", reinterpret_cast<void*>(hashable_hash_into)},
         {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
