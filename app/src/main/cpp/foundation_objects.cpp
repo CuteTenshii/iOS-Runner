@@ -1,4 +1,10 @@
 #include "foundation_internal.h"
+
+#include <algorithm>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "symbols.h"
 #include "uikit_internal.h"
 #include "uuid.h"
@@ -575,6 +581,66 @@ void add_foundation_objects_symbols(SymbolTable& table) {
     });
 }
 
+namespace {
+
+struct ProgressState {
+    int64_t total = 0;
+    int64_t completed = 0;
+    bool cancelled = false;
+    void* cancellation_handler = nullptr;
+    std::vector<std::pair<void*, int64_t>> children;
+};
+
+std::unordered_map<void*, ProgressState>& progress_states() {
+    static std::unordered_map<void*, ProgressState> states;
+    return states;
+}
+
+double progress_fraction(void* progress) {
+    const ProgressState& state = progress_states()[progress];
+    if (state.total <= 0) return 0;
+    double done = static_cast<double>(state.completed);
+    for (const auto& [child, pending] : state.children) done += progress_fraction(child) * static_cast<double>(pending);
+    return std::min(done / static_cast<double>(state.total), 1.0);
+}
+
+void* new_progress(int64_t total) {
+    void* progress = objc_framework_object("NSProgress");
+    progress_states()[progress].total = total;
+    return progress;
+}
+
+void register_progress_methods() {
+    const auto with_total = reinterpret_cast<const void*>(+[](void*, const char*, int64_t total) { return new_progress(total); });
+    objc_register_method("+[NSProgress discreteProgressWithTotalUnitCount:]", with_total);
+    objc_register_method("+[NSProgress progressWithTotalUnitCount:]", with_total);
+    objc_register_method("-[NSProgress totalUnitCount]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_states()[self].total; }));
+    objc_register_method("-[NSProgress setTotalUnitCount:]", reinterpret_cast<const void*>(+[](void* self, const char*, int64_t total) { progress_states()[self].total = total; }));
+    objc_register_method("-[NSProgress completedUnitCount]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_states()[self].completed; }));
+    objc_register_method("-[NSProgress setCompletedUnitCount:]", reinterpret_cast<const void*>(+[](void* self, const char*, int64_t completed) { progress_states()[self].completed = completed; }));
+    objc_register_method("-[NSProgress fractionCompleted]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_fraction(self); }));
+    objc_register_method("-[NSProgress isFinished]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_fraction(self) >= 1.0; }));
+    objc_register_method("-[NSProgress isCancelled]", reinterpret_cast<const void*>(+[](void* self, const char*) { return progress_states()[self].cancelled; }));
+    objc_register_method("-[NSProgress cancel]", reinterpret_cast<const void*>(+[](void* self, const char*) {
+        // Copied first: reaching a child's state can grow the table this reference points into.
+        const auto children = progress_states()[self].children;
+        progress_states()[self].cancelled = true;
+        if (void* handler = progress_states()[self].cancellation_handler) {
+            using Invoke = void (*)(void*);
+            reinterpret_cast<Invoke>(static_cast<BlockHeader*>(handler)->invoke)(handler);
+        }
+        using Cancel = void (*)(void*, const char*);
+        for (const auto& [child, pending] : children) reinterpret_cast<Cancel>(const_cast<void*>(objc_method_for(child, "cancel")))(child, "cancel");
+    }));
+    objc_register_method("-[NSProgress setCancellationHandler:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* handler) { progress_states()[self].cancellation_handler = handler != nullptr ? darwin_block_copy(handler) : nullptr; }));
+    objc_register_method("-[NSProgress addChild:withPendingUnitCount:]", reinterpret_cast<const void*>(+[](void* self, const char*, void* child, int64_t pending) {
+        rt_swift_retain(child);
+        progress_states()[self].children.emplace_back(child, pending);
+    }));
+}
+
+}  // namespace
+
 void register_foundation_objects_classes() {
     objc_register_method("-[WKWebsiteDataStore httpCookieStore]", reinterpret_cast<const void*>(cookie_store));
     objc_register_method("-[WKWebView layer]", reinterpret_cast<const void*>(web_view_layer));
@@ -590,6 +656,7 @@ void register_foundation_objects_classes() {
     objc_register_method("-[NSURLSessionConfiguration setTimeoutIntervalForRequest:]", reinterpret_cast<const void*>(ignore_message_with_double));
     objc_register_method("+[NSURLSession sessionWithConfiguration:]", reinterpret_cast<const void*>(url_session_with_configuration));
     objc_register_method("-[NSProcessInfo globallyUniqueString]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* { return new_nsstring(uuid4()); }));
+    register_progress_methods();
     // One shared object: main-thread work runs from the guest's run loop, not from this one.
     objc_register_method("+[NSRunLoop mainRunLoop]", reinterpret_cast<const void*>(+[](void*, const char*) -> void* {
                              static void* const loop = objc_framework_object("NSRunLoop");
