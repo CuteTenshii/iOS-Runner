@@ -94,11 +94,14 @@ int application_main(int, char**, void*, void* delegate_name) {
     concurrency_drain();
     engine_log("UIKIT: entering the run loop");
     for (;;) {
+        uikit_render_if_changed();
         const int action = engine_wait_for_action(concurrency_next_deadline());
         if (action == kEngineEventRan)
             concurrency_fire_timers();
         else if (action < 0)
             return 0;
+        else
+            uikit_run_action(action);
         concurrency_drain();
     }
 }
