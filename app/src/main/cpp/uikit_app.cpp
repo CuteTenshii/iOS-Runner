@@ -76,11 +76,11 @@ void connect_scene() {
 
 // Every app installed on iOS has a signed profile, and some refuse to start without one. Signing isn't implemented,
 // so a bundle gets this stand-in: it names no certificates and proves nothing, it only lets the app read a profile.
-void write_placeholder_profile() {
-    const std::string path = engine_bundle_dir() + "/embedded.mobileprovision";
+void write_placeholder_profile(const std::string& bundle) {
+    const std::string path = bundle + "/embedded.mobileprovision";
     if (access(path.c_str(), F_OK) == 0) return;
     PlistValue info;
-    plist_read_file(engine_bundle_dir() + "/Info.plist", info);
+    plist_read_file(bundle + "/Info.plist", info);
     const std::string identifier = info.string_at("CFBundleIdentifier");
     std::ofstream file(path, std::ios::trunc);
     // A real profile's plist sits inside a signature blob, and parsers expect something before it.
@@ -110,9 +110,22 @@ void write_placeholder_profile() {
 )";
 }
 
+// App extensions are checked for a profile of their own.
+void write_placeholder_profiles() {
+    write_placeholder_profile(engine_bundle_dir());
+    const std::string plugins = engine_bundle_dir() + "/PlugIns";
+    DIR* directory = opendir(plugins.c_str());
+    if (directory == nullptr) return;
+    while (const dirent* entry = readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.size() > 6 && name.compare(name.size() - 6, 6, ".appex") == 0) write_placeholder_profile(plugins + "/" + name);
+    }
+    closedir(directory);
+}
+
 int application_main(int, char**, void*, void* delegate_name) {
     objc_set_uikit_active();
-    write_placeholder_profile();
+    write_placeholder_profiles();
     engine_log("UIKIT: UIApplicationMain, delegate %s", delegate_name != nullptr ? nsstring_text(delegate_name).c_str() : "(none)");
     g_application = objc_framework_object("UIApplication");
     if (delegate_name != nullptr) {

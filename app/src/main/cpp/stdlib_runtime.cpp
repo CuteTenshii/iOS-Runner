@@ -679,6 +679,30 @@ SWIFTCC int64_t hashable_raw_value(int64_t seed, void* type, void* table, SWIFT_
     return raw(seed, type, table, self);
 }
 
+// hash(into:)'s dispatch thunk: as for the raw value, framework values hash by what they hold.
+SWIFTCC void hashable_hash_into(HasherState* hasher, void* type, void* table, SWIFT_CONTEXT const void* self) {
+    if (type == type_system_symbol("$sSSN")) {
+        string_hash_into(hasher, *static_cast<const SwiftString*>(self));
+        return;
+    }
+    const char* name = foreign_type_name(type);
+    if (is_text_box_type(name)) {
+        string_hash_into(hasher, swift_string_from_utf8(foundation_url_text(*static_cast<void* const*>(self))));
+        return;
+    }
+    if (const auto* witnesses = witnesses_of(type); name != nullptr || (witnesses->flags & kFlagNonPod) == 0) {
+        string_hash_into(hasher, swift_string_from_utf8(std::string(static_cast<const char*>(self), witnesses->size)));
+        return;
+    }
+    using HashInto = SWIFTCC void (*)(HasherState*, void*, void*, SWIFT_CONTEXT const void*);
+    const auto hash_into = reinterpret_cast<HashInto>(const_cast<void*>(swift_runtime_find_witness_named(static_cast<const char*>(static_cast<void**>(table)[0]), "_$sSH4hash4intoys6HasherVz_tFTq")));
+    if (hash_into == nullptr) {
+        engine_log("STOP: hash(into:) of a type with no witness");
+        abort();
+    }
+    hash_into(hasher, type, table, self);
+}
+
 // BidirectionalCollection<String>.joined: an Array is the only such collection this runtime hands out.
 SWIFTCC SwiftString strings_joined(SwiftString separator, void* type, void*, SWIFT_CONTEXT const uint64_t* self) {
     if (array_element_type(type) == nullptr) {
@@ -724,6 +748,7 @@ void add_stdlib_runtime_symbols(SymbolTable& table) {
         {"$sSo13os_log_type_ta0A0E5faultABvgZ", reinterpret_cast<void*>(log_type_getter<0x11>)},
         {"$sSS6append10contentsOfyx_tSTRzSJ7ElementRtzlF", reinterpret_cast<void*>(string_append_sequence)},
         {"$sSH13_rawHashValue4seedS2i_tFTj", reinterpret_cast<void*>(hashable_raw_value)},
+        {"$sSH4hash4intoys6HasherVz_tFTj", reinterpret_cast<void*>(hashable_hash_into)},
         {"$sSS5countSivg", reinterpret_cast<void*>(string_count)},
         {"$ss5print_9separator10terminatoryypd_S2StF", reinterpret_cast<void*>(swift_print)},
         {"$sSS10describingSSx_tclufC", reinterpret_cast<void*>(string_describing)},

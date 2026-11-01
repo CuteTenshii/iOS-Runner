@@ -342,6 +342,76 @@ SWIFTCC SwiftString date_formatted(const void*, const void*, SWIFT_CONTEXT const
     return swift_string_from_utf8(text);
 }
 
+SWIFTCC DataValue data_subdata(int64_t lower, int64_t upper, uint64_t range, uint64_t storage) {
+    const std::string bytes = data_bytes(range, storage);
+    if (lower < 0 || upper < lower || static_cast<size_t>(upper) > bytes.size()) return make_data({});
+    return make_data(bytes.substr(static_cast<size_t>(lower), static_cast<size_t>(upper - lower)));
+}
+
+SWIFTCC int64_t data_count(uint64_t range, uint64_t storage) { return static_cast<int64_t>(data_bytes(range, storage).size()); }
+
+SWIFTCC void data_append_data(uint64_t range, uint64_t storage, SWIFT_CONTEXT DataValue* self) {
+    *self = make_data(data_bytes(self->range, self->storage) + data_bytes(range, storage));
+}
+
+char* copied_data_bytes(uint64_t range, uint64_t storage, size_t& size) {
+    const std::string bytes = data_bytes(range, storage);
+    size = bytes.size();
+    auto* copy = static_cast<char*>(malloc(size + 1));
+    memcpy(copy, bytes.data(), size);
+    return copy;
+}
+
+using UnsafeBytesBody = SWIFTCC void (*)(SWIFT_OUT void*, const void*, const void*, SWIFT_CONTEXT void*, SWIFT_ERROR void**);
+
+// The body sees a copy, which is fine for reading, the only thing this form of the call allows.
+SWIFTCC void data_with_unsafe_bytes(SWIFT_OUT void* out, UnsafeBytesBody body, void* context, void*, uint64_t range, uint64_t storage, SWIFT_CONTEXT void*, SWIFT_ERROR void** error) {
+    // Plain memory: a local std::string's cleanup around this Swift call doesn't assemble.
+    size_t size = 0;
+    char* copy = copied_data_bytes(range, storage, size);
+    body(out, copy, copy + size, context, error);
+    free(copy);
+}
+
+const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+SWIFTCC SwiftString data_base64_string(uint64_t, uint64_t range, uint64_t storage) {
+    std::string out;
+    uint32_t bits = 0;
+    int count = 0;
+    for (const char c : data_bytes(range, storage)) {
+        bits = (bits << 8) | static_cast<uint8_t>(c);
+        count += 8;
+        while (count >= 6) {
+            count -= 6;
+            out += kBase64Alphabet[(bits >> count) & 63];
+        }
+    }
+    if (count > 0) out += kBase64Alphabet[(bits << (6 - count)) & 63];
+    while (out.size() % 4 != 0) out += '=';
+    return swift_string_from_utf8(out);
+}
+
+// Nil as Optional<Data> spells it: a storage tag no real value has.
+SWIFTCC DataValue data_from_base64(SwiftString text, uint64_t) {
+    constexpr uint64_t kOptionalDataNil = 0xf000000000000000ULL;
+    std::string out;
+    uint32_t bits = 0;
+    int count = 0;
+    for (const char c : swift_string_to_utf8(text)) {
+        if (c == '=') break;
+        const char* found = c != '\0' ? strchr(kBase64Alphabet, c) : nullptr;
+        if (found == nullptr) return {0, kOptionalDataNil};
+        bits = (bits << 6) | static_cast<uint32_t>(found - kBase64Alphabet);
+        count += 6;
+        if (count >= 8) {
+            count -= 8;
+            out += static_cast<char>((bits >> count) & 0xff);
+        }
+    }
+    return make_data(out);
+}
+
 SWIFTCC SwiftString string_from_nsstring(void* object) { return swift_string_from_utf8(nsstring_text(object)); }
 
 SWIFTCC SwiftString string_from_utf8_pointer(const char* text) { return text != nullptr ? swift_string_from_utf8(text) : SwiftString{0, 0}; }
@@ -524,6 +594,12 @@ void add_foundation_request_symbols(SymbolTable& table) {
         {"$sSD10FoundationE19_bridgeToObjectiveCSo12NSDictionaryCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"$sSa10FoundationE19_bridgeToObjectiveCSo7NSArrayCyF", reinterpret_cast<void*>(collection_bridge_to_objc)},
         {"swift_allocError", reinterpret_cast<void*>(swift_alloc_error)},
+        {"$s10Foundation4DataV7subdata2inACSnySiG_tF", reinterpret_cast<void*>(data_subdata)},
+        {"$s10Foundation4DataV5countSivg", reinterpret_cast<void*>(data_count)},
+        {"$s10Foundation4DataV6appendyyACF", reinterpret_cast<void*>(data_append_data)},
+        {"$s10Foundation4DataV15withUnsafeBytesyxxSWKXEKlF", reinterpret_cast<void*>(data_with_unsafe_bytes)},
+        {"$s10Foundation4DataV19base64EncodedString7optionsSSSo27NSDataBase64EncodingOptionsV_tF", reinterpret_cast<void*>(data_base64_string)},
+        {"$s10Foundation4DataV13base64Encoded7optionsACSgSSh_So27NSDataBase64DecodingOptionsVtcfC", reinterpret_cast<void*>(data_from_base64)},
         {"$sSS10FoundationEySSSo8NSStringCcfC", reinterpret_cast<void*>(string_from_nsstring)},
         {"$sSS10FoundationE10utf8StringSSSgSPys4Int8VG_tcfC", reinterpret_cast<void*>(string_from_utf8_pointer)},
         {"$sSo8NSStringC10FoundationE13stringLiteralABs12StaticStringV_tcfC", reinterpret_cast<void*>(nsstring_from_static)},
