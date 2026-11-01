@@ -1,6 +1,7 @@
 #include "foundation_internal.h"
 #include "symbols.h"
 #include "uikit_internal.h"
+#include "uuid.h"
 
 #include <cmath>
 
@@ -719,15 +720,7 @@ SWIFTCC void uuid_from_string(SWIFT_OUT URLBox** out, SwiftString text) {
     *out = new_url(value);
 }
 
-SWIFTCC void uuid_init(SWIFT_OUT URLBox** out) {
-    uint8_t bytes[16];
-    arc4random_buf(bytes, sizeof bytes);
-    bytes[6] = (bytes[6] & 0x0F) | 0x40;
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    char text[37];
-    snprintf(text, sizeof text, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
-    *out = new_url(text);
-}
+SWIFTCC void uuid_init(SWIFT_OUT URLBox** out) { *out = new_url(uuid4()); }
 
 SWIFTCC SwiftString uuid_string(SWIFT_CONTEXT URLBox** self) { return swift_string_from_utf8(*(*self)->text); }
 

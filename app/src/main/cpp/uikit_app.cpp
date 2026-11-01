@@ -9,6 +9,7 @@
 #include "plist.h"
 #include "uikit_internal.h"
 #include "uikit_shim.h"
+#include "uuid.h"
 
 using foundation::new_nsstring;
 using foundation::nsstring_text;
@@ -83,15 +84,14 @@ void connect_scene() {
 // a bundle gets one with values of the right form. It names no certificates and proves nothing.
 constexpr const char* kProfileTeam = "RUNNER0000";
 
-// Stable per bundle, in the form of a version 4 UUID.
-std::string profile_uuid(const std::string& identifier) {
-    uint64_t high = std::hash<std::string>{}(identifier);
-    uint64_t low = std::hash<std::string>{}(identifier + "#profile");
-    high = (high & 0xffffffffffff0fffULL) | 0x4000ULL;
-    low = (low & 0x3fffffffffffffffULL) | 0x8000000000000000ULL;
-    char text[37];
-    snprintf(text, sizeof text, "%08X-%04X-%04X-%04X-%012llX", static_cast<uint32_t>(high >> 32), static_cast<uint32_t>((high >> 16) & 0xffff), static_cast<uint32_t>(high & 0xffff), static_cast<uint32_t>(low >> 48), static_cast<unsigned long long>(low & 0xffffffffffffULL));
-    return text;
+// Rewriting a profile must not change its identity, so a UUID already written is kept.
+std::string profile_uuid(const std::string& path) {
+    constexpr std::string_view kUuidKey = "<key>UUID</key><string>";
+    constexpr size_t kUuidLength = 36;
+    std::ifstream existing(path, std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(existing)), std::istreambuf_iterator<char>());
+    const size_t found = contents.find(kUuidKey);
+    return found == std::string::npos ? uuid4() : contents.substr(found + kUuidKey.size(), kUuidLength);
 }
 
 // A profile of ours can be replaced when this format changes; a real one never is.
@@ -111,6 +111,7 @@ void write_placeholder_profile(const std::string& bundle) {
     std::string name = info.string_at("CFBundleName");
     if (name.empty()) name = identifier;
     const std::string team = kProfileTeam;
+    const std::string uuid = profile_uuid(path);
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
     // A real profile's plist sits inside a CMS envelope, which opens with a DER sequence; parsers look past it.
     file.write("\x30\x80", 2);
@@ -134,7 +135,7 @@ void write_placeholder_profile(const std::string& bundle) {
 <key>TeamIdentifier</key><array><string>)" << team << R"(</string></array>
 <key>TeamName</key><string>)" << team << R"(</string>
 <key>TimeToLive</key><integer>29200</integer>
-<key>UUID</key><string>)" << profile_uuid(identifier) << R"(</string>
+<key>UUID</key><string>)" << uuid << R"(</string>
 <key>Version</key><integer>1</integer>
 </dict></plist>
 )";
